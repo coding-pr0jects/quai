@@ -8,13 +8,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/smbss1/quai/internal/config"
-	"github.com/smbss1/quai/internal/forge"
-	"github.com/smbss1/quai/internal/glob"
-	"github.com/smbss1/quai/internal/lock"
-	"github.com/smbss1/quai/internal/patchid"
-	"github.com/smbss1/quai/internal/repo"
-	"github.com/smbss1/quai/internal/verify"
+	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/forge"
+	"github.com/coding-pr0jects/quai/internal/glob"
+	"github.com/coding-pr0jects/quai/internal/lock"
+	"github.com/coding-pr0jects/quai/internal/patchid"
+	"github.com/coding-pr0jects/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/verify"
 )
 
 type Action string

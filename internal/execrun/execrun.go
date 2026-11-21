@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/smbss1/quai/internal/lock"
+	"github.com/coding-pr0jects/quai/internal/lock"
 )
 
 const gracePeriod = 5 * time.Second

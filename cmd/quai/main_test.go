@@ -87,7 +87,7 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 		t.Fatalf("tier exited %d: %s", code, errBuf.String())
 	}
 	var tr struct {
-		Tier     string                       `json:"tier"`
+		Tier     string                    `json:"tier"`
 		Receipts map[string]map[string]any `json:"receipts"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &tr); err != nil || tr.Tier != "gate-only" || tr.Receipts["fast"]["valid"] != true {

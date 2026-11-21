@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smbss1/quai/internal/config"
-	"github.com/smbss1/quai/internal/repo"
-	"github.com/smbss1/quai/internal/verify"
+	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/verify"
 )
 
 func initHookRepo(t *testing.T) (string, *repo.ExecGit) {

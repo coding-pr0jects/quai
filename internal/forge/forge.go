@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/smbss1/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/config"
 )
 
 type PullRequest struct {

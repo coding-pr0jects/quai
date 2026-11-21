@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/smbss1/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/repo"
 )
 
 func TestCompareSurvivesCleanRebaseAndDetectsDrift(t *testing.T) {

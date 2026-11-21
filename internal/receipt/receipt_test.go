@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smbss1/quai/internal/config"
-	"github.com/smbss1/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/repo"
 )
 
 func TestStoreWriteLookupAndPrune(t *testing.T) {

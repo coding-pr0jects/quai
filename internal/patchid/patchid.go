@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/smbss1/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/repo"
 )
 
 const (

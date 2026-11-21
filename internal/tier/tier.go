@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/smbss1/quai/internal/config"
-	"github.com/smbss1/quai/internal/glob"
-	"github.com/smbss1/quai/internal/receipt"
-	"github.com/smbss1/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/glob"
+	"github.com/coding-pr0jects/quai/internal/receipt"
+	"github.com/coding-pr0jects/quai/internal/repo"
 )
 
 var defaultTestGlobs = []string{

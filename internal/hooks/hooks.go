@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/smbss1/quai/internal/config"
-	"github.com/smbss1/quai/internal/repo"
-	"github.com/smbss1/quai/internal/verify"
+	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/verify"
 )
 
 const ManagedMarker = "# managed by quai"

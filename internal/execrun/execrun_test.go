@@ -64,11 +64,11 @@ func TestRunCleansUpChildProcessGroupOnCancel(t *testing.T) {
 func TestRunPropagatesExitCode(t *testing.T) {
 	var out bytes.Buffer
 	code, err := Run(context.Background(), Request{
-		Dir:      t.TempDir(),
-		Argv:     []string{"sh", "-c", "echo hi; exit 7"},
-		Stdout:   &out,
-		Stderr:   &out,
-		Timeout:  5 * time.Second,
+		Dir:     t.TempDir(),
+		Argv:    []string{"sh", "-c", "echo hi; exit 7"},
+		Stdout:  &out,
+		Stderr:  &out,
+		Timeout: 5 * time.Second,
 	})
 	if code != 7 || err == nil {
 		t.Fatalf("got code=%d err=%v, want code=7 and error", code, err)
