@@ -1,0 +1,4 @@
+/quai
+/bin/
+*.test
+coverage.out
