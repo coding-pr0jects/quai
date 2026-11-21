@@ -67,7 +67,7 @@ Primary sources: `https://useland.dev/`, `https://useland.dev/how-it-works`, `ht
 ### Pros and cons
 
 - **Pros:** Tests N parallel branches in one run instead of N sequential queue jobs; kernel-level dependency tracking eliminates stale manual input lists; entity-level merge eliminates most same-file agent conflicts; catches test-weakening cheats; never asks for GitHub write tokens; per-second pricing is cheaper than GitHub Actions.
-- **Cons:** **No Docker, docker compose, or testcontainers inside tests**, which blocks repositories like `agent-studio` that run sandbox and SSH-container tests; Linux-only execution; closed-source hosted backend requiring code upload to Ataraxy Labs; skips only at whole-command granularity; no flaky-test quarantine; no PR risk tiering or post-rebase review verdict survival.
+- **Cons:** **No Docker, docker compose, or testcontainers inside tests**, which blocks repositories that run sandbox and SSH-container tests; Linux-only execution; closed-source hosted backend requiring code upload to Ataraxy Labs; skips only at whole-command granularity; no flaky-test quarantine; no PR risk tiering or post-rebase review verdict survival.
 
 ## 3. Deep dive: `github.com/jayehmke/prove`
 

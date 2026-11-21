@@ -15,7 +15,7 @@ Coding agents running in parallel worktrees on one machine lose time to four rec
 
 `quai` solves these bottlenecks through deterministic local state stored in the repository's shared git directory. Every command works for coding agents, humans, and git hooks, and supports `--json` for machine parsing.
 
-The first reference consumer is `agent-studio`. Every feature in v0.1 must remain repository-agnostic and work in any git project without requiring Node, Python, or `mise`.
+`quai` is repository-agnostic and works in any git project without requiring Node, Python, or `mise`.
 
 ## 2. Architecture and domain model
 
@@ -127,7 +127,7 @@ global_paths = []         # globs that disable optimistic merge when modified on
 
 All three values are validated 40-character hexadecimal git SHAs before substitution, preventing shell injection.
 
-### Reference `.quai.toml` for `agent-studio`
+### Example `.quai.toml` for a TypeScript monorepo
 
 ```toml
 version = 1
@@ -138,7 +138,7 @@ heavy = 2
 
 [[steps]]
 name = "fast"
-run = "node scripts/check.ts --since {{base}} && pnpm typecheck"
+run = "pnpm lint && pnpm typecheck"
 inputs = ["**"]
 lockfiles = ["pnpm-lock.yaml"]
 hook = "pre-push"
@@ -146,7 +146,7 @@ slots = 0
 
 [[steps]]
 name = "verify"
-run = "node scripts/sandbox.ts exec pnpm verify --changed --since {{base}}"
+run = "pnpm test --changed --since {{base}}"
 inputs = ["**"]
 lockfiles = ["pnpm-lock.yaml"]
 pool = "heavy"
@@ -156,17 +156,14 @@ timeout = "25m"
 [tiers]
 default = "diff-audit"
 full_live = [
-	"apps/desktop/src/renderer/**",
-	"apps/desktop/src/main/**",
-	"packages/protocol/src/**",
-	"formal/**"
+	"apps/web/src/**",
+	"apps/api/src/**",
+	"packages/protocol/src/**"
 ]
 gate_only = [
 	"docs/**",
 	"*.md",
-	".oxfmtrc.jsonc",
-	"eslint.config.js",
-	"oxlint.config.ts"
+	"eslint.config.js"
 ]
 test_globs = [
 	"**/*.test.ts",
@@ -178,7 +175,7 @@ escalate_on_test_tamper = true
 [land]
 method = "squash"
 optimistic_merge = true
-required_checks = ["check", "test", "conventions"]
+required_checks = ["check", "test"]
 global_paths = [
 	"package.json",
 	"pnpm-lock.yaml",
@@ -186,8 +183,7 @@ global_paths = [
 	"tsconfig.base.json",
 	"mise.toml",
 	"packages/protocol/**",
-	".github/**",
-	"sandbox/**"
+	".github/**"
 ]
 ```
 
@@ -302,7 +298,7 @@ Classifies the current branch diff against the base into a verification risk tie
 	"base_sha": "99887766...",
 	"tree_sha": "e5f6a7b8...",
 	"clean": true,
-	"triggers": ["apps/agent-host/src/sessions/sessions.ts"],
+	"triggers": ["apps/api/src/sessions/sessions.ts"],
 	"pure_renames": 0,
 	"tests_tampered": [],
 	"receipts": {
@@ -449,7 +445,7 @@ For a step declaring `pool = "heavy"` and `slots = 1` with `[slots] heavy = 2`, 
 
 ## 7. Verification plan and delivery units
 
-Build v0.1 in six small, verifiable commits in `/home/samuel/Documents/Projects/quai`, proving each unit with `go test -race ./...` before starting the next:
+Build v0.1 in six small, verifiable commits, proving each unit with `go test -race ./...` before starting the next:
 
 | Unit | Scope | Verification proof |
 |---|---|---|
@@ -458,7 +454,7 @@ Build v0.1 in six small, verifiable commits in `/home/samuel/Documents/Projects/
 | 3 | `internal/receipt` and `internal/verify` runner | Integration test on a temp repo proving fingerprint reuse across unrelated commits, mutation guard refusal on `--fix` or dirty write, pruning, and orphan cleanup on `SIGTERM` |
 | 4 | `internal/tier` and `internal/patchid` | Temp git repo tests covering `R100` renames, `tests_tampered` escalation, tier precedence, clean rebase returning `SURVIVES`, and modified rebase returning `CHANGED` with exact drifted files |
 | 5 | `internal/hooks` | Temp git repo tests for `install`, non-destructive refusal on existing hooks, `uninstall`, and `<50 ms` `pre-push` receipt hit |
-| 6 | `internal/forge` and `internal/land` | Table tests for `DecideLand` across every state, `merge-tree` optimistic merge and conflict abort tests on real temp repos, and live dogfooding of `quai verify`, `quai tier`, `quai patch-id`, and `quai land --dry-run` on `agent-studio` |
+| 6 | `internal/forge` and `internal/land` | Table tests for `DecideLand` across every state, `merge-tree` optimistic merge and conflict abort tests on real temp repos, and live dogfooding of `quai verify`, `quai tier`, `quai patch-id`, and `quai land --dry-run` |
 
 ## 8. Out of scope for v0.1
 

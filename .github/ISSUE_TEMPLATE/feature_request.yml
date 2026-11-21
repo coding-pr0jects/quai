@@ -1,0 +1,34 @@
+name: Feature request
+description: Propose a new capability, flag, or configuration option for quai
+title: "[feat]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What workflow bottleneck or gap does this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the CLI interface, `.quai.toml` fields, exit codes, or `--json` output you envision.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Can this already be composed with existing tools (for example git hooks, `quai exec`, or `weave`)?
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I checked SPEC.md and RESEARCH.md to verify this does not duplicate an existing feature or explicit non-goal
+          required: true

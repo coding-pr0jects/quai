@@ -1,68 +1,199 @@
 # quai
 
-`quai` is a single static Go CLI binary that coordinates local verification, input-fingerprinted receipts, CPU slot throttling, diff risk tiering, rebase patch-id survival checks, and serialized PR landing for any git repository.
+[![CI](https://github.com/coding-pr0jects/quai/actions/workflows/ci.yml/badge.svg)](https://github.com/coding-pr0jects/quai/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8.svg)](go.mod)
 
-Full design and contracts: [SPEC.md](SPEC.md).
-Market and open-source landscape research: [RESEARCH.md](RESEARCH.md).
+`quai` is a single static Go CLI binary that coordinates local verification, input-fingerprinted receipts, CPU slot throttling, diff risk tiering, rebase `patch-id` survival checks, and serialized PR landing for any git repository.
 
-## Install
+It sits above `git`, `gh`, and your existing test runner or sandbox. It does not replace them, requires no cloud backend, and outputs structured `--json` for coding agents, humans, and git hooks.
 
-Requires git 2.38+ (`git merge-tree`). Go and `gh` versions are pinned in [mise.toml](mise.toml).
+## Why `quai`?
 
-With `mise`:
+Running multiple coding agents or developers in parallel git worktrees on one machine hits four recurring bottlenecks:
+
+1. **Duplicate verification.** Author checks, `pre-push` hooks, and reviewer passes run the exact same commands repeatedly on unchanged inputs.
+2. **Local CPU starvation.** Worktrees isolate files, not CPU or RAM. Concurrent heavy test suites contend for cores and cause flaky timeouts.
+3. **Undifferentiated review overhead.** Pure file renames, doc edits, and clean rebases trigger the same review depth as high-risk code changes, while test-skip tampering goes unnoticed.
+4. **Rebase churn when landing PRs.** Parallel PRs racing to merge into `main` trigger repeated rebases and redundant CI cycles even when their changes are disjoint.
+
+`quai` stores deterministic shared state inside `<git-common-dir>/quai/` so every linked worktree of a repository shares the same locks, slot pools, and receipts:
+
+```text
+worktree A ─┐                                     ┌─ quai verify    (fingerprinted receipts + mutation guard)
+worktree B ─┼─► <git-common-dir>/quai/            ├─ quai exec      (machine-wide CPU slot semaphore)
+worktree C ─┘     ├── locks/land.lock/            ├─ quai hooks     (<50 ms pre-push receipt fast path)
+                  ├── locks/slot-<pool>-<n>.lock/ ├─ quai tier      (risk classification + test-tamper guard)
+                  └── receipts/<step>-<hash>.json ├─ quai patch-id  (post-rebase review verdict survival)
+                                                  └─ quai land      (merge-tree optimistic merge + locked rebase)
+```
+
+## Installation
+
+### Prerequisites
+
+- `git` 2.38 or newer (`git merge-tree --write-tree`)
+- `gh` (GitHub CLI, authenticated) for `quai land`
+- Go 1.23+ if installing from source
+
+### Option 1: `go install`
 
 ```bash
+go install github.com/coding-pr0jects/quai/cmd/quai@latest
+```
+
+### Option 2: `mise` (from a local clone)
+
+Go and `gh` versions are pinned in [mise.toml](mise.toml):
+
+```bash
+git clone https://github.com/coding-pr0jects/quai.git
+cd quai
 mise trust
 mise install
 mise run install
 ```
 
-Without `mise` (requires Go 1.23+ and `gh` for `quai land`):
+This compiles and installs `quai` to `~/.local/bin/quai`.
+
+### Option 3: `go build` (from a local clone)
 
 ```bash
+git clone https://github.com/coding-pr0jects/quai.git
+cd quai
 go build -o ~/.local/bin/quai ./cmd/quai
+```
+
+Verify the install:
+
+```bash
+quai version
 ```
 
 ## Quickstart
 
-Commit a `.quai.toml` at your repository root (see [SPEC.md](SPEC.md#3-configuration-contract-quaitoml) for the full schema and the `agent-studio` example):
+### 1. Commit `.quai.toml` at your repository root
+
+```toml
+version = 1
+base = "main"
+
+[slots]
+heavy = 2
+
+[[steps]]
+name = "fast"
+run = "go vet ./..."
+inputs = ["**/*.go", "go.mod", "go.sum"]
+lockfiles = ["go.sum"]
+hook = "pre-push"
+slots = 0
+
+[[steps]]
+name = "test"
+run = "go test -race ./..."
+inputs = ["**/*.go", "go.mod", "go.sum"]
+lockfiles = ["go.sum"]
+pool = "heavy"
+slots = 1
+timeout = "10m"
+
+[tiers]
+default = "diff-audit"
+full_live = ["internal/lock/**", "internal/land/**", "cmd/**"]
+gate_only = ["*.md", "docs/**"]
+test_globs = ["**/*_test.go"]
+escalate_on_test_tamper = true
+
+[land]
+method = "squash"
+optimistic_merge = true
+required_checks = ["ci"]
+global_paths = ["go.mod", "go.sum", ".quai.toml", ".github/**"]
+```
+
+See [docs/configuration.md](docs/configuration.md) for Node/TypeScript, Rust, and Python presets and the full schema.
+
+### 2. Run verification and enable the `pre-push` fast path
 
 ```bash
-# Run verification steps with CPU slot throttling and write receipts
+# Run steps with CPU slot throttling and write input-fingerprinted receipts
 quai verify
 
-# Reuse receipts automatically on pre-push (<50 ms on cache hit)
+# Install the managed pre-push hook (reuses receipts in <50 ms on cache hit)
 quai hooks install
+```
 
-# Classify the branch diff risk tier and inspect local receipt status
+Re-running `quai verify` on a clean tree with unchanged inputs (or after editing a file outside `inputs`, such as `README.md`) reuses the stored receipt immediately across all linked worktrees. If a step modifies tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai verify` refuses to write a receipt and exits `1`.
+
+### 3. Classify risk, check rebase survival, and land PRs
+
+```bash
+# Classify branch risk tier, detect test tampering, and inspect local receipts
 quai tier --json
 
-# Check whether a prior review verdict survived a rebase
+# Check whether a reviewed patch survived a rebase unchanged
 quai patch-id <verdict-sha> HEAD --json
 
-# Serialize any heavy command behind a configured slot pool
-quai exec --pool heavy -- make test
+# Run any heavy command behind a shared slot pool
+quai exec --pool heavy -- make e2e
 
-# Land a PR with optimistic disjoint merge or atomic rebase under lock
+# Preview or execute serialized PR landing
 quai land 42 --dry-run
 quai land 42
 ```
 
-## Entity-level conflict reduction
+## Commands and exit codes
 
-`quai land` uses standard `git rebase`. To reduce false line-level conflicts when parallel agents edit different functions in the same file, configure [Ataraxy-Labs/weave](https://github.com/Ataraxy-Labs/weave) as your repository's git merge driver. `quai land` inherits it automatically during rebase.
+| Command | Purpose |
+|---|---|
+| `quai verify [--step <name>...] [--since <ref>] [--no-cache] [--json]` | Run steps in order with slot locks, mutation guard, and input-fingerprinted receipts |
+| `quai exec --pool <name> [--slots <n>] [--wait <duration>] -- <cmd...>` | Serialize any command behind a configured slot pool in its own process group |
+| `quai tier [--since <ref>] [--json]` | Classify diff risk (`gate-only`, `diff-audit`, `full-live`), detect test tampering, list receipt status |
+| `quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]` | Verify whether a reviewed diff survived rebase unchanged (`SURVIVES` vs `CHANGED`) |
+| `quai land <pr> [--dry-run] [--method squash\|merge\|rebase] [--json]` | Land a GitHub PR with `git merge-tree` optimistic merge or atomic locked rebase |
+| `quai hooks install\|uninstall\|pre-push [--json]` | Manage the non-destructive `pre-push` receipt hook |
+| `quai version` | Print the installed version |
 
-## Development and verification
+Exit codes are uniform across commands:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Success, passing checks, `SURVIVES`, or PR merged |
+| `1` | Check failed, working tree mutated during `verify`, `CHANGED`, or PR refused |
+| `2` | Invalid arguments, missing or invalid `.quai.toml`, or not a git repository |
+| `3` | Git rebase conflict encountered and cleanly aborted |
+| `4` | Lock or slot acquisition timed out |
+
+## Composing with `weave`
+
+`quai land` delegates rebases to standard `git rebase`. To cut false line-level conflicts when parallel agents edit different functions in the same file, configure [Ataraxy-Labs/weave](https://github.com/Ataraxy-Labs/weave) as your repository's git merge driver. `quai land` picks it up automatically.
+
+## Documentation
+
+- [Configuration guide](docs/configuration.md) — full `.quai.toml` schema, input fingerprinting, and language presets
+- [Command reference](docs/commands.md) — flags, behaviors, and `--json` output schemas
+- [Coding agent integration](docs/agents.md) — wiring `quai` into Claude Code, Codex, OpenCode, Cursor, and custom harnesses
+- [Architecture](docs/architecture.md) — one-feature-per-folder layout, pure engines vs adapters, lock protocol, and testing
+- [Specification](SPEC.md) — complete v0.1 contract and post-v0.1 roadmap
+- [Research](RESEARCH.md) — problem sizing and comparison with existing open-source tools
+- [Contributing](CONTRIBUTING.md) — setup, coding standards, and pull request workflow
+- [Security policy](SECURITY.md) — security invariants and vulnerability reporting
+- [Changelog](CHANGELOG.md) — release history
+
+## Development
 
 ```bash
 mise run test
 ```
 
-Or directly:
+Or without `mise`:
 
 ```bash
 go vet ./...
 go test -race ./...
 ```
 
-Project-local end-to-end verification skill: `.cursor/skills/verify-quai/SKILL.md`.
+## License
+
+MIT. See [LICENSE](LICENSE).

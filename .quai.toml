@@ -43,5 +43,6 @@ global_paths = [
 	"go.mod",
 	"go.sum",
 	"mise.toml",
-	".quai.toml"
+	".quai.toml",
+	".github/**"
 ]

@@ -1,0 +1,57 @@
+name: Bug report
+description: Report unexpected behavior, incorrect exit codes, or a crash in quai
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the unexpected behavior clearly and concisely.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe what you expected quai to do instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Exact commands, repository state (clean/dirty, worktree/main), and flags used.
+      placeholder: |
+        1. Create `.quai.toml` with ...
+        2. Run `quai verify --json`
+        3. Observe exit code ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant `.quai.toml` and command output
+      description: Paste redacted `.quai.toml` sections and stdout/stderr (remove any secrets or private repo names).
+      render: text
+
+  - type: input
+    id: quai_version
+    attributes:
+      label: quai version
+      description: Output of `quai version`
+      placeholder: "quai 0.1.0-alpha"
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, `git --version`, and `gh --version` (if relevant)
+      placeholder: "Linux x86_64, git 2.43.0, gh 2.105.0"
+    validations:
+      required: true
