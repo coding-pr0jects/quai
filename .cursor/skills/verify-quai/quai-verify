@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Verification harness for quai.
+# Creates an isolated scratch workspace (built binary, bare origin, repo + linked worktree,
+# optional fake gh) and persists proof artifacts in a separate evidence directory that
+# survives cleanup.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+RUN_ID="${QUAI_VERIFY_RUN_ID:-default}"
+SCRATCH="/tmp/quai-verify-${RUN_ID}"
+EVIDENCE="${QUAI_VERIFY_EVIDENCE_DIR:-/tmp/quai-verify-evidence-${RUN_ID}}"
+
+usage() {
+	cat >&2 <<'EOF'
+Usage: quai-verify <command> [args...]
+  launch                   Build quai and seed an isolated git repo, bare origin, and worktree
+  doctor                   Check that the built binary, scratch repos, and git >= 2.38 are ready
+  run <label> -- <cmd...>  Run a command inside the scratch repo and save transcript + exit code
+  run-wt <label> -- <cmd...> Run a command inside the linked worktree and save transcript
+  evidence                 List captured proof artifacts
+  cleanup                  Remove scratch workspace without touching captured evidence
+EOF
+	exit 2
+}
+
+cmd="${1:-}"
+[ -n "$cmd" ] || usage
+shift
+
+case "$cmd" in
+launch)
+	rm -rf "$SCRATCH"
+	mkdir -p "$SCRATCH/bin" "$SCRATCH/origin.git" "$SCRATCH/repo" "$EVIDENCE"
+
+	(cd "$REPO_ROOT" && go build -o "$SCRATCH/bin/quai" ./cmd/quai)
+
+	git -C "$SCRATCH/origin.git" init --bare -q -b main
+	git -C "$SCRATCH/repo" init -q -b main
+	git -C "$SCRATCH/repo" config user.name "quai-verify"
+	git -C "$SCRATCH/repo" config user.email "quai-verify@localhost"
+	git -C "$SCRATCH/repo" remote add origin "$SCRATCH/origin.git"
+
+	cat >"$SCRATCH/repo/.quai.toml" <<'TOML'
+version = 1
+base = "main"
+
+[slots]
+heavy = 2
+
+[[steps]]
+name = "fast"
+run = "test -f app/main.txt"
+inputs = ["app/**"]
+hook = "pre-push"
+slots = 0
+
+[[steps]]
+name = "verify"
+run = "test -f app/main.txt"
+inputs = ["app/**"]
+pool = "heavy"
+slots = 1
+timeout = "2m"
+
+[tiers]
+default = "diff-audit"
+full_live = ["ui/**"]
+gate_only = ["docs/**", "*.md"]
+test_globs = ["**/*_test.*"]
+escalate_on_test_tamper = true
+
+[land]
+method = "squash"
+optimistic_merge = true
+required_checks = ["check"]
+global_paths = ["lockfile.txt"]
+TOML
+
+	mkdir -p "$SCRATCH/repo/app" "$SCRATCH/repo/ui" "$SCRATCH/repo/docs"
+	printf 'v1\n' >"$SCRATCH/repo/app/main.txt"
+	printf 'func TestOk() {}\n' >"$SCRATCH/repo/app/main_test.txt"
+	printf 'screen\n' >"$SCRATCH/repo/ui/view.txt"
+	printf 'guide\n' >"$SCRATCH/repo/docs/guide.md"
+	printf 'lock1\n' >"$SCRATCH/repo/lockfile.txt"
+
+	git -C "$SCRATCH/repo" add -A
+	git -C "$SCRATCH/repo" commit -q -m "initial baseline"
+	git -C "$SCRATCH/repo" push -q -u origin main
+
+	git -C "$SCRATCH/repo" worktree add -q -b feat/wt "$SCRATCH/worktree" main
+
+	echo "LAUNCHED run_id=${RUN_ID}"
+	echo "SCRATCH=${SCRATCH}"
+	echo "EVIDENCE=${EVIDENCE}"
+	echo "BINARY=${SCRATCH}/bin/quai"
+	;;
+
+doctor)
+	ok=0
+	if [ ! -x "$SCRATCH/bin/quai" ]; then
+		echo "FAIL: binary missing at $SCRATCH/bin/quai (run launch first)" >&2
+		ok=1
+	else
+		ver="$("$SCRATCH/bin/quai" version)"
+		echo "OK: binary=${SCRATCH}/bin/quai (${ver})"
+	fi
+	if [ ! -d "$SCRATCH/repo/.git" ] || [ ! -d "$SCRATCH/worktree" ]; then
+		echo "FAIL: scratch repo or linked worktree missing under $SCRATCH" >&2
+		ok=1
+	else
+		head_sha="$(git -C "$SCRATCH/repo" rev-parse --short HEAD)"
+		echo "OK: scratch repo=${SCRATCH}/repo (HEAD=${head_sha}), worktree=${SCRATCH}/worktree"
+	fi
+	git_ver="$(git --version)"
+	echo "OK: ${git_ver}"
+	if [ ! -d "$EVIDENCE" ]; then
+		echo "FAIL: evidence dir missing at $EVIDENCE" >&2
+		ok=1
+	else
+		echo "OK: evidence=${EVIDENCE}"
+	fi
+	exit "$ok"
+	;;
+
+run|run-wt)
+	label="${1:-}"
+	[ -n "$label" ] || usage
+	shift
+	[ "${1:-}" = "--" ] || usage
+	shift
+	[ "$#" -gt 0 ] || usage
+
+	target="$SCRATCH/repo"
+	if [ "$cmd" = "run-wt" ]; then
+		target="$SCRATCH/worktree"
+	fi
+	mkdir -p "$EVIDENCE"
+	log="$EVIDENCE/${label}.txt"
+
+	set +e
+	(
+		export PATH="$SCRATCH/bin:$PATH"
+		cd "$target"
+		"$@"
+	) >"$log.stdout" 2>"$log.stderr"
+	code=$?
+	set -e
+
+	{
+		echo "label: $label"
+		echo "dir: $target"
+		echo "command: $*"
+		echo "exit_code: $code"
+		echo "--- stdout ---"
+		cat "$log.stdout"
+		echo "--- stderr ---"
+		cat "$log.stderr"
+	} >"$log"
+	rm -f "$log.stdout" "$log.stderr"
+	cat "$log"
+	exit "$code"
+	;;
+
+evidence)
+	if [ ! -d "$EVIDENCE" ]; then
+		echo "no evidence directory at $EVIDENCE" >&2
+		exit 1
+	fi
+	ls -la "$EVIDENCE"
+	;;
+
+cleanup)
+	if [ -d "$SCRATCH" ]; then
+		rm -rf "$SCRATCH"
+		echo "REMOVED scratch=${SCRATCH}"
+	else
+		echo "SCRATCH already absent: ${SCRATCH}"
+	fi
+	echo "PRESERVED evidence=${EVIDENCE}"
+	;;
+
+*)
+	usage
+	;;
+esac
