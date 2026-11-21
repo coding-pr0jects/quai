@@ -70,14 +70,15 @@ type VerifiedInfo struct {
 }
 
 type CheckOptions struct {
-	StepNames []string
-	Since     string
-	Onto      string
-	Sample    int
-	Fetch     bool
-	Remote    string
-	Now       func() time.Time
-	Roll      func() int // returns [0, 100); defaults to crypto/rand
+	StepNames      []string
+	Since          string
+	Onto           string
+	AllowedSigners string
+	Sample         int
+	Fetch          bool
+	Remote         string
+	Now            func() time.Time
+	Roll           func() int // returns [0, 100); defaults to crypto/rand
 }
 
 type StepCheck struct {
@@ -348,11 +349,22 @@ func ResolveSigningKey(ctx context.Context, g repo.Git, cfg *config.Config, flag
 	return "", errors.New("no SSH signing key configured (pass --key, set QUAI_SIGNING_KEY, [attest].signing_key, or git user.signingkey)")
 }
 
-// ResolveAllowedSigners resolves [attest].allowed_signers relative to topLevel.
-func ResolveAllowedSigners(topLevel string, cfg *config.Config) (string, error) {
-	raw := strings.TrimSpace(cfg.Attest.AllowedSigners)
+// ResolveAllowedSigners resolves the OpenSSH allowed_signers path by precedence:
+// explicit flag > QUAI_ALLOWED_SIGNERS > [attest].allowed_signers (resolved relative to topLevel).
+func ResolveAllowedSigners(topLevel string, cfg *config.Config, flagPath string) (string, error) {
+	raw := ""
+	for _, candidate := range []string{
+		strings.TrimSpace(flagPath),
+		strings.TrimSpace(os.Getenv("QUAI_ALLOWED_SIGNERS")),
+		strings.TrimSpace(cfg.Attest.AllowedSigners),
+	} {
+		if candidate != "" {
+			raw = candidate
+			break
+		}
+	}
 	if raw == "" {
-		return "", errors.New("[attest].allowed_signers must be set in .quai.toml")
+		return "", errors.New("no allowed_signers configured (pass --allowed-signers, set QUAI_ALLOWED_SIGNERS, or set [attest].allowed_signers in .quai.toml)")
 	}
 	p := expandHome(raw)
 	if !filepath.IsAbs(p) {
@@ -411,7 +423,7 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 	if err != nil {
 		return CheckResult{}, err
 	}
-	allowedSigners, err := ResolveAllowedSigners(topLevel, cfg)
+	allowedSigners, err := ResolveAllowedSigners(topLevel, cfg, opts.AllowedSigners)
 	if err != nil {
 		return CheckResult{}, err
 	}

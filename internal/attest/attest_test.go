@@ -228,6 +228,19 @@ max_age = "14d"
 		t.Fatalf("unexpected Check result: %+v", res)
 	}
 
+	// External allowed_signers override works without committing any key inside the repository.
+	extAllowed := filepath.Join(tmp, "external_allowed_signers")
+	writeFile(t, extAllowed, "dev@example.com "+pubKey+"\n")
+	cfgNoFile := *cfg
+	cfgNoFile.Attest.AllowedSigners = ""
+	extRes, err := Check(ctx, ciGit, &cfgNoFile, CheckOptions{
+		Onto:           "origin/main",
+		AllowedSigners: extAllowed,
+	})
+	if err != nil || !extRes.OK || extRes.Steps[0].Status != "verified" {
+		t.Fatalf("Check with external AllowedSigners failed: res=%+v err=%v", extRes, err)
+	}
+
 	// Probabilistic sampling at 100% must force a rerun (OK=false, status=sampled).
 	sampled, err := Check(ctx, ciGit, cfg, CheckOptions{
 		Onto:   "origin/main",

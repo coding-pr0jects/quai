@@ -74,7 +74,7 @@ quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign] [--key <pat
 Verify SSH-signed in-toto v1 / DSSE v1 attestations in CI and synchronize `refs/quai/records/*` with a git remote.
 
 ```bash
-quai attest check [--step <name>...] [--onto <ref>] [--since <ref>] [--sample <0-100>] [--fetch] [--remote <name>] [--json]
+quai attest check [--step <name>...] [--onto <ref>] [--since <ref>] [--allowed-signers <path>] [--sample <0-100>] [--fetch] [--remote <name>] [--json]
 quai attest push [--step <name>...] [--since <ref>] [--remote <name>] [--json]
 quai attest fetch [--remote <name>] [--json]
 ```
@@ -82,9 +82,10 @@ quai attest fetch [--remote <name>] [--json]
 ### `quai attest check`
 
 - Fetches `refs/quai/records/*` when `--fetch` is set.
+- Resolves the OpenSSH `allowed_signers` file by precedence: `--allowed-signers` > `QUAI_ALLOWED_SIGNERS` > `[attest].allowed_signers`. Passing `--allowed-signers` from a CI variable or `origin/main` prevents an untrusted PR branch from modifying its own trust root.
 - When `--onto <ref>` is set (for example `--onto origin/main` on a PR), runs virtual `git merge-tree --write-tree <onto> HEAD` without touching the working tree and computes each step's fingerprint on the merged tree. Exits `3` on conflict.
 - When `--sample <pct>` triggers (0 to 100), marks all steps `"sampled"` and exits `1` so CI runs an independent audit.
-- Verifies DSSE v1 PAE, in-toto Statement v1 fields, OpenSSH `SSHSIG` signature under namespace `quai` against `[attest].allowed_signers`, per-step or `[attest].signers` allowlist, and `[attest].max_age`.
+- Verifies DSSE v1 PAE, in-toto Statement v1 fields, OpenSSH `SSHSIG` signature under namespace `quai` against the resolved `allowed_signers` file, per-step or `[attest].signers` allowlist, and `[attest].max_age`.
 - Exits `0` only if every selected step is cryptographically `"verified"`, else `1`.
 
 ### GitHub Actions usage
@@ -92,8 +93,11 @@ quai attest fetch [--remote <name>] [--json]
 ```yaml
 - name: Check signed quai attestations
   id: attest
+  env:
+    ALLOWED_SIGNERS: ${{ vars.QUAI_ALLOWED_SIGNERS }}
   run: |
-    if quai attest check --fetch --step fast --onto origin/main --sample 10 --json; then
+    printf '%s\n' "$ALLOWED_SIGNERS" > /tmp/quai_allowed_signers
+    if quai attest check --fetch --step fast --onto origin/main --allowed-signers /tmp/quai_allowed_signers --sample 10 --json; then
       echo "verified=true" >> "$GITHUB_OUTPUT"
     fi
 
