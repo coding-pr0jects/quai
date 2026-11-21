@@ -39,7 +39,16 @@ required_checks = []            # GitHub check or commit status names that must 
 lock_wait = "30m"               # Max wait for land.lock. Default: "30m".
 checks_wait = "15m"             # Max wait for required GitHub checks. Default: "15m".
 global_paths = []               # Globs that disable optimistic merge when changed on base.
+
+[attest]
+allowed_signers = ".quai/allowed_signers" # OpenSSH allowed_signers file for verifying CI attestations.
+signing_key = ""                          # Optional default SSH private key path (or QUAI_SIGNING_KEY / git user.signingkey).
+signers = []                              # Optional principal allowlist (empty = any key in allowed_signers).
+max_age = "14d"                           # Max attestation age (supports d/h/m/s). Default: "14d".
+remote = "origin"                         # Default remote for refs/quai/records/* push and fetch.
 ```
+
+Steps also accept an optional `signers = ["alice@example.com"]` array to restrict which principals may attest a specific step.
 
 ## How input fingerprinting works
 

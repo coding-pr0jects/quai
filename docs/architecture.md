@@ -10,6 +10,7 @@ Every feature owns a dedicated package under `internal/<feature>/`. `cmd/quai/` 
 quai/
 ├── cmd/quai/          # CLI entrypoint, subcommand routing, flag parsing, exit codes
 ├── internal/
+│   ├── attest/        # in-toto v1 / DSSE v1 envelopes, ssh-keygen -Y (namespace quai), refs/quai/records/*, --onto check
 │   ├── config/        # .quai.toml decoding, defaults, validation, SHA placeholder expansion
 │   ├── glob/          # double-star (**) path glob matcher shared by config, receipt, tier, land
 │   ├── repo/          # Git interface and ExecGit adapter (diff, ls-tree, merge-tree, patch-id, rebase)

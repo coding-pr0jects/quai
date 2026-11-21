@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coding-pr0jects/quai/internal/attest"
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/execrun"
 	"github.com/coding-pr0jects/quai/internal/lock"
@@ -17,21 +18,26 @@ import (
 )
 
 type Options struct {
-	StepNames []string
-	Since     string
-	NoCache   bool
-	JSON      bool
-	Stdout    io.Writer
-	Stderr    io.Writer
+	StepNames  []string
+	Since      string
+	NoCache    bool
+	Sign       bool
+	SigningKey string
+	Push       bool
+	Remote     string
+	JSON       bool
+	Stdout     io.Writer
+	Stderr     io.Writer
 }
 
 type StepResult struct {
-	Name         string   `json:"name"`
-	Status       string   `json:"status"` // cached | passed | failed | mutated
-	Fingerprint  string   `json:"fingerprint,omitempty"`
-	DurationMS   int64    `json:"duration_ms"`
-	MutatedPaths []string `json:"mutated_paths,omitempty"`
-	Error        string   `json:"error,omitempty"`
+	Name           string   `json:"name"`
+	Status         string   `json:"status"` // cached | passed | failed | mutated
+	Fingerprint    string   `json:"fingerprint,omitempty"`
+	DurationMS     int64    `json:"duration_ms"`
+	AttestationRef string   `json:"attestation_ref,omitempty"`
+	MutatedPaths   []string `json:"mutated_paths,omitempty"`
+	Error          string   `json:"error,omitempty"`
 }
 
 type Result struct {
@@ -41,6 +47,8 @@ type Result struct {
 	TreeSHA        string       `json:"tree_sha"`
 	BaseSHA        string       `json:"base_sha"`
 	ReceiptWritten bool         `json:"receipt_written"`
+	Attestations   []string     `json:"attestations,omitempty"`
+	Pushed         bool         `json:"pushed,omitempty"`
 	Steps          []StepResult `json:"steps"`
 }
 
@@ -86,6 +94,15 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 		return Result{}, err
 	}
 
+	var signingKey, principal string
+	if opts.Sign && clean {
+		signingKey, err = attest.ResolveSigningKey(ctx, g, cfg, opts.SigningKey)
+		if err != nil {
+			return Result{}, err
+		}
+		principal, _ = g.ConfigGet(ctx, "user.email")
+	}
+
 	store := receipt.NewStore(commonDir)
 	locksRoot := filepath.Join(commonDir, "quai", "locks")
 
@@ -106,12 +123,26 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 				return res, err
 			}
 			if !opts.NoCache {
-				if _, hit, err := store.Lookup(step.Name, fp); err == nil && hit {
+				if cachedRec, hit, err := store.Lookup(step.Name, fp); err == nil && hit {
+					var attRef string
+					if opts.Sign {
+						ref := attest.RefName(step.Name, fp)
+						if _, exists, err := attest.ReadRecord(ctx, g, step.Name, fp); err != nil {
+							return res, err
+						} else if !exists {
+							if _, _, err := attest.WriteRecord(ctx, g, *cachedRec, signingKey, principal); err != nil {
+								return res, err
+							}
+						}
+						attRef = ref
+						res.Attestations = append(res.Attestations, ref)
+					}
 					res.Steps = append(res.Steps, StepResult{
-						Name:        step.Name,
-						Status:      "cached",
-						Fingerprint: fp,
-						DurationMS:  time.Since(started).Milliseconds(),
+						Name:           step.Name,
+						Status:         "cached",
+						Fingerprint:    fp,
+						DurationMS:     time.Since(started).Milliseconds(),
+						AttestationRef: attRef,
 					})
 					if !opts.JSON && opts.Stdout != nil {
 						fmt.Fprintf(opts.Stdout, "cached  %s (%s)\n", step.Name, shortSHA(fp))
@@ -181,6 +212,7 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 			return res, runErr
 		}
 
+		var attRef string
 		if clean {
 			afterHead, err := g.HeadSHA(ctx)
 			if err != nil {
@@ -216,22 +248,44 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 				Step:        step.Name,
 				Passed:      true,
 				DurationMS:  dur,
+				CreatedAt:   time.Now().UTC(),
 			}
 			if err := store.Write(r); err != nil {
 				return res, err
 			}
 			res.ReceiptWritten = true
+
+			if opts.Sign {
+				ref, _, err := attest.WriteRecord(ctx, g, r, signingKey, principal)
+				if err != nil {
+					return res, err
+				}
+				attRef = ref
+				res.Attestations = append(res.Attestations, ref)
+			}
 		}
 
 		res.Steps = append(res.Steps, StepResult{
-			Name:        step.Name,
-			Status:      "passed",
-			Fingerprint: fp,
-			DurationMS:  dur,
+			Name:           step.Name,
+			Status:         "passed",
+			Fingerprint:    fp,
+			DurationMS:     dur,
+			AttestationRef: attRef,
 		})
 		if !opts.JSON && opts.Stdout != nil {
 			fmt.Fprintf(opts.Stdout, "pass    %s (%dms)\n", step.Name, dur)
 		}
+	}
+
+	if opts.Sign && opts.Push && len(res.Attestations) > 0 {
+		remote := opts.Remote
+		if remote == "" {
+			remote = cfg.Attest.Remote
+		}
+		if err := g.PushRefs(ctx, remote, res.Attestations); err != nil {
+			return res, err
+		}
+		res.Pushed = true
 	}
 	return res, nil
 }

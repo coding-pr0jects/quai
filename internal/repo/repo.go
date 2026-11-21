@@ -64,6 +64,10 @@ type Git interface {
 	PushForceWithLease(ctx context.Context, remote, branch, expectedSHA string) error
 	GitPath(ctx context.Context, rel string) (string, error)
 	ConfigGet(ctx context.Context, key string) (string, error)
+	WriteRefBlob(ctx context.Context, refName, fileName string, content []byte) error
+	ReadRefBlob(ctx context.Context, refName, fileName string) ([]byte, bool, error)
+	PushRefs(ctx context.Context, remote string, refs []string) error
+	FetchRefs(ctx context.Context, remote, refspec string) error
 }
 
 type ExecGit struct {
@@ -394,6 +398,82 @@ func (g *ExecGit) ConfigGet(ctx context.Context, key string) (string, error) {
 		return "", nil
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// WriteRefBlob stores content as a standalone commit under refName containing fileName
+// without touching HEAD, branches, the index, or the working tree.
+func (g *ExecGit) WriteRefBlob(ctx context.Context, refName, fileName string, content []byte) error {
+	out, errOut, err := g.run(ctx, content, "hash-object", "-w", "--stdin")
+	if err != nil {
+		return fmt.Errorf("git hash-object: %w (%s)", err, strings.TrimSpace(string(errOut)))
+	}
+	blobSHA := strings.TrimSpace(string(out))
+
+	treeLine := fmt.Sprintf("100644 blob %s\t%s\n", blobSHA, fileName)
+	treeOut, errOut, err := g.run(ctx, []byte(treeLine), "mktree")
+	if err != nil {
+		return fmt.Errorf("git mktree: %w (%s)", err, strings.TrimSpace(string(errOut)))
+	}
+	treeSHA := strings.TrimSpace(string(treeOut))
+
+	commitOut, errOut, err := g.run(
+		ctx,
+		nil,
+		"-c", "user.name=quai",
+		"-c", "user.email=quai@localhost",
+		"commit-tree", treeSHA,
+		"-m", "quai attestation",
+	)
+	if err != nil {
+		return fmt.Errorf("git commit-tree: %w (%s)", err, strings.TrimSpace(string(errOut)))
+	}
+	commitSHA := strings.TrimSpace(string(commitOut))
+
+	if _, errOut, err := g.run(ctx, nil, "update-ref", refName, commitSHA); err != nil {
+		return fmt.Errorf("git update-ref %s: %w (%s)", refName, err, strings.TrimSpace(string(errOut)))
+	}
+	return nil
+}
+
+// ReadRefBlob reads fileName from refName if the ref exists.
+func (g *ExecGit) ReadRefBlob(ctx context.Context, refName, fileName string) ([]byte, bool, error) {
+	if _, _, err := g.run(ctx, nil, "rev-parse", "--verify", "--quiet", refName+"^{commit}"); err != nil {
+		return nil, false, nil
+	}
+	out, errOut, err := g.run(ctx, nil, "show", refName+":"+fileName)
+	if err != nil {
+		return nil, false, fmt.Errorf("git show %s:%s: %w (%s)", refName, fileName, err, strings.TrimSpace(string(errOut)))
+	}
+	return out, true, nil
+}
+
+// PushRefs pushes explicit git refs to remote.
+func (g *ExecGit) PushRefs(ctx context.Context, remote string, refs []string) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	args := make([]string, 0, len(refs)+2)
+	args = append(args, "push", remote)
+	for _, r := range refs {
+		args = append(args, r+":"+r)
+	}
+	if _, errOut, err := g.run(ctx, nil, args...); err != nil {
+		return fmt.Errorf("git push %s: %w (%s)", remote, err, strings.TrimSpace(string(errOut)))
+	}
+	return nil
+}
+
+// FetchRefs fetches a refspec from remote. Missing remote refs are treated as an empty no-op.
+func (g *ExecGit) FetchRefs(ctx context.Context, remote, refspec string) error {
+	_, errOut, err := g.run(ctx, nil, "fetch", "--quiet", remote, refspec)
+	if err != nil {
+		msg := strings.TrimSpace(string(errOut))
+		if strings.Contains(msg, "couldn't find remote ref") || strings.Contains(msg, "no matching remote") {
+			return nil
+		}
+		return fmt.Errorf("git fetch %s %s: %w (%s)", remote, refspec, err, msg)
+	}
+	return nil
 }
 
 func splitNull(data []byte) []string {

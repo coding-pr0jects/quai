@@ -37,6 +37,7 @@ type Config struct {
 	Steps   []Step         `toml:"steps"`
 	Tiers   TierPolicy     `toml:"tiers"`
 	Land    LandPolicy     `toml:"land"`
+	Attest  AttestPolicy   `toml:"attest"`
 }
 
 type Step struct {
@@ -48,7 +49,17 @@ type Step struct {
 	Pool      string        `toml:"pool"`
 	Slots     int           `toml:"slots"`
 	Timeout   string        `toml:"timeout"`
+	Signers   []string      `toml:"signers"`
 	Duration  time.Duration `toml:"-"`
+}
+
+type AttestPolicy struct {
+	AllowedSigners string        `toml:"allowed_signers"`
+	SigningKey     string        `toml:"signing_key"`
+	Signers        []string      `toml:"signers"`
+	MaxAge         string        `toml:"max_age"`
+	Remote         string        `toml:"remote"`
+	MaxAgeDur      time.Duration `toml:"-"`
 }
 
 type TierPolicy struct {
@@ -217,7 +228,42 @@ func (c *Config) normalizeAndValidate() error {
 		}
 		c.Land.ChecksWaitDur = d
 	}
+
+	if c.Attest.Remote == "" {
+		c.Attest.Remote = "origin"
+	}
+	if c.Attest.MaxAge == "" {
+		c.Attest.MaxAgeDur = 14 * 24 * time.Hour
+	} else {
+		d, err := ParseDuration(c.Attest.MaxAge)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("invalid attest.max_age %q", c.Attest.MaxAge)
+		}
+		c.Attest.MaxAgeDur = d
+	}
 	return nil
+}
+
+// ParseDuration parses a Go duration string and additionally supports day suffixes like "14d".
+func ParseDuration(raw string) (time.Duration, error) {
+	s := strings.TrimSpace(raw)
+	if strings.HasSuffix(s, "d") && len(s) > 1 {
+		daysStr := strings.TrimSuffix(s, "d")
+		var days int
+		if _, err := fmt.Sscanf(daysStr, "%d", &days); err == nil && fmt.Sprintf("%d", days) == daysStr && days > 0 {
+			return time.Duration(days) * 24 * time.Hour, nil
+		}
+		return 0, fmt.Errorf("invalid day duration %q", raw)
+	}
+	return time.ParseDuration(s)
+}
+
+// AllowedPrincipalsFor returns the signer principal allowlist for a step.
+func (c *Config) AllowedPrincipalsFor(step Step) []string {
+	if len(step.Signers) > 0 {
+		return step.Signers
+	}
+	return c.Attest.Signers
 }
 
 func ValidTier(t Tier) bool {

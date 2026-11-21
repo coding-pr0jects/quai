@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coding-pr0jects/quai/internal/attest"
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/execrun"
 	"github.com/coding-pr0jects/quai/internal/forge"
@@ -27,12 +28,13 @@ import (
 	"github.com/coding-pr0jects/quai/internal/verify"
 )
 
-const version = "0.1.0-alpha"
+const version = "0.2.0-alpha"
 
-const rootUsage = `quai: local verification, receipts, risk tiering, and serialized PR landing
+const rootUsage = `quai: local verification, signed attestations, receipts, risk tiering, and serialized PR landing
 
 Usage:
-  quai verify [--step <name>...] [--since <ref>] [--no-cache] [--json]
+  quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign] [--key <path>] [--push] [--remote <name>] [--json]
+  quai attest check|push|fetch [flags...]
   quai exec --pool <name> [--slots <n>] [--wait <duration>] -- <command...>
   quai tier [--since <ref>] [--json]
   quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]
@@ -65,6 +67,8 @@ func run(ctx context.Context, args []string, cwd string, stdin io.Reader, stdout
 		return 0
 	case "verify":
 		return runVerify(ctx, cwd, rest, stdout, stderr)
+	case "attest":
+		return runAttest(ctx, cwd, rest, stdout, stderr)
 	case "exec":
 		return runExec(ctx, cwd, rest, stdin, stdout, stderr)
 	case "tier":
@@ -110,6 +114,10 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 	fs.Var(&steps, "step", "step name to run (repeatable)")
 	since := fs.String("since", "", "base ref")
 	noCache := fs.Bool("no-cache", false, "ignore existing receipts")
+	sign := fs.Bool("sign", os.Getenv("QUAI_SIGN") == "1", "sign passing receipts with SSH key into refs/quai/records/*")
+	keyPath := fs.String("key", "", "SSH private key path for --sign")
+	push := fs.Bool("push", false, "push signed attestation refs to remote (implies --sign)")
+	remote := fs.String("remote", "", "git remote for --push (defaults to [attest].remote)")
 	jsonOut := fs.Bool("json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -123,13 +131,18 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 		fmt.Fprintf(stderr, "quai verify: %v\n", err)
 		return 2
 	}
+	doSign := *sign || *push
 	res, err := verify.Run(ctx, g, cfg, verify.Options{
-		StepNames: steps,
-		Since:     *since,
-		NoCache:   *noCache,
-		JSON:      *jsonOut,
-		Stdout:    stdout,
-		Stderr:    stderr,
+		StepNames:  steps,
+		Since:      *since,
+		NoCache:    *noCache,
+		Sign:       doSign,
+		SigningKey: *keyPath,
+		Push:       *push,
+		Remote:     *remote,
+		JSON:       *jsonOut,
+		Stdout:     stdout,
+		Stderr:     stderr,
 	})
 	if *jsonOut {
 		writeJSON(stdout, res)
@@ -157,6 +170,156 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 		return 1
 	}
 	return 0
+}
+
+func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "Usage: quai attest check|push|fetch [flags...]")
+		return 2
+	}
+	action := args[0]
+	rest := args[1:]
+
+	switch action {
+	case "check":
+		fs := flag.NewFlagSet("attest check", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		var steps multiFlag
+		fs.Var(&steps, "step", "step name to verify (repeatable)")
+		since := fs.String("since", "", "base ref")
+		onto := fs.String("onto", "", "virtual merge-tree target ref (e.g. origin/main)")
+		sample := fs.Int("sample", 0, "probabilistic audit rerun percentage (0-100)")
+		fetch := fs.Bool("fetch", false, "fetch refs/quai/records/* from remote first")
+		remote := fs.String("remote", "", "git remote for --fetch")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(rest); err != nil {
+			return 2
+		}
+		if fs.NArg() > 0 {
+			fmt.Fprintf(stderr, "quai attest check: unexpected arguments: %v\n", fs.Args())
+			return 2
+		}
+		g, cfg, _, err := loadRepoAndConfig(ctx, cwd)
+		if err != nil {
+			fmt.Fprintf(stderr, "quai attest check: %v\n", err)
+			return 2
+		}
+		res, err := attest.Check(ctx, g, cfg, attest.CheckOptions{
+			StepNames: steps,
+			Since:     *since,
+			Onto:      *onto,
+			Sample:    *sample,
+			Fetch:     *fetch,
+			Remote:    *remote,
+		})
+		if err != nil {
+			var rce *repo.RebaseConflictError
+			if errors.As(err, &rce) {
+				if *jsonOut {
+					writeJSON(stdout, map[string]any{"ok": false, "conflict": true, "conflict_files": rce.ConflictFiles, "error": rce.Error()})
+				} else {
+					fmt.Fprintf(stderr, "quai attest check: %v\n", err)
+				}
+				return 3
+			}
+			fmt.Fprintf(stderr, "quai attest check: %v\n", err)
+			return 2
+		}
+		if *jsonOut {
+			writeJSON(stdout, res)
+		} else {
+			for _, s := range res.Steps {
+				switch s.Status {
+				case "verified":
+					fmt.Fprintf(stdout, "verified %s (%s by %s)\n", s.Name, s.Fingerprint[:min(12, len(s.Fingerprint))], s.Signer)
+				default:
+					fmt.Fprintf(stdout, "%-8s %s (%s)\n", s.Status, s.Name, s.Error)
+				}
+			}
+		}
+		if !res.OK {
+			return 1
+		}
+		return 0
+
+	case "push":
+		fs := flag.NewFlagSet("attest push", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		var steps multiFlag
+		fs.Var(&steps, "step", "step name to push (repeatable)")
+		since := fs.String("since", "", "base ref")
+		remote := fs.String("remote", "", "git remote")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(rest); err != nil {
+			return 2
+		}
+		if fs.NArg() > 0 {
+			fmt.Fprintf(stderr, "quai attest push: unexpected arguments: %v\n", fs.Args())
+			return 2
+		}
+		g, cfg, _, err := loadRepoAndConfig(ctx, cwd)
+		if err != nil {
+			fmt.Fprintf(stderr, "quai attest push: %v\n", err)
+			return 2
+		}
+		res, err := attest.Push(ctx, g, cfg, attest.PushOptions{
+			StepNames: steps,
+			Since:     *since,
+			Remote:    *remote,
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "quai attest push: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			writeJSON(stdout, res)
+		} else {
+			fmt.Fprintf(stdout, "pushed %d attestation(s) to %s\n", len(res.Pushed), res.Remote)
+		}
+		return 0
+
+	case "fetch":
+		fs := flag.NewFlagSet("attest fetch", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		remote := fs.String("remote", "", "git remote")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(rest); err != nil {
+			return 2
+		}
+		if fs.NArg() > 0 {
+			fmt.Fprintf(stderr, "quai attest fetch: unexpected arguments: %v\n", fs.Args())
+			return 2
+		}
+		g := repo.NewExecGit(cwd)
+		top, err := g.TopLevel(ctx)
+		if err != nil {
+			fmt.Fprintf(stderr, "quai attest fetch: not inside a git repository: %v\n", err)
+			return 2
+		}
+		g.Dir = top
+		rem := *remote
+		if rem == "" {
+			if cfg, err := config.Load(top); err == nil {
+				rem = cfg.Attest.Remote
+			} else {
+				rem = "origin"
+			}
+		}
+		if err := attest.Fetch(ctx, g, rem); err != nil {
+			fmt.Fprintf(stderr, "quai attest fetch: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			writeJSON(stdout, map[string]any{"ok": true, "remote": rem})
+		} else {
+			fmt.Fprintf(stdout, "fetched attestations from %s\n", rem)
+		}
+		return 0
+
+	default:
+		fmt.Fprintf(stderr, "quai attest: unknown subcommand %q (expected check, push, or fetch)\n", action)
+		return 2
+	}
 }
 
 func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {

@@ -16,10 +16,10 @@ All `quai` commands work from the repository root or any subdirectory inside a m
 
 ## `quai verify`
 
-Run configured verification steps with slot throttling, mutation guard, and input-fingerprinted receipts.
+Run configured verification steps with slot throttling, mutation guard, input-fingerprinted receipts, and optional SSH-signed attestations.
 
 ```bash
-quai verify [--step <name>...] [--since <ref>] [--no-cache] [--json]
+quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign] [--key <path>] [--push] [--remote <name>] [--json]
 ```
 
 ### Flags
@@ -27,6 +27,10 @@ quai verify [--step <name>...] [--since <ref>] [--no-cache] [--json]
 - `--step <name>`: Run only the named step. Repeat `--step` to run multiple steps. Omit to run all configured steps in declaration order.
 - `--since <ref>`: Override the base reference used for `merge-base` and `{{base}}`. Defaults to `origin/<base>` or `<base>`.
 - `--no-cache`: Ignore existing receipts and force execution.
+- `--sign`: Sign each clean passing receipt into an in-toto v1 / DSSE v1 envelope using `ssh-keygen -Y sign` (namespace `quai`) and store it under `refs/quai/records/<step>-<fingerprint>`. Also enabled when `QUAI_SIGN=1`.
+- `--key <path>`: Explicit SSH private key path for `--sign` (overrides `QUAI_SIGNING_KEY`, `[attest].signing_key`, and `git config user.signingkey`).
+- `--push`: Push written attestation refs to `--remote` (implies `--sign`).
+- `--remote <name>`: Remote name for `--push` (defaults to `[attest].remote`, `"origin"`).
 - `--json`: Print a structured JSON summary to stdout.
 
 ### Behavior
@@ -61,6 +65,41 @@ quai verify [--step <name>...] [--since <ref>] [--no-cache] [--json]
 		}
 	]
 }
+```
+
+---
+
+## `quai attest`
+
+Verify SSH-signed in-toto v1 / DSSE v1 attestations in CI and synchronize `refs/quai/records/*` with a git remote.
+
+```bash
+quai attest check [--step <name>...] [--onto <ref>] [--since <ref>] [--sample <0-100>] [--fetch] [--remote <name>] [--json]
+quai attest push [--step <name>...] [--since <ref>] [--remote <name>] [--json]
+quai attest fetch [--remote <name>] [--json]
+```
+
+### `quai attest check`
+
+- Fetches `refs/quai/records/*` when `--fetch` is set.
+- When `--onto <ref>` is set (for example `--onto origin/main` on a PR), runs virtual `git merge-tree --write-tree <onto> HEAD` without touching the working tree and computes each step's fingerprint on the merged tree. Exits `3` on conflict.
+- When `--sample <pct>` triggers (0 to 100), marks all steps `"sampled"` and exits `1` so CI runs an independent audit.
+- Verifies DSSE v1 PAE, in-toto Statement v1 fields, OpenSSH `SSHSIG` signature under namespace `quai` against `[attest].allowed_signers`, per-step or `[attest].signers` allowlist, and `[attest].max_age`.
+- Exits `0` only if every selected step is cryptographically `"verified"`, else `1`.
+
+### GitHub Actions usage
+
+```yaml
+- name: Check signed quai attestations
+  id: attest
+  run: |
+    if quai attest check --fetch --step fast --onto origin/main --sample 10 --json; then
+      echo "verified=true" >> "$GITHUB_OUTPUT"
+    fi
+
+- name: Run fast checks
+  if: steps.attest.outputs.verified != 'true'
+  run: ...
 ```
 
 ---

@@ -6,7 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.0-alpha] - 2026-11-21
+
 ### Added
+- Cryptographic SSH-signed attestations (`internal/attest`): in-toto Statement v1 inside DSSE v1 envelopes signed via `ssh-keygen -Y` under dedicated namespace `quai`, stored as orphan commits under `refs/quai/records/<step>-<fingerprint>`.
+- `quai verify --sign [--key <path>] [--push]` (and `QUAI_SIGN=1`) to sign clean passing receipts and push attestation refs.
+- `quai attest check|push|fetch` supporting `--onto <ref>` virtual `git merge-tree` verification, per-step `signers` allowlists, `max_age` expiry, and probabilistic `--sample <0-100>` CI audit reruns.
+- `[attest]` configuration section (`allowed_signers`, `signing_key`, `signers`, `max_age`, `remote`) and per-step `signers` in `.quai.toml`.
 - MIT license, open-source documentation suite (`docs/configuration.md`, `docs/commands.md`, `docs/agents.md`, `docs/architecture.md`), `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`.
 - GitHub Actions CI workflow (`.github/workflows/ci.yml`), pull request template, and structured issue forms.
 - `mise.toml` pinning `go` `1.23.4` and `gh` `2.105.0` with `install`, `build`, and `test` tasks.

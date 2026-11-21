@@ -72,6 +72,7 @@ func TestParseRejectsInvalidConfigs(t *testing.T) {
 		{"bad hook", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\nhook = 'post-merge'\n", "unsupported hook"},
 		{"bad tier", "version = 1\n[tiers]\ndefault = 'extreme'\n", "invalid tiers.default"},
 		{"bad merge method", "version = 1\n[land]\nmethod = 'fast-forward'\n", "invalid land.method"},
+		{"bad attest max_age", "version = 1\n[attest]\nmax_age = '0d'\n", "invalid attest.max_age"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,5 +96,46 @@ func TestExpandCommandValidatesSHAs(t *testing.T) {
 	}
 	if _, err := ExpandCommand("check {{base}}", "main; rm -rf /", sha, sha); err == nil {
 		t.Fatal("expected error for non-SHA placeholder value")
+	}
+}
+
+func TestParseAttestPolicy(t *testing.T) {
+	raw := `
+version = 1
+
+[[steps]]
+name = "fast"
+run = "go vet ./..."
+signers = ["alice@example.com"]
+
+[[steps]]
+name = "test"
+run = "go test ./..."
+
+[attest]
+allowed_signers = ".quai/allowed_signers"
+signing_key = "~/.ssh/id_ed25519"
+signers = ["ci@example.com"]
+max_age = "7d"
+remote = "upstream"
+`
+	cfg, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if cfg.Attest.AllowedSigners != ".quai/allowed_signers" {
+		t.Fatalf("AllowedSigners = %q", cfg.Attest.AllowedSigners)
+	}
+	if cfg.Attest.MaxAgeDur != 7*24*time.Hour {
+		t.Fatalf("MaxAgeDur = %v, want 168h", cfg.Attest.MaxAgeDur)
+	}
+	if cfg.Attest.Remote != "upstream" {
+		t.Fatalf("Remote = %q, want upstream", cfg.Attest.Remote)
+	}
+	if got := cfg.AllowedPrincipalsFor(cfg.Steps[0]); len(got) != 1 || got[0] != "alice@example.com" {
+		t.Fatalf("step 0 principals = %v", got)
+	}
+	if got := cfg.AllowedPrincipalsFor(cfg.Steps[1]); len(got) != 1 || got[0] != "ci@example.com" {
+		t.Fatalf("step 1 principals = %v", got)
 	}
 }

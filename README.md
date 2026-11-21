@@ -147,7 +147,8 @@ quai land 42
 
 | Command | Purpose |
 |---|---|
-| `quai verify [--step <name>...] [--since <ref>] [--no-cache] [--json]` | Run steps in order with slot locks, mutation guard, and input-fingerprinted receipts |
+| `quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign] [--key <path>] [--push] [--json]` | Run steps in order with slot locks, mutation guard, receipts, and optional SSH-signed attestations |
+| `quai attest check\|push\|fetch [flags...]` | Verify SSH-signed in-toto/DSSE attestations in CI (`--onto <ref>`, `--sample <0-100>`) and sync `refs/quai/records/*` |
 | `quai exec --pool <name> [--slots <n>] [--wait <duration>] -- <cmd...>` | Serialize any command behind a configured slot pool in its own process group |
 | `quai tier [--since <ref>] [--json]` | Classify diff risk (`gate-only`, `diff-audit`, `full-live`), detect test tampering, list receipt status |
 | `quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]` | Verify whether a reviewed diff survived rebase unchanged (`SURVIVES` vs `CHANGED`) |
