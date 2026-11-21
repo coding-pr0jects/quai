@@ -1,0 +1,46 @@
+version = 1
+base = "main"
+
+[slots]
+heavy = 2
+
+[[steps]]
+name = "fast"
+run = "go vet ./..."
+inputs = ["**/*.go", "go.mod", "go.sum"]
+lockfiles = ["go.sum"]
+hook = "pre-push"
+slots = 0
+
+[[steps]]
+name = "test"
+run = "go test -race ./..."
+inputs = ["**/*.go", "go.mod", "go.sum"]
+lockfiles = ["go.sum"]
+pool = "heavy"
+slots = 1
+timeout = "10m"
+
+[tiers]
+default = "diff-audit"
+full_live = [
+	"internal/lock/**",
+	"internal/land/**",
+	"cmd/quai/**"
+]
+gate_only = [
+	"*.md",
+	"docs/**"
+]
+test_globs = ["**/*_test.go"]
+escalate_on_test_tamper = true
+
+[land]
+method = "squash"
+optimistic_merge = true
+required_checks = []
+global_paths = [
+	"go.mod",
+	"go.sum",
+	".quai.toml"
+]
