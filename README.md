@@ -7,7 +7,17 @@ Market and open-source landscape research: [RESEARCH.md](RESEARCH.md).
 
 ## Install
 
-Requires Go 1.23+, git 2.38+ (`git merge-tree`), and `gh` for `quai land`.
+Requires git 2.38+ (`git merge-tree`). Go and `gh` versions are pinned in [mise.toml](mise.toml).
+
+With `mise`:
+
+```bash
+mise trust
+mise install
+mise run install
+```
+
+Without `mise` (requires Go 1.23+ and `gh` for `quai land`):
 
 ```bash
 go build -o ~/.local/bin/quai ./cmd/quai
@@ -43,6 +53,12 @@ quai land 42
 `quai land` uses standard `git rebase`. To reduce false line-level conflicts when parallel agents edit different functions in the same file, configure [Ataraxy-Labs/weave](https://github.com/Ataraxy-Labs/weave) as your repository's git merge driver. `quai land` inherits it automatically during rebase.
 
 ## Development and verification
+
+```bash
+mise run test
+```
+
+Or directly:
 
 ```bash
 go vet ./...

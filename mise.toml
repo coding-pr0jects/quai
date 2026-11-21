@@ -1,0 +1,27 @@
+# Pinned toolchain and local tasks for quai.
+# Run `mise install` to provision tools and `mise run install` to install quai locally.
+
+[tools]
+go = "1.23.4"
+gh = "2.105.0"
+
+[tasks.install]
+description = "Build and install the quai binary to ~/.local/bin/quai"
+run = """
+mkdir -p "$HOME/.local/bin"
+go build -o "$HOME/.local/bin/quai" ./cmd/quai
+"""
+
+[tasks.build]
+description = "Build the quai binary to ./bin/quai"
+run = """
+mkdir -p bin
+go build -o bin/quai ./cmd/quai
+"""
+
+[tasks.test]
+description = "Run go vet and the full race-enabled test suite"
+run = """
+go vet ./...
+go test -race ./...
+"""

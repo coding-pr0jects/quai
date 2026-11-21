@@ -8,7 +8,7 @@ heavy = 2
 name = "fast"
 run = "go vet ./..."
 inputs = ["**/*.go", "go.mod", "go.sum"]
-lockfiles = ["go.sum"]
+lockfiles = ["go.sum", "mise.toml"]
 hook = "pre-push"
 slots = 0
 
@@ -16,7 +16,7 @@ slots = 0
 name = "test"
 run = "go test -race ./..."
 inputs = ["**/*.go", "go.mod", "go.sum"]
-lockfiles = ["go.sum"]
+lockfiles = ["go.sum", "mise.toml"]
 pool = "heavy"
 slots = 1
 timeout = "10m"
@@ -42,5 +42,6 @@ required_checks = []
 global_paths = [
 	"go.mod",
 	"go.sum",
+	"mise.toml",
 	".quai.toml"
 ]
