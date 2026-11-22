@@ -21,6 +21,14 @@ type TreeEntry struct {
 	BlobSHA string
 }
 
+type Worktree struct {
+	Path     string
+	Head     string
+	Branch   string
+	Bare     bool
+	Detached bool
+}
+
 type MergeTreeResult struct {
 	Clean         bool
 	TreeSHA       string
@@ -74,6 +82,7 @@ type Git interface {
 	DeleteLocalRef(ctx context.Context, refName string) error
 	DeleteRemoteRefs(ctx context.Context, remote string, refs []string) error
 	ShowFile(ctx context.Context, rev, filePath string) ([]byte, error)
+	Worktrees(ctx context.Context) ([]Worktree, error)
 }
 
 type ExecGit struct {
@@ -553,6 +562,55 @@ func (g *ExecGit) ShowFile(ctx context.Context, rev, filePath string) ([]byte, e
 		return nil, fmt.Errorf("git show %s:%s: %w (%s)", rev, filePath, err, strings.TrimSpace(string(errOut)))
 	}
 	return out, nil
+}
+
+// Worktrees returns all git worktrees reported by `git worktree list --porcelain`.
+func (g *ExecGit) Worktrees(ctx context.Context) ([]Worktree, error) {
+	out, errOut, err := g.run(ctx, nil, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("git worktree list: %w (%s)", err, strings.TrimSpace(string(errOut)))
+	}
+	return ParseWorktreeList(string(out)), nil
+}
+
+// ParseWorktreeList parses `git worktree list --porcelain` output into Worktree structs.
+func ParseWorktreeList(raw string) []Worktree {
+	var out []Worktree
+	var cur *Worktree
+	flush := func() {
+		if cur != nil && cur.Path != "" {
+			out = append(out, *cur)
+		}
+		cur = nil
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			flush()
+			continue
+		}
+		if strings.HasPrefix(line, "worktree ") {
+			flush()
+			cur = &Worktree{Path: strings.TrimPrefix(line, "worktree ")}
+			continue
+		}
+		if cur == nil {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "HEAD "):
+			cur.Head = strings.TrimPrefix(line, "HEAD ")
+		case strings.HasPrefix(line, "branch "):
+			ref := strings.TrimPrefix(line, "branch ")
+			cur.Branch = strings.TrimPrefix(ref, "refs/heads/")
+		case line == "bare":
+			cur.Bare = true
+		case line == "detached":
+			cur.Detached = true
+		}
+	}
+	flush()
+	return out
 }
 
 func splitNull(data []byte) []string {

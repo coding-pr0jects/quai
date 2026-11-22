@@ -17,6 +17,7 @@ import (
 
 	"github.com/coding-pr0jects/quai/internal/attest"
 	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/conflicts"
 	"github.com/coding-pr0jects/quai/internal/execrun"
 	"github.com/coding-pr0jects/quai/internal/forge"
 	"github.com/coding-pr0jects/quai/internal/hooks"
@@ -43,6 +44,7 @@ Usage:
   quai hooks install|uninstall|pre-push [--json]
   quai status [--json]
   quai doctor [--json]
+  quai conflicts [--base <ref>] [--conflicts-only] [--json]
   quai version
 `
 
@@ -86,6 +88,8 @@ func run(ctx context.Context, args []string, cwd string, stdin io.Reader, stdout
 		return runStatus(ctx, cwd, rest, stdout, stderr)
 	case "doctor":
 		return runDoctor(ctx, cwd, rest, stdout, stderr)
+	case "conflicts":
+		return runConflicts(ctx, cwd, rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "quai: unknown command %q\n\n%s", sub, rootUsage)
 		return 2
@@ -800,6 +804,64 @@ func runDoctor(ctx context.Context, cwd string, args []string, stdout, stderr io
 		return 1
 	}
 	return 0
+}
+
+func runConflicts(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("conflicts", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	baseRef := fs.String("base", "", "base ref (defaults to origin/<base> or <base>)")
+	conflictsOnly := fs.Bool("conflicts-only", false, "report only merge-tree conflicts and ignore clean file overlaps")
+	jsonOut := fs.Bool("json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "quai conflicts: unexpected arguments: %v\n", fs.Args())
+		return 2
+	}
+	g := repo.NewExecGit(cwd)
+	top, err := g.TopLevel(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "quai conflicts: not inside a git repository: %v\n", err)
+		return 2
+	}
+	g.Dir = top
+	cfg, _ := config.Load(top)
+	res, err := conflicts.Evaluate(ctx, g, cfg, conflicts.Options{
+		BaseRef:       *baseRef,
+		ConflictsOnly: *conflictsOnly,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "quai conflicts: %v\n", err)
+		return 2
+	}
+	if *jsonOut {
+		writeJSON(stdout, res)
+	} else if res.OK {
+		fmt.Fprintf(stdout, "no conflicts across %d worktree(s) (base %s)\n", len(res.Worktrees), res.BaseRef)
+	} else {
+		for _, bc := range res.BaseConflicts {
+			fmt.Fprintf(stdout, "base conflict  %s (%s) vs %s: %s\n", bc.Branch, bc.Worktree, bc.BaseRef, strings.Join(bc.ConflictFiles, ", "))
+		}
+		for _, col := range res.Collisions {
+			if col.Conflict {
+				fmt.Fprintf(stdout, "conflict       %s <-> %s: %s\n", labelWT(col.BranchA, col.WorktreeA), labelWT(col.BranchB, col.WorktreeB), strings.Join(col.ConflictFiles, ", "))
+			} else {
+				fmt.Fprintf(stdout, "overlap        %s <-> %s: %s\n", labelWT(col.BranchA, col.WorktreeA), labelWT(col.BranchB, col.WorktreeB), strings.Join(col.OverlapFiles, ", "))
+			}
+		}
+	}
+	if !res.OK {
+		return 1
+	}
+	return 0
+}
+
+func labelWT(branch, path string) string {
+	if branch != "" {
+		return branch
+	}
+	return path
 }
 
 func reorderFlags(args []string, valueFlags map[string]bool) []string {
