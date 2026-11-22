@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -185,11 +184,7 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 	if err != nil {
 		return Result{}, err
 	}
-	ws := &workspace{
-		caller:     g,
-		onPRBranch: branch == pr.HeadRefName,
-		tempPath:   filepath.Join(commonDir, "quai", fmt.Sprintf("%s%d-%d", TempWorktreePrefix, pr.Number, os.Getpid())),
-	}
+	ws := newWorkspace(g, commonDir, branch, pr.Number, pr.HeadRefName)
 	defer ws.close(ctx, opts.Stderr)
 
 	clean, headSHA, err := ws.prHead(ctx, pr)
@@ -235,7 +230,16 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 		return Result{}, err
 	}
 	defer lease.Release()
+	return landLocked(ctx, g, ws, branch, f, cfg, opts, method)
+}
 
+func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f forge.Forge, cfg *config.Config, opts Options, method config.MergeMethod) (Result, error) {
+	var (
+		pr      forge.PullRequest
+		headSHA string
+		clean   bool
+		err     error
+	)
 	const maxRounds = 3
 	for round := 1; round <= maxRounds; round++ {
 		pr, err = f.ViewPR(ctx, opts.PRNumber)

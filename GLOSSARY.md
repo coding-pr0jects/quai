@@ -119,6 +119,10 @@ _Avoid_: ship, merge (for the whole flow).
 **Optimistic merge**
 Landing without a rebase when `origin/<base>` moved but `git merge-tree --write-tree` is clean and the base's changes touch neither the PR's files nor the global paths.
 
+**Batch**
+Several PRs given to one `quai land` call and landed one after another under one `land.lock` session, disjoint PRs first. Each PR still gets its own merge; a batch never merges PRs together and never bisects.
+_Avoid_: train, queue (for the batch itself).
+
 **Global paths**
 The globs under `[land].global_paths` (`go.mod`, `.quai.toml`, `.github/**`…) whose change on the base disqualifies an optimistic merge, because they can affect every step.
 

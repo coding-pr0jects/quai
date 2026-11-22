@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/coding-pr0jects/quai/internal/forge"
@@ -21,6 +23,14 @@ type workspace struct {
 	onPRBranch bool
 	tempPath   string
 	temp       repo.Git
+}
+
+func newWorkspace(g repo.Git, commonDir, branch string, prNumber int, prHead string) *workspace {
+	return &workspace{
+		caller:     g,
+		onPRBranch: branch == prHead,
+		tempPath:   filepath.Join(commonDir, "quai", fmt.Sprintf("%s%d-%d", TempWorktreePrefix, prNumber, os.Getpid())),
+	}
 }
 
 func (w *workspace) prHead(ctx context.Context, pr forge.PullRequest) (bool, string, error) {

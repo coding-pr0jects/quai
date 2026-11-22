@@ -323,12 +323,13 @@ Computes `git diff --binary <merge_base>..<sha> | git patch-id --stable` for bot
 Land a GitHub pull request with virtual `git merge-tree` optimistic merge or serialized locked rebase.
 
 ```bash
-quai land <pr> [--dry-run] [--method squash|merge|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]
+quai land <pr>... [--dry-run] [--continue-on-error=false] [--method squash|merge|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]
 ```
 
 ### Arguments and flags
 
-- `<pr>`: Pull request number (accepts `42` or `#42`).
+- `<pr>...`: Pull request number (accepts `42` or `#42`). Two or more numbers land a batch (see below); a number may appear once.
+- `--continue-on-error`: In a batch, keep landing the other PRs after one fails (default `true`). With `--continue-on-error=false`, an upfront refusal skips the whole batch and the first failure skips the rest.
 - `--dry-run`: Evaluate and print the landing plan (including any detected stacked child PRs) without acquiring `land.lock`, rebasing, pushing, or merging. Exits `0` if mergeable, `1` if refused.
 - `--method`: Override `land.method` (`squash`, `merge`, or `rebase`).
 - `--restack`: After merging, automatically rebase clean local stacked child worktrees onto the updated base via `git rebase --onto` and push with `--force-with-lease`. Open child PRs targeting the landed branch are always retargeted before merge.
@@ -383,6 +384,31 @@ When `[attest].auto_prune = true` on the remote default branch, a non-dry-run la
 ```
 
 `failure` is absent unless a landing failed for a reason with a stable code; today the only code is `post-rebase-verify-failed`.
+
+### Batch landing
+
+`quai land 101 102 103` lands several PRs in one `land.lock` session:
+
+1. It reads the policy once from `.quai.toml` on `origin/<base>` (`base` from the local `.quai.toml`; a checkout without one takes the first PR's base), never from a PR branch. A missing or invalid policy there exits `2`.
+2. It inspects every PR as `--dry-run` would, from the worktree that has the PR's head branch checked out. When no worktree has it, the PR lands from the calling checkout as described in [Where `quai land` runs](#where-quai-land-runs).
+3. It lands `direct-merge` and `optimistic-merge` PRs first, in argument order, then the rest with each stacked parent before its children. Every PR re-decides its action under the lock against the moved base, with every single-PR guard (no forks, `--force-with-lease` pinned pushes, required checks, verdicts, `--match-head-commit`).
+4. A PR with a child in the batch restacks its children after it merges, as if `--restack` were given. A child whose parent did not land is skipped.
+
+Each PR runs once: no PRs are merged together, and a failure is never bisected. The batch exits `0` when every PR landed, `1` when any PR did not land (refused, failed, conflict, or skipped), `4` when `land.lock` timed out, and `1` on `SIGINT`/`SIGTERM` after releasing the lock. `--dry-run` prints the plan in landing order without taking the lock.
+
+Batch `--json` is a new shape. Each entry of `prs` is the single-PR result plus `status` (`landed`, `planned`, `refused`, `conflict`, `failed`, `skipped`) and an optional `error`, in landing order with refused PRs last (abbreviated):
+
+```json
+{
+	"ok": false,
+	"dry_run": false,
+	"prs": [
+		{"ok": true, "merged": true, "pr": 101, "action": "optimistic-merge", "status": "landed"},
+		{"ok": false, "pr": 102, "action": "rebase-and-merge", "conflict_files": ["shared.txt"], "status": "conflict"},
+		{"ok": false, "pr": 104, "action": "optimistic-merge", "reason": "checks failing: [check (FAILURE)]", "status": "failed"}
+	]
+}
+```
 
 ---
 
