@@ -51,19 +51,21 @@ func TestVerdictSurvivesCleanRebaseAndInvalidatesOnChange(t *testing.T) {
 	runGit(t, tmp, "init", "-q", "-b", "main", dir)
 	runGit(t, dir, "config", "user.name", "rev")
 	runGit(t, dir, "config", "user.email", "reviewer@example.com")
-	writeFile(t, filepath.Join(dir, "ui/app.ts"), "export const x = 1\n")
-	writeFile(t, filepath.Join(dir, "docs/a.md"), "v1\n")
-	runGit(t, dir, "add", "-A")
-	runGit(t, dir, "commit", "-qm", "init")
-
-	cfg, err := config.Parse([]byte(`
+	policy := `
 version = 1
 base = "main"
 [tiers]
 default = "diff-audit"
 full_live = ["ui/**"]
 gate_only = ["docs/**"]
-`))
+`
+	writeFile(t, filepath.Join(dir, "ui/app.ts"), "export const x = 1\n")
+	writeFile(t, filepath.Join(dir, "docs/a.md"), "v1\n")
+	writeFile(t, filepath.Join(dir, ".quai.toml"), policy)
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-qm", "init")
+
+	cfg, err := config.Parse([]byte(policy))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +112,7 @@ gate_only = ["docs/**"]
 	writeFile(t, filepath.Join(dir, "docs/evidence/shot.png"), "png\n")
 	runGit(t, dir, "add", "-A")
 	runGit(t, dir, "commit", "-qm", "evidence")
-	afterEvidence, err := Check(ctx, g, cfg, CheckOptions{RequireSigned: true, AllowedSigners: allowedPath})
+	afterEvidence, err := Check(ctx, g, cfg, CheckOptions{ConfigRef: "main", RequireSigned: true, AllowedSigners: allowedPath})
 	if err != nil || !afterEvidence.OK || afterEvidence.Record.PatchID == afterEvidence.PatchID {
 		t.Fatalf("a gate-only commit must keep the verdict through its code patch-id, got res=%+v err=%v", afterEvidence, err)
 	}
@@ -140,32 +142,46 @@ func TestVerdictSurvivesGateOnlyFollowUps(t *testing.T) {
 	allowedPath := filepath.Join(tmp, "allowed_signers")
 	writeFile(t, allowedPath, "reviewer@example.com "+strings.TrimSpace(string(pubRaw))+"\n")
 
+	const basePolicy = `
+version = 1
+base = "main"
+[tiers]
+default = "diff-audit"
+full_live = ["ui/**", "docs/api/**"]
+gate_only = ["docs/**", ".quai/**"]
+[attest]
+allowed_signers = ".quai/allowed_signers"
+`
+	const widenedPolicy = `
+version = 1
+base = "main"
+[tiers]
+default = "diff-audit"
+full_live = ["ui/**", "docs/api/**"]
+gate_only = ["docs/**", ".quai/**", "lib/**", ".quai.toml"]
+[attest]
+allowed_signers = ".quai/allowed_signers"
+`
 	runGit(t, tmp, "init", "-q", "-b", "main", dir)
 	runGit(t, dir, "config", "user.name", "rev")
 	runGit(t, dir, "config", "user.email", "reviewer@example.com")
 	writeFile(t, filepath.Join(dir, "ui/app.ts"), "export const x = 1\n")
 	writeFile(t, filepath.Join(dir, "docs/a.md"), "v1\n")
 	writeFile(t, filepath.Join(dir, "docs/api/schema.md"), "v1\n")
+	writeFile(t, filepath.Join(dir, ".quai/allowed_signers"), "v1\n")
+	writeFile(t, filepath.Join(dir, ".quai.toml"), basePolicy)
 	runGit(t, dir, "add", "-A")
 	runGit(t, dir, "commit", "-qm", "init")
-
-	cfg, err := config.Parse([]byte(`
-version = 1
-base = "main"
-[tiers]
-default = "diff-audit"
-full_live = ["ui/**", "docs/api/**"]
-gate_only = ["docs/**"]
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
 	g := repo.NewExecGit(dir)
 
 	runGit(t, dir, "switch", "-q", "-c", "feat/ui")
 	writeFile(t, filepath.Join(dir, "ui/app.ts"), "export const x = 2\n")
 	writeFile(t, filepath.Join(dir, "docs/a.md"), "v2\n")
 	runGit(t, dir, "commit", "-qam", "ui change with docs")
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec, err := RecordVerdict(ctx, g, cfg, RecordOptions{Status: StatusApproved, Sign: true, SigningKey: keyPath})
 	if err != nil || rec.Record.CodePatchID == "" || rec.Record.CodePatchID == rec.Record.PatchID || rec.CodeRef != RefName(rec.Record.CodePatchID) {
 		t.Fatalf("a reviewed diff with gate-only paths must record its code patch-id under its own ref: res=%+v err=%v", rec, err)
@@ -180,11 +196,14 @@ gate_only = ["docs/**"]
 		{"evidence added", map[string]string{"docs/evidence/shot.png": "png\n"}, true},
 		{"gate-only doc edited", map[string]string{"docs/a.md": "v3\n"}, true},
 		{"gate-only doc back to base", map[string]string{"docs/a.md": "v1\n"}, true},
+		{"gate-only file beside allowed_signers", map[string]string{".quai/readme.txt": "hi\n"}, true},
 		{"code edited", map[string]string{"ui/app.ts": "export const x = 3\n"}, false},
 		{"full_live beats gate_only", map[string]string{"docs/api/schema.md": "v2\n"}, false},
 		{"test file under gate_only", map[string]string{"docs/example_test.go": "package docs\n"}, false},
 		{"path outside every glob", map[string]string{"tool.go": "package tool\n"}, false},
 		{"code and evidence", map[string]string{"ui/app.ts": "export const x = 3\n", "docs/evidence/shot.png": "png\n"}, false},
+		{"allowed_signers under gate_only", map[string]string{".quai/allowed_signers": "v2\n"}, false},
+		{"branch widens gate_only to hide code", map[string]string{".quai.toml": widenedPolicy, "lib/evil.go": "package lib\n"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,16 +213,26 @@ gate_only = ["docs/**"]
 			}
 			runGit(t, dir, "add", "-A")
 			runGit(t, dir, "commit", "-qm", tc.name)
-			for _, opts := range []CheckOptions{{}, {RequireSigned: true, AllowedSigners: allowedPath}} {
-				res, err := Check(ctx, g, cfg, opts)
+			branchCfg, err := config.Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, opts := range []CheckOptions{
+				{ConfigRef: "main"},
+				{ConfigRef: "main", RequireSigned: true, AllowedSigners: allowedPath},
+				{},
+				{RequireSigned: true, AllowedSigners: allowedPath},
+			} {
+				res, err := Check(ctx, g, branchCfg, opts)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if res.OK != tc.valid || (!tc.valid && res.Status != "missing") {
-					t.Fatalf("require-signed=%v: want valid=%v, got res=%+v", opts.RequireSigned, tc.valid, res)
+				wantValid := tc.valid && opts.ConfigRef != ""
+				if res.OK != wantValid || (!wantValid && res.Status != "missing") {
+					t.Fatalf("opts=%+v: want valid=%v, got res=%+v", opts, wantValid, res)
 				}
-				if tc.valid && (res.Record.PatchID != rec.Record.PatchID || res.Signed != opts.RequireSigned) {
-					t.Fatalf("require-signed=%v: matched the wrong verdict: %+v", opts.RequireSigned, res)
+				if wantValid && (res.Record.PatchID != rec.Record.PatchID || res.Signed != opts.RequireSigned) {
+					t.Fatalf("opts=%+v: matched the wrong verdict: %+v", opts, res)
 				}
 			}
 		})

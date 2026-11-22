@@ -1231,6 +1231,7 @@ func runVerdict(ctx context.Context, cwd string, args []string, stdout, stderr i
 		since := fs.String("since", "", "base ref")
 		requireSigned := fs.Bool("require-signed", false, "require a cryptographically signed verdict ref")
 		allowedSigners := fs.String("allowed-signers", "", "path to OpenSSH allowed_signers file")
+		configRef := fs.String("config-ref", "", "load .quai.toml from a trusted git ref (e.g. origin/main); needed to keep a verdict across gate-only commits")
 		fetch := fs.Bool("fetch", false, "fetch refs/quai/verdicts/<patch-id> from remote first")
 		remote := fs.String("remote", "", "git remote for --fetch")
 		jsonOut := fs.Bool("json", false, "output JSON")
@@ -1248,6 +1249,7 @@ func runVerdict(ctx context.Context, cwd string, args []string, stdout, stderr i
 		}
 		res, err := verdict.Check(ctx, g, cfg, verdict.CheckOptions{
 			Since:          *since,
+			ConfigRef:      *configRef,
 			RequireSigned:  *requireSigned || cfg.Land.RequireSignedVerdict,
 			AllowedSigners: *allowedSigners,
 			Fetch:          *fetch,

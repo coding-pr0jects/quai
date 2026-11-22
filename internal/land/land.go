@@ -551,6 +551,7 @@ func enforceVerdict(ctx context.Context, ws *workspace, headSHA string, cfg *con
 	}
 	vRes, err := verdict.Check(ctx, g, cfg, verdict.CheckOptions{
 		Since:          since,
+		ConfigRef:      since,
 		RequireSigned:  opts.RequireSignedVerdict || cfg.Land.RequireSignedVerdict,
 		AllowedSigners: opts.AllowedSigners,
 	})

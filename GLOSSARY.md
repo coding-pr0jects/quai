@@ -117,7 +117,7 @@ A diff that deletes a test file or adds a skip marker to one. With `escalate_on_
 The stable `git patch-id` of a diff, independent of its base and line numbers.
 
 **Code patch-id**
-The patch-id of a branch diff limited to the paths that are not gate-only (matching `[tiers].gate_only` and no higher-tier or test glob). Equal code patch-ids mean only gate-only paths differ, so an approved verdict still applies.
+The patch-id of a branch diff limited to the paths that are not gate-only (matching `[tiers].gate_only` and no higher-tier or test glob). A diff that changes `.quai.toml` or the `allowed_signers` file has none. Under a policy read from a trusted ref, equal code patch-ids mean only gate-only paths differ, so an approved verdict still applies.
 
 **Survives / changed**
 The two outcomes of `quai patch-id`: the rebased diff is identical (`SURVIVES`), or files drifted (`CHANGED`, with `changed_files`). A review of a surviving patch still applies.

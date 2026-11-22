@@ -472,13 +472,15 @@ func TestLandEnforcesVerdictOnConfiguredTier(t *testing.T) {
 	origin := filepath.Join(tmp, "origin.git")
 	work := filepath.Join(tmp, "work")
 
-	run := func(dir string, args ...string) {
+	run := func(dir string, args ...string) string {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
+		out, err := cmd.CombinedOutput()
+		if err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, string(out))
 		}
+		return strings.TrimSpace(string(out))
 	}
 	write := func(rel, body string) {
 		t.Helper()
@@ -488,6 +490,24 @@ func TestLandEnforcesVerdictOnConfiguredTier(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	const basePolicy = `
+version = 1
+[tiers]
+full_live = ["ui/**"]
+gate_only = ["docs/**"]
+[land]
+required_checks = ["check"]
+require_verdict_tiers = ["full-live"]
+`
+	const widenedPolicy = `
+version = 1
+[tiers]
+full_live = ["ui/**"]
+gate_only = ["docs/**", "lib/**", ".quai.toml"]
+[land]
+required_checks = ["check"]
+require_verdict_tiers = ["full-live"]
+`
 
 	run(tmp, "init", "--bare", "-q", "-b", "main", origin)
 	run(tmp, "init", "-q", "-b", "main", work)
@@ -495,6 +515,7 @@ func TestLandEnforcesVerdictOnConfiguredTier(t *testing.T) {
 	run(work, "config", "user.email", "rev@example.com")
 	run(work, "remote", "add", "origin", origin)
 	write("ui/app.ts", "v1\n")
+	write(".quai.toml", basePolicy)
 	run(work, "add", "-A")
 	run(work, "commit", "-qm", "init")
 	run(work, "push", "-q", "-u", "origin", "main")
@@ -503,48 +524,65 @@ func TestLandEnforcesVerdictOnConfiguredTier(t *testing.T) {
 	write("ui/app.ts", "v2\n")
 	run(work, "commit", "-qam", "ui change")
 	run(work, "push", "-q", "-u", "origin", "feat/ui-gate")
+	reviewed := run(work, "rev-parse", "HEAD")
 
 	g := repo.NewExecGit(work)
-	headSHA, _ := g.HeadSHA(ctx)
-
-	cfg, err := config.Parse([]byte(`
-version = 1
-[tiers]
-full_live = ["ui/**"]
-[land]
-required_checks = ["check"]
-require_verdict_tiers = ["full-live"]
-`))
+	cfg, err := config.Parse([]byte(basePolicy))
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	ff := &fakeForge{
 		pr: forge.PullRequest{
 			Number:           21,
 			State:            "OPEN",
 			BaseRefName:      "main",
 			HeadRefName:      "feat/ui-gate",
-			HeadRefOid:       headSHA,
+			HeadRefOid:       reviewed,
 			MergeStateStatus: "CLEAN",
 		},
 		checks: []forge.Check{{Name: "check", State: "SUCCESS", Bucket: "pass"}},
 	}
-
-	var buf bytes.Buffer
-	// Without verdict -> refused!
-	resRefused, err := Run(ctx, g, ff, cfg, Options{PRNumber: 21, Stdout: &buf, Stderr: &buf, ChecksPoll: 10 * time.Millisecond})
-	if err != nil || resRefused.OK || resRefused.Action != ActionRefuse || resRefused.Merged {
-		t.Fatalf("expected land refusal without verdict, got res=%+v err=%v", resRefused, err)
+	land := func(cfg *config.Config) Result {
+		t.Helper()
+		var buf bytes.Buffer
+		res, err := Run(ctx, g, ff, cfg, Options{PRNumber: 21, RequireVerdict: true, Stdout: &buf, Stderr: &buf, ChecksPoll: 10 * time.Millisecond})
+		if err != nil {
+			t.Fatalf("land: %v\n%s", err, buf.String())
+		}
+		return res
+	}
+	pushFollowUp := func(edits map[string]string) {
+		t.Helper()
+		run(work, "reset", "-q", "--hard", reviewed)
+		for rel, body := range edits {
+			write(rel, body)
+		}
+		run(work, "add", "-A")
+		run(work, "commit", "-qm", "follow-up")
+		run(work, "push", "-q", "-f", "origin", "feat/ui-gate")
+		ff.pr.HeadRefOid = run(work, "rev-parse", "HEAD")
 	}
 
-	// Record approved verdict -> land succeeds!
+	if res := land(cfg); res.OK || res.Action != ActionRefuse || res.Merged {
+		t.Fatalf("expected land refusal without verdict, got res=%+v", res)
+	}
 	if _, err := verdict.RecordVerdict(ctx, g, cfg, verdict.RecordOptions{Status: verdict.StatusApproved}); err != nil {
 		t.Fatalf("RecordVerdict failed: %v", err)
 	}
-	resOK, err := Run(ctx, g, ff, cfg, Options{PRNumber: 21, Stdout: &buf, Stderr: &buf, ChecksPoll: 10 * time.Millisecond})
-	if err != nil || !resOK.OK || !resOK.Merged || resOK.Verdict == nil || !resOK.Verdict.OK {
-		t.Fatalf("expected land to succeed with approved verdict, got res=%+v err=%v", resOK, err)
+
+	pushFollowUp(map[string]string{".quai.toml": widenedPolicy, "lib/evil.go": "package lib\n"})
+	widened, err := config.Parse([]byte(widenedPolicy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := land(widened); res.OK || res.Merged || res.Verdict == nil || res.Verdict.Status != "missing" {
+		t.Fatalf("a branch widening its own gate_only must not keep the verdict, got res=%+v verdict=%+v", res, res.Verdict)
+	}
+
+	pushFollowUp(map[string]string{"docs/evidence/shot.png": "png\n"})
+	res := land(cfg)
+	if !res.OK || !res.Merged || res.Verdict == nil || !res.Verdict.OK || res.Verdict.Record.PatchID == res.Verdict.PatchID {
+		t.Fatalf("a gate-only follow-up must keep the verdict under the base policy, got res=%+v verdict=%+v", res, res.Verdict)
 	}
 }
 

@@ -366,7 +366,7 @@ quai land <pr>... [--dry-run] [--continue-on-error=false] [--method squash|merge
 - `--dry-run`: Evaluate and print the landing plan (including any detected stacked child PRs) without acquiring `land.lock`, rebasing, pushing, or merging. Exits `0` if mergeable, `1` if refused.
 - `--method`: Override `land.method` (`squash`, `merge`, or `rebase`).
 - `--restack`: After merging, automatically rebase clean local stacked child worktrees onto the updated base via `git rebase --onto` and push with `--force-with-lease`. Open child PRs targeting the landed branch are always retargeted before merge.
-- `--require-verdict`: Require an approved review verdict for this PR's `patch-id` regardless of tier.
+- `--require-verdict`: Require an approved review verdict for this PR's `patch-id` regardless of tier. The verdict is checked against the policy in `origin/<base>`'s `.quai.toml` (see [`quai verdict`](#quai-verdict)).
 - `--no-sign` / `--no-push`: Disable automatic attestation signing or pushing during `rebase-and-merge` verification.
 - `--json`: Print structured JSON.
 
@@ -560,12 +560,23 @@ Record and check review verdicts keyed by the branch's stable `git patch-id` and
 
 ```bash
 quai verdict record [--status approved|rejected] [--tier <tier>] [--reviewer <id>] [--note <text>] [--since <ref>] [--sign] [--key <path>] [--push] [--remote <name>] [--json]
-quai verdict check [--since <ref>] [--require-signed] [--allowed-signers <path>] [--fetch] [--remote <name>] [--json]
+quai verdict check [--since <ref>] [--config-ref <ref>] [--require-signed] [--allowed-signers <path>] [--fetch] [--remote <name>] [--json]
 ```
 
-- `record` also stores the **code patch-id**: the patch-id of the branch diff limited to the paths that are not gate-only. A path is gate-only here when it matches `[tiers].gate_only` and neither `full_live`, `diff_audit`, nor a test glob; `[tiers].default` never makes a path gate-only. When the code patch-id differs from the patch-id, the verdict is also written under `refs/quai/verdicts/<code-patch-id>` (`code_ref` in `--json`), and `--push` pushes both refs. A later verdict on the same code replaces the earlier one under that ref.
-- `check` accepts a verdict whose patch-id matches the branch, or whose code patch-id (or patch-id) matches the branch's code patch-id: the branch then changed only gate-only paths since the review, such as `docs/evidence/**` screenshots. `--fetch` fetches both refs. The tier check still applies to the current branch tier. `--json` reports `code_patch_id`, and `record.patch_id` names the reviewed diff. `quai land` applies the same rule through `--require-verdict` and `[land].require_verdict_tiers`.
-- The gate-only globs come from the `.quai.toml` of the working tree. In CI, check out the base's `.quai.toml` so a PR cannot widen `gate_only` to keep its own verdict.
+- `record` also stores the **code patch-id**: the patch-id of the branch diff limited to the paths that are not gate-only. A path is gate-only here when it matches `[tiers].gate_only` and neither `full_live`, `diff_audit`, nor a test glob; `[tiers].default` never makes a path gate-only. `.quai.toml` and the `[attest].allowed_signers` file are never gate-only: a diff that changes either has no code patch-id, so only its exact patch-id can match. When the code patch-id differs from the patch-id, the verdict is also written under `refs/quai/verdicts/<code-patch-id>` (`code_ref` in `--json`), and `--push` pushes both refs. A later verdict on the same code replaces the earlier one under that ref.
+- `check` always accepts a verdict whose patch-id matches the branch.
+- `--config-ref <ref>` (for example `origin/main`) loads `.quai.toml` from that trusted ref via `git show`, as `quai attest check --config-ref` does, and adds its `[land].require_signed_verdict`. Only with it does `check` also accept a verdict whose code patch-id (or patch-id) matches the branch's code patch-id: the branch then changed only gate-only paths since the review, such as `docs/evidence/**` screenshots. Without `--config-ref`, the gate-only globs would come from the branch's own `.quai.toml`, which the branch can widen, so only the exact patch-id matches.
+- `--fetch` fetches both refs. The tier check still applies to the current branch tier. `--json` reports `code_patch_id` when it was computed, and `record.patch_id` names the reviewed diff.
+- `quai land` checks verdicts (`--require-verdict`, `[land].require_verdict_tiers`) against the `.quai.toml` of `origin/<base>`, so the code patch-id rule applies there without a flag. When the base has no `.quai.toml`, the verdict check fails.
+
+```yaml
+- name: Check the review verdict
+  env:
+    ALLOWED_SIGNERS: ${{ vars.QUAI_ALLOWED_SIGNERS }}
+  run: |
+    printf '%s\n' "$ALLOWED_SIGNERS" > /tmp/quai_allowed_signers
+    quai verdict check --fetch --since origin/main --config-ref origin/main --require-signed --allowed-signers /tmp/quai_allowed_signers --json
+```
 
 ---
 

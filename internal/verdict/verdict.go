@@ -78,6 +78,7 @@ type RecordResult struct {
 
 type CheckOptions struct {
 	Since          string
+	ConfigRef      string
 	RequireSigned  bool
 	AllowedSigners string
 	Fetch          bool
@@ -153,7 +154,9 @@ func ComputePatchID(ctx context.Context, g repo.Git, cfg *config.Config, since s
 }
 
 // CodePatchID computes the patch-id of the base..head diff limited to the paths that
-// tier.GateOnlyPath does not call gate-only. It is "" when every changed path is gate-only.
+// tier.GateOnlyPath does not call gate-only. It is "" when every changed path is gate-only,
+// and when the diff changes a policy file (.quai.toml or the configured allowed_signers),
+// because cfg then may not be the policy the diff is checked against.
 func CodePatchID(ctx context.Context, g repo.Git, cfg *config.Config, baseSHA, headSHA string) (string, error) {
 	files, err := g.DiffNameOnly(ctx, baseSHA, headSHA)
 	if err != nil {
@@ -161,6 +164,9 @@ func CodePatchID(ctx context.Context, g repo.Git, cfg *config.Config, baseSHA, h
 	}
 	var code []string
 	for _, f := range files {
+		if isPolicyFile(cfg, f) {
+			return "", nil
+		}
 		if !tier.GateOnlyPath(cfg.Tiers, f) {
 			code = append(code, f)
 		}
@@ -170,6 +176,14 @@ func CodePatchID(ctx context.Context, g repo.Git, cfg *config.Config, baseSHA, h
 		return "", err
 	}
 	return g.PatchID(ctx, diff)
+}
+
+func isPolicyFile(cfg *config.Config, path string) bool {
+	if path == config.FileName {
+		return true
+	}
+	signers := cfg.Attest.AllowedSigners
+	return signers != "" && !filepath.IsAbs(signers) && filepath.ToSlash(filepath.Clean(signers)) == path
 }
 
 func lookupKeys(patchID, codePatchID string) []string {
@@ -325,9 +339,19 @@ func RecordVerdict(ctx context.Context, g repo.Git, cfg *config.Config, opts Rec
 }
 
 // Check verifies whether an approved verdict covering the current branch tier exists
-// for the current branch's stable patch-id, or for its code patch-id when the branch
-// changed only gate-only paths since the review.
+// for the current branch's stable patch-id. With opts.ConfigRef, it loads the policy from
+// that trusted ref and also accepts a verdict for the branch's code patch-id, when the
+// branch changed only gate-only paths since the review. Without it, the branch's own
+// .quai.toml could widen gate_only, so only the exact patch-id matches.
 func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOptions) (CheckResult, error) {
+	if opts.ConfigRef != "" {
+		var err error
+		cfg, err = attest.LoadConfigRef(ctx, g, opts.ConfigRef)
+		if err != nil {
+			return CheckResult{}, err
+		}
+		opts.RequireSigned = opts.RequireSigned || cfg.Land.RequireSignedVerdict
+	}
 	tRes, err := tier.Evaluate(ctx, g, cfg, opts.Since)
 	if err != nil {
 		return CheckResult{}, err
@@ -343,9 +367,12 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 			BranchTier: tRes.Tier,
 		}, nil
 	}
-	codePID, err := CodePatchID(ctx, g, cfg, baseSHA, headSHA)
-	if err != nil {
-		return CheckResult{}, err
+	var codePID string
+	if opts.ConfigRef != "" {
+		codePID, err = CodePatchID(ctx, g, cfg, baseSHA, headSHA)
+		if err != nil {
+			return CheckResult{}, err
+		}
 	}
 	keys := lookupKeys(pid, codePID)
 	failed := func(status, msg string) CheckResult {
@@ -385,7 +412,7 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 		if problem != "" && opts.RequireSigned {
 			return failed("invalid", problem), nil
 		}
-		if found {
+		if found && coversPatch(rec, pid, codePID) {
 			res := evaluate(rec)
 			res.Signed = true
 			res.Signer = signer
@@ -406,7 +433,7 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 		if err != nil {
 			return failed("invalid", err.Error()), nil
 		}
-		if ok {
+		if ok && coversPatch(rec, pid, codePID) {
 			return evaluate(rec), nil
 		}
 	}
@@ -454,8 +481,8 @@ func evaluateRecord(rec Record, patchID, codePatchID string, branchTier config.T
 	result := func(ok bool, status, msg string) CheckResult {
 		return CheckResult{OK: ok, Status: status, PatchID: patchID, CodePatchID: codePatchID, BranchTier: branchTier, Record: &rCopy, Error: msg}
 	}
-	if rec.Version != CurrentVersion || !coversPatch(rec, patchID, codePatchID) {
-		return result(false, "invalid", "verdict patch-id or version mismatch")
+	if rec.Version != CurrentVersion {
+		return result(false, "invalid", fmt.Sprintf("unsupported verdict version %d", rec.Version))
 	}
 	if maxAge > 0 && !rec.CreatedAt.IsZero() && now.Sub(rec.CreatedAt) > maxAge {
 		return result(false, "invalid", "verdict expired")
