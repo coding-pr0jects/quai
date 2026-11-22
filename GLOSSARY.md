@@ -11,6 +11,16 @@ _Avoid_: check, job, task.
 **Inputs**
 The globs whose tracked blobs a step reads. A change outside a step's inputs leaves its fingerprint, and so its receipt, valid.
 
+**Exclusion**
+An `inputs` glob that starts with `!`. A path it matches is not an input of the step, whatever the order of the globs, unless a lockfile glob matches it.
+
+**Prerequisite**
+A step named in another step's `depends_on`. Every command that selects the dependent step runs or checks its prerequisites first, each once.
+_Avoid_: dependency step, parent step.
+
+**Passed steps**
+The `QUAI_PASSED_STEPS` list `quai verify` gives each step: the steps that passed or were cached earlier in the same run. `quai` writes it and never reads it.
+
 **Lockfiles**
 Files hashed into every fingerprint of a step whatever its inputs, such as `go.sum` or `mise.toml`, because a toolchain or dependency change can change any result.
 
@@ -106,12 +116,15 @@ A diff that deletes a test file or adds a skip marker to one. With `escalate_on_
 **Patch-id**
 The stable `git patch-id` of a diff, independent of its base and line numbers.
 
+**Code patch-id**
+The patch-id of a branch diff limited to the paths that are not gate-only (matching `[tiers].gate_only` and no higher-tier or test glob). Equal code patch-ids mean only gate-only paths differ, so an approved verdict still applies.
+
 **Survives / changed**
 The two outcomes of `quai patch-id`: the rebased diff is identical (`SURVIVES`), or files drifted (`CHANGED`, with `changed_files`). A review of a surviving patch still applies.
 _Avoid_: same, different, stale.
 
 **Verdict**
-A reviewer's `approved` or `rejected` decision keyed by patch-id and tier, stored under `refs/quai/verdicts/<patch-id>`, optionally signed. It survives clean rebases and lapses when the patch changes.
+A reviewer's `approved` or `rejected` decision keyed by patch-id and tier, stored under `refs/quai/verdicts/<patch-id>` (and `<code-patch-id>` when it differs), optionally signed. It survives clean rebases and gate-only follow-up commits, and lapses when the code patch-id changes.
 _Avoid_: approval, review result.
 
 ## Landing

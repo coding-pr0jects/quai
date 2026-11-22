@@ -627,7 +627,7 @@ func Push(ctx context.Context, g repo.Git, cfg *config.Config, opts PushOptions)
 	if err != nil {
 		return PushResult{}, err
 	}
-	steps, err := selectSteps(cfg, opts.StepNames)
+	steps, err := cfg.StepPlan(opts.StepNames)
 	if err != nil {
 		return PushResult{}, err
 	}
@@ -762,7 +762,7 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 		remote = cfg.Attest.Remote
 	}
 
-	steps, err := selectSteps(cfg, opts.StepNames)
+	steps, err := cfg.StepPlan(opts.StepNames)
 	if err != nil {
 		return CheckResult{}, err
 	}
@@ -1061,21 +1061,6 @@ func resolveCurrentTreeAndBase(ctx context.Context, g repo.Git, cfg *config.Conf
 		return "", "", fmt.Errorf("resolve merge-base with %s: %w", baseRef, err)
 	}
 	return treeSHA, baseSHA, nil
-}
-
-func selectSteps(cfg *config.Config, names []string) ([]config.Step, error) {
-	if len(names) == 0 {
-		return cfg.Steps, nil
-	}
-	out := make([]config.Step, 0, len(names))
-	for _, n := range names {
-		s, ok := cfg.StepByName(n)
-		if !ok {
-			return nil, fmt.Errorf("unknown step %q", n)
-		}
-		out = append(out, s)
-	}
-	return out, nil
 }
 
 func cryptoRoll100() int {

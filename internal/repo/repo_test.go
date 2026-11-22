@@ -158,6 +158,13 @@ func TestRemoteAndRefArgumentsCannotInjectOptions(t *testing.T) {
 	if err := g.PushRefs(ctx, payload, []string{"refs/heads/main"}); err == nil {
 		t.Fatal("expected push to reject an option-shaped remote name")
 	}
+	written := filepath.Join(t.TempDir(), "diff-output")
+	if _, err := g.DiffBinaryPaths(ctx, "--output="+written, "HEAD", []string{"README.md"}); err == nil {
+		t.Fatal("expected diff to reject an option-shaped revision")
+	}
+	if _, err := os.Stat(written); !os.IsNotExist(err) {
+		t.Fatalf("option injection executed: diff wrote %s", written)
+	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("option injection executed: marker %s exists", marker)
 	}

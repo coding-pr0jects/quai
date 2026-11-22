@@ -34,3 +34,26 @@ func TestMatch(t *testing.T) {
 		}
 	}
 }
+
+func TestIncluded(t *testing.T) {
+	cases := []struct {
+		patterns []string
+		path     string
+		want     bool
+	}{
+		{[]string{"**"}, "main.go", true},
+		{[]string{"**", "!docs/evidence/**"}, "docs/evidence/shot.png", false},
+		{[]string{"**", "!docs/evidence/**"}, "docs/guide.md", true},
+		{[]string{"!docs/evidence/**", "**"}, "docs/evidence/a/b.png", false},
+		{[]string{"**/*.go", "!**/*_test.go"}, "internal/a/a_test.go", false},
+		{[]string{"**/*.go", "!**/*_test.go"}, "internal/a/a.go", true},
+		{[]string{"**/*.go", "!**/*_test.go"}, "README.md", false},
+		{[]string{"!README.md"}, "main.go", false},
+		{nil, "main.go", false},
+	}
+	for _, tc := range cases {
+		if got := Included(tc.patterns, tc.path); got != tc.want {
+			t.Errorf("Included(%q, %q) = %v, want %v", tc.patterns, tc.path, got, tc.want)
+		}
+	}
+}

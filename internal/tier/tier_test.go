@@ -104,3 +104,29 @@ gate_only = ["pkg/**"]
 		t.Fatalf("unexpected tamper findings: %+v", res.TestsTampered)
 	}
 }
+
+func TestGateOnlyPath(t *testing.T) {
+	policy := config.TierPolicy{
+		Default:   config.TierGateOnly,
+		FullLive:  []string{"docs/api/**"},
+		DiffAudit: []string{"docs/config.md"},
+		GateOnly:  []string{"docs/**", "*.md"},
+		TestGlobs: []string{"**/*_test.go"},
+	}
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"docs/evidence/shot.png", true},
+		{"README.md", true},
+		{"docs/api/schema.md", false},
+		{"docs/config.md", false},
+		{"docs/example_test.go", false},
+		{"main.go", false},
+	}
+	for _, tc := range cases {
+		if got := GateOnlyPath(policy, tc.path); got != tc.want {
+			t.Errorf("GateOnlyPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}

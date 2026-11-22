@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -18,6 +19,7 @@ type Request struct {
 	Argv            []string
 	ShellCmd        string // if non-empty, runs via sh -c <ShellCmd>
 	Timeout         time.Duration
+	Env             []string // KEY=value pairs added to the inherited environment; a later pair wins
 	Stdin           io.Reader
 	Stdout          io.Writer
 	Stderr          io.Writer
@@ -68,6 +70,9 @@ func Run(ctx context.Context, req Request) (int, error) {
 		cmd = exec.Command(req.Argv[0], req.Argv[1:]...)
 	}
 	cmd.Dir = req.Dir
+	if len(req.Env) > 0 {
+		cmd.Env = append(os.Environ(), req.Env...)
+	}
 	cmd.Stdin = req.Stdin
 	cmd.Stdout = req.Stdout
 	cmd.Stderr = req.Stderr

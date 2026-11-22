@@ -20,6 +20,10 @@ import (
 	"github.com/coding-pr0jects/quai/internal/tier"
 )
 
+// PassedStepsEnv names the variable that gives each step the comma-separated steps that
+// already passed or were cached earlier in the same quai verify run. quai only writes it.
+const PassedStepsEnv = "QUAI_PASSED_STEPS"
+
 type Options struct {
 	StepNames      []string
 	Since          string
@@ -136,7 +140,7 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 		return Result{}, fmt.Errorf("resolve merge-base with %s: %w", baseRef, err)
 	}
 
-	selected, err := selectSteps(cfg, opts.StepNames)
+	selected, err := cfg.StepPlan(opts.StepNames)
 	if err != nil {
 		return Result{}, err
 	}
@@ -183,12 +187,13 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 		res.BaseWarning = repo.StaleBaseWarning(baseRef, age, fetched)
 	}
 
+	var passed []string
 	for _, step := range selected {
 		route := routeForStep(step, routing)
 		stepRes, receiptWritten, attRef, stepErr := runOneStep(
 			ctx, g, cfg, store, locksRoot, topLevel,
 			step, route, clean, headSHA, treeSHA, baseSHA,
-			signingKey, principal, opts,
+			signingKey, principal, passed, opts,
 		)
 		if receiptWritten {
 			res.ReceiptWritten = true
@@ -209,6 +214,7 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 			res.OK = false
 			return res, nil
 		}
+		passed = append(passed, step.Name)
 	}
 
 	if opts.Sign && opts.Push && len(res.Attestations) > 0 {
@@ -354,6 +360,7 @@ func runOneStep(
 	clean bool,
 	headSHA, treeSHA, baseSHA string,
 	signingKey, principal string,
+	passed []string,
 	opts Options,
 ) (StepResult, bool, string, error) {
 	started := time.Now()
@@ -445,6 +452,7 @@ func runOneStep(
 	code, runErr := execrun.Run(ctx, execrun.Request{
 		Dir:             topLevel,
 		ShellCmd:        expanded,
+		Env:             []string{PassedStepsEnv + "=" + strings.Join(passed, ",")},
 		Timeout:         step.Duration,
 		Stdout:          stdout,
 		Stderr:          stderr,
@@ -580,21 +588,6 @@ func checkCache(
 		fmt.Fprintf(opts.Stdout, "cached  %s (%s)\n", stepName, shortSHA(fp))
 	}
 	return sr, attRef, true, nil
-}
-
-func selectSteps(cfg *config.Config, names []string) ([]config.Step, error) {
-	if len(names) == 0 {
-		return cfg.Steps, nil
-	}
-	out := make([]config.Step, 0, len(names))
-	for _, n := range names {
-		step, ok := cfg.StepByName(n)
-		if !ok {
-			return nil, fmt.Errorf("unknown step %q", n)
-		}
-		out = append(out, step)
-	}
-	return out, nil
 }
 
 func parseStatusPaths(porcelain string) []string {

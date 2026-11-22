@@ -87,6 +87,7 @@ type Step struct {
 	Run       string        `toml:"run"`
 	Inputs    []string      `toml:"inputs"`
 	Lockfiles []string      `toml:"lockfiles"`
+	DependsOn []string      `toml:"depends_on"`
 	Hook      string        `toml:"hook"`
 	Pool      string        `toml:"pool"`
 	Slots     int           `toml:"slots"`
@@ -266,6 +267,9 @@ func (c *Config) normalizeAndValidate() error {
 		if len(s.Inputs) == 0 {
 			s.Inputs = []string{"**"}
 		}
+		if err := validateInputs(s); err != nil {
+			return err
+		}
 		if s.Hook != "" && s.Hook != "pre-push" {
 			return fmt.Errorf("step %q has unsupported hook %q: expected \"pre-push\" or empty", s.Name, s.Hook)
 		}
@@ -315,6 +319,10 @@ func (c *Config) normalizeAndValidate() error {
 			}
 			s.Duration = d
 		}
+	}
+
+	if err := c.validateDependencies(); err != nil {
+		return err
 	}
 
 	if c.Tiers.Default == "" {
@@ -394,6 +402,102 @@ func (c *Config) normalizeAndValidate() error {
 		c.Attest.PruneIntervalDur = d
 	}
 	return nil
+}
+
+func validateInputs(s *Step) error {
+	positive := false
+	for _, p := range s.Inputs {
+		pattern, negated := strings.CutPrefix(p, "!")
+		if strings.TrimSpace(pattern) == "" || strings.HasPrefix(pattern, "!") {
+			return fmt.Errorf("step %q has invalid inputs pattern %q", s.Name, p)
+		}
+		positive = positive || !negated
+	}
+	if !positive {
+		return fmt.Errorf("step %q inputs only exclude paths: add a pattern to include, such as \"**\"", s.Name)
+	}
+	for _, p := range s.Lockfiles {
+		if strings.HasPrefix(p, "!") {
+			return fmt.Errorf("step %q lockfiles pattern %q is negated: lockfiles take no exclusions, exclude the path in inputs instead", s.Name, p)
+		}
+	}
+	return nil
+}
+
+func (c *Config) validateDependencies() error {
+	const (
+		visiting = 1
+		done     = 2
+	)
+	state := make(map[string]int, len(c.Steps))
+	var visit func(s Step, chain []string) error
+	visit = func(s Step, chain []string) error {
+		switch state[s.Name] {
+		case done:
+			return nil
+		case visiting:
+			return fmt.Errorf("steps depend on each other in a cycle: %s", strings.Join(append(chain, s.Name), " -> "))
+		}
+		state[s.Name] = visiting
+		seen := make(map[string]struct{}, len(s.DependsOn))
+		for _, dep := range s.DependsOn {
+			if _, dup := seen[dep]; dup {
+				return fmt.Errorf("step %q lists %q twice in depends_on", s.Name, dep)
+			}
+			seen[dep] = struct{}{}
+			depStep, ok := c.StepByName(dep)
+			if !ok {
+				return fmt.Errorf("step %q depends on unknown step %q", s.Name, dep)
+			}
+			if err := visit(depStep, append(chain, s.Name)); err != nil {
+				return err
+			}
+		}
+		state[s.Name] = done
+		return nil
+	}
+	for _, s := range c.Steps {
+		if err := visit(s, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// StepPlan returns the named steps, or every step when names is empty, each preceded by
+// its transitive depends_on prerequisites. A step appears once, at its first place.
+func (c *Config) StepPlan(names []string) ([]Step, error) {
+	if len(names) == 0 {
+		for _, s := range c.Steps {
+			names = append(names, s.Name)
+		}
+	}
+	var plan []Step
+	placed := make(map[string]bool, len(c.Steps))
+	var place func(name string) error
+	place = func(name string) error {
+		if placed[name] {
+			return nil
+		}
+		step, ok := c.StepByName(name)
+		if !ok {
+			return fmt.Errorf("unknown step %q", name)
+		}
+		placed[name] = true
+		for _, dep := range step.DependsOn {
+			if err := place(dep); err != nil {
+				return err
+			}
+		}
+		plan = append(plan, step)
+		return nil
+	}
+	for _, n := range names {
+		if err := place(n); err != nil {
+			return nil, err
+		}
+	}
+	return plan, nil
 }
 
 // ParseByteSize parses human-readable memory sizes like "512M", "4G", "4GiB", or "2048MB".
