@@ -80,7 +80,7 @@ type Git interface {
 	ConfigGet(ctx context.Context, key string) (string, error)
 	WriteRefBlob(ctx context.Context, refName, fileName string, content []byte) error
 	ReadRefBlob(ctx context.Context, refName, fileName string) ([]byte, bool, error)
-	PushRefs(ctx context.Context, remote string, refs []string) error
+	PushRefs(ctx context.Context, remote string, refs []string, env map[string]string) error
 	FetchRefs(ctx context.Context, remote, refspec string) error
 	FetchRefspecs(ctx context.Context, remote string, refspecs []string) error
 	ListRefs(ctx context.Context, prefix string) ([]string, error)
@@ -526,8 +526,8 @@ func (g *ExecGit) ReadRefBlob(ctx context.Context, refName, fileName string) ([]
 	return out, true, nil
 }
 
-// PushRefs pushes explicit git refs to remote.
-func (g *ExecGit) PushRefs(ctx context.Context, remote string, refs []string) error {
+// PushRefs pushes explicit git refs to remote, adding env to the git process.
+func (g *ExecGit) PushRefs(ctx context.Context, remote string, refs []string, env map[string]string) error {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -536,7 +536,7 @@ func (g *ExecGit) PushRefs(ctx context.Context, remote string, refs []string) er
 	for _, r := range refs {
 		args = append(args, r+":"+r)
 	}
-	if _, errOut, err := g.run(ctx, nil, args...); err != nil {
+	if _, errOut, err := g.runEnv(ctx, env, nil, args...); err != nil {
 		return fmt.Errorf("git push %s: %w (%s)", remote, err, strings.TrimSpace(string(errOut)))
 	}
 	return nil

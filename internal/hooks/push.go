@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/coding-pr0jects/quai/internal/attest"
@@ -23,6 +24,8 @@ const (
 	attestationRefPrefix = "refs/quai/records/"
 	zeroSHA              = "0000000000000000000000000000000000000000"
 )
+
+var sha40Re = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // PushRef is one ref update git hands the pre-push hook on stdin.
 type PushRef struct {
@@ -49,6 +52,9 @@ func ParsePushRefs(r io.Reader) ([]PushRef, error) {
 		}
 		if len(fields) != 4 {
 			return nil, fmt.Errorf("malformed pre-push input on line %d: expected 4 fields, got %d", line, len(fields))
+		}
+		if !sha40Re.MatchString(fields[1]) || !sha40Re.MatchString(fields[3]) {
+			return nil, fmt.Errorf("malformed pre-push input on line %d: invalid SHA", line)
 		}
 		refs = append(refs, PushRef{
 			LocalRef:  fields[0],
@@ -217,17 +223,19 @@ func cachedStatus(ctx context.Context, g repo.Git, store *receipt.Store, step co
 	if err != nil {
 		return cacheMiss, "", fmt.Errorf("diff %s..%s: %w", short(baseSHA), short(commit), err)
 	}
-	if len(changed) > 0 {
-		relevant := false
-		for _, path := range changed {
-			if glob.MatchAny(step.Inputs, path) || glob.MatchAny(step.Lockfiles, path) {
-				relevant = true
-				break
-			}
+	if len(changed) == 0 {
+		// An empty diff changes no input, so the step cannot have been affected.
+		return cacheSkippedInputs, "", nil
+	}
+	relevant := false
+	for _, path := range changed {
+		if glob.MatchAny(step.Inputs, path) || glob.MatchAny(step.Lockfiles, path) {
+			relevant = true
+			break
 		}
-		if !relevant {
-			return cacheSkippedInputs, "", nil
-		}
+	}
+	if !relevant {
+		return cacheSkippedInputs, "", nil
 	}
 	treeSHA, err := g.TreeSHA(ctx, commit)
 	if err != nil {
@@ -287,7 +295,7 @@ func pushMissingAttestations(ctx context.Context, g repo.Git, remote string, ste
 	if len(missing) == 0 {
 		return nil, ""
 	}
-	if err := g.PushRefs(ctx, remote, missing); err != nil {
+	if err := g.PushRefs(ctx, remote, missing, map[string]string{config.EnvPrePushActive: "1"}); err != nil {
 		return nil, err.Error()
 	}
 	return missing, ""
@@ -318,10 +326,11 @@ func decideRequirement(missing []CachedStep, policy config.PrePushPolicy, allowU
 }
 
 func pushTargets(ctx context.Context, g repo.Git, refs []PushRef, provided bool) []BranchTarget {
-	if provided {
+	if provided && len(refs) > 0 {
 		return BranchTargets(refs)
 	}
-	// A manual invocation has not told us the ref, so the current branch stands for it.
+	// A manual invocation, or a hook that drops stdin, has not told us the ref,
+	// so the current branch stands for it.
 	head, err := g.HeadSHA(ctx)
 	if err != nil {
 		return nil

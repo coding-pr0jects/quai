@@ -644,7 +644,7 @@ func Push(ctx context.Context, g repo.Git, cfg *config.Config, opts PushOptions)
 			refs = append(refs, ref)
 		}
 	}
-	if err := g.PushRefs(ctx, remote, refs); err != nil {
+	if err := g.PushRefs(ctx, remote, refs, map[string]string{config.EnvPrePushActive: "1"}); err != nil {
 		return PushResult{}, err
 	}
 	return PushResult{Remote: remote, Pushed: refs}, nil

@@ -368,7 +368,7 @@ max_age = "7d"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := devGit.PushRefs(ctx, "origin", []string{freshRef, staleRef}); err != nil {
+	if err := devGit.PushRefs(ctx, "origin", []string{freshRef, staleRef}, nil); err != nil {
 		t.Fatalf("PushRefs: %v", err)
 	}
 

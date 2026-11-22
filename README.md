@@ -136,7 +136,7 @@ Re-running `quai verify` on a clean tree with unchanged inputs (or after editing
 
 Steps with `pool_when` globs or a `pool_tiers` threshold acquire their slot pool only when the diff needs it; otherwise they run unlocked and still write receipts and sign attestations.
 
-With `[hooks.pre_push].require_cached` set, `git push` also refuses to leave a branch unverified: the hook checks the receipts of each pushed commit in under 100 ms, skips steps whose `inputs` none of the changed files match, and pushes attestation refs CI has not seen yet. `QUAI_ALLOW_UNVERIFIED_PUSH=1` downgrades `on_missing = "refuse"` to a warning for a deliberate WIP push while still running the `pre-push` steps.
+With `[hooks.pre_push].require_cached` set, `git push` also refuses to leave a branch unverified: the hook checks the local receipts of each pushed commit in milliseconds without running the step, skips steps whose `inputs` none of the changed files match (including a branch with no changes at all), and pushes attestation refs CI has not seen yet. The receipt check is local; the optional attestation sync adds one `git ls-remote` round trip to the remote, which can take longer than 100 ms on a network remote. `QUAI_ALLOW_UNVERIFIED_PUSH=1` downgrades `on_missing = "refuse"` to a warning for a deliberate WIP push while still running the `pre-push` steps.
 
 ### 3. Classify risk, check rebase survival, and land PRs
 

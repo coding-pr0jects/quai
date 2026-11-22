@@ -9,6 +9,8 @@ import (
 
 func TestParsePushRefs(t *testing.T) {
 	zero := zeroSHA
+	sha := strings.Repeat("a", 40)
+	other := strings.Repeat("b", 40)
 	cases := []struct {
 		name    string
 		input   string
@@ -17,23 +19,33 @@ func TestParsePushRefs(t *testing.T) {
 	}{
 		{
 			name:  "single branch",
-			input: "refs/heads/feat abc refs/heads/feat " + zero + "\n",
+			input: "refs/heads/feat " + sha + " refs/heads/feat " + zero + "\n",
 			want:  1,
 		},
 		{
 			name:  "blank lines ignored",
-			input: "\nrefs/heads/a aaa refs/heads/a bbb\n\n",
+			input: "\nrefs/heads/a " + sha + " refs/heads/a " + other + "\n\n",
 			want:  1,
 		},
 		{
 			name:    "three fields",
-			input:   "refs/heads/feat abc refs/heads/feat\n",
+			input:   "refs/heads/feat " + sha + " refs/heads/feat\n",
 			wantErr: "expected 4 fields, got 3",
 		},
 		{
 			name:    "five fields",
 			input:   "a b c d e\n",
 			wantErr: "expected 4 fields, got 5",
+		},
+		{
+			name:    "short local sha",
+			input:   "refs/heads/feat abc refs/heads/feat " + zero + "\n",
+			wantErr: "invalid SHA",
+		},
+		{
+			name:    "non-hex remote sha",
+			input:   "refs/heads/feat " + sha + " refs/heads/feat " + strings.Repeat("g", 40) + "\n",
+			wantErr: "invalid SHA",
 		},
 	}
 	for _, tc := range cases {

@@ -122,6 +122,10 @@ type Result struct {
 func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Result, error) {
 	res := Result{Result: verify.Result{OK: true, Clean: true}}
 
+	if os.Getenv(config.EnvPrePushActive) == "1" {
+		res.Skipped = "nested attestation push"
+		return res, nil
+	}
 	if opts.RefsProvided && IsAttestationPush(opts.Refs) {
 		res.Skipped = "attestation push"
 		if !opts.JSON && opts.Stdout != nil {
@@ -130,6 +134,8 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 		return res, nil
 	}
 
+	var warnings []string
+	emptyStdin := opts.RefsProvided && len(opts.Refs) == 0
 	targets := pushTargets(ctx, g, opts.Refs, opts.RefsProvided)
 
 	steps := cfg.PrePushSteps()
@@ -157,6 +163,13 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 	if len(cfg.Hooks.PrePush.RequireCached) == 0 {
 		return res, nil
 	}
+	if emptyStdin {
+		checked := "HEAD"
+		if len(targets) > 0 {
+			checked = targets[0].Ref
+		}
+		warnings = append(warnings, fmt.Sprintf("stdin carried no refs, so %s was checked instead; run quai hooks install to pass the pushed refs", checked))
+	}
 	report, err := CheckCached(ctx, g, cfg, targets, "")
 	if err != nil {
 		return res, err
@@ -165,16 +178,19 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 	res.AttestationsPushed = report.Pushed
 	res.AttestationPushError = report.PushError
 	if report.PushError != "" {
-		writeWarning(opts, "attestation push failed: "+report.PushError)
+		warnings = append(warnings, "attestation push failed: "+report.PushError)
 	}
 
 	decision := decideRequirement(report.Missing, cfg.Hooks.PrePush, os.Getenv(EnvAllowUnverifiedPush) == "1")
 	res.Bypassed = decision.bypassed
-	res.Warning = decision.message
 	if decision.message != "" {
-		writeWarning(opts, decision.message)
+		warnings = append(warnings, decision.message)
 	}
 	res.OK = !decision.blocked
+	res.Warning = strings.Join(warnings, "; ")
+	for _, warning := range warnings {
+		writeWarning(opts, warning)
+	}
 	return res, nil
 }
 
