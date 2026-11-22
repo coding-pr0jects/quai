@@ -49,14 +49,14 @@ Every code change should be backed by tests at the lowest layer that catches the
 
 - **Unit and integration tests:** run `go vet ./...` and `go test -race ./...`. Format all Go files with `gofmt -w .`.
 - **Dogfooding:** run `quai verify` against this repository to verify `.quai.toml` and receipt caching.
-- **End-to-end CLI verification harness:** for changes touching CLI behavior, hooks, locks, worktrees, or exit codes, run the isolated scratch-repo harness documented in [.cursor/skills/verify-quai/SKILL.md](.cursor/skills/verify-quai/SKILL.md):
+- **End-to-end CLI verification harness:** for changes touching CLI behavior, hooks, locks, worktrees, or exit codes, run the isolated scratch-repo harness documented in [.agents/skills/verify-quai/SKILL.md](.agents/skills/verify-quai/SKILL.md):
 
 ```bash
 export QUAI_VERIFY_RUN_ID="dev-$(date +%s)-$$"
-.cursor/skills/verify-quai/quai-verify launch
-.cursor/skills/verify-quai/quai-verify doctor
+.agents/skills/verify-quai/quai-verify launch
+.agents/skills/verify-quai/quai-verify doctor
 # run scenarios against the isolated scratch repo and linked worktree
-.cursor/skills/verify-quai/quai-verify cleanup
+.agents/skills/verify-quai/quai-verify cleanup
 ```
 
 Never test `quai land` without `--dry-run` against a live repository unless you intend to merge a real PR.

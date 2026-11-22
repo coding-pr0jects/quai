@@ -69,4 +69,4 @@ Every child command runs in its own process group (`SysProcAttr{Setpgid: true}`)
 ## Testing layers
 
 - **Package unit tests (`go test -race ./...`):** Pure table-driven tests for config, glob, tier, patchid, and `DecideLand`; concurrency and `SIGKILL` takeover tests for `lock`; real temporary git repo integration tests for `repo`, `receipt`, `verify`, `hooks`, and `land`.
-- **Isolated CLI harness (`.cursor/skills/verify-quai/`):** Builds the real `quai` binary into `/tmp/quai-verify-<run-id>/bin/quai`, initializes a bare remote plus repo and linked worktree, drives every CLI subcommand end-to-end, and persists full transcripts as evidence.
+- **Isolated CLI harness (`.agents/skills/verify-quai/`):** Builds the real `quai` binary into `/tmp/quai-verify-<run-id>/bin/quai`, initializes a bare remote plus repo and linked worktree, drives every CLI subcommand end-to-end, and persists full transcripts as evidence.

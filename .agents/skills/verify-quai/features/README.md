@@ -5,8 +5,8 @@ This directory is the maintained source for verifying the user-facing behavior o
 ## Baseline preconditions
 
 - Set `QUAI_VERIFY_RUN_ID` to a unique string per run.
-- Run `.cursor/skills/verify-quai/quai-verify launch` to build `./cmd/quai` and seed `/tmp/quai-verify-$QUAI_VERIFY_RUN_ID/{repo,worktree,origin.git}`.
-- Run `.cursor/skills/verify-quai/quai-verify doctor` and confirm `OK` on binary, repo, worktree, git version, and evidence dir.
+- Run `.agents/skills/verify-quai/quai-verify launch` to build `./cmd/quai` and seed `/tmp/quai-verify-$QUAI_VERIFY_RUN_ID/{repo,worktree,origin.git}`.
+- Run `.agents/skills/verify-quai/quai-verify doctor` and confirm `OK` on binary, repo, worktree, git version, and evidence dir.
 - Never drive the developer's live checkout or merge real GitHub pull requests during verification.
 
 ## Driving conventions
