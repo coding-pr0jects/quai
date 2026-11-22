@@ -46,7 +46,7 @@ Usage:
   quai tier [--since <ref>] [--json]
   quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]
   quai verdict record|check [flags...]
-  quai land <pr> [--dry-run] [--method squash|merge|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]
+  quai land <pr>... [--dry-run] [--continue-on-error=false] [--method squash|merge|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]
   quai restack <old-parent-tip> [--base <ref>] [--push] [--remote <name>] [--json]
   quai hooks install|uninstall|pre-push [--json]
   quai gc [--dry-run] [--json]
@@ -713,19 +713,31 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 	requireVerdict := fs.Bool("require-verdict", false, "require an approved review verdict for this PR regardless of tier")
 	noSign := fs.Bool("no-sign", false, "disable automatic attestation signing during rebase verify")
 	noPush := fs.Bool("no-push", false, "disable automatic attestation push during rebase verify")
+	continueOnError := fs.Bool("continue-on-error", true, "in a batch, keep landing the other PRs after one fails")
 	jsonOut := fs.Bool("json", false, "output JSON")
 	if err := fs.Parse(reordered); err != nil {
 		return 2
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "Usage: quai land <pr> [--dry-run] [--method squash|merge|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]")
+	if fs.NArg() == 0 {
+		fmt.Fprintln(stderr, "Usage: quai land <pr>... [--dry-run] [--continue-on-error=false] [--method squash|merge|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]")
 		return 2
 	}
-	prNum, err := strconv.Atoi(strings.TrimPrefix(fs.Arg(0), "#"))
-	if err != nil || prNum <= 0 {
-		fmt.Fprintf(stderr, "quai land: invalid PR number %q\n", fs.Arg(0))
-		return 2
+	prNums := make([]int, 0, fs.NArg())
+	seen := make(map[int]bool, fs.NArg())
+	for _, arg := range fs.Args() {
+		n, err := strconv.Atoi(strings.TrimPrefix(arg, "#"))
+		if err != nil || n <= 0 {
+			fmt.Fprintf(stderr, "quai land: invalid PR number %q\n", arg)
+			return 2
+		}
+		if seen[n] {
+			fmt.Fprintf(stderr, "quai land: PR #%d is listed twice\n", n)
+			return 2
+		}
+		seen[n] = true
+		prNums = append(prNums, n)
 	}
+	prNum := prNums[0]
 	var method config.MergeMethod
 	if *methodStr != "" {
 		method = config.MergeMethod(*methodStr)
@@ -753,7 +765,7 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 	if !*dryRun {
 		defer gc.MaybeAuto(ctx, g, cfg, stderr)
 	}
-	res, err := land.Run(ctx, g, f, cfg, land.Options{
+	opts := land.Options{
 		PRNumber:       prNum,
 		DryRun:         *dryRun,
 		Method:         method,
@@ -764,7 +776,15 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 		JSON:           *jsonOut,
 		Stdout:         stdout,
 		Stderr:         stderr,
-	})
+	}
+	if len(prNums) > 1 {
+		return runLandBatch(ctx, g, f, cfg, land.BatchOptions{
+			Options:         opts,
+			PRNumbers:       prNums,
+			ContinueOnError: *continueOnError,
+		}, *jsonOut, stdout, stderr)
+	}
+	res, err := land.Run(ctx, g, f, cfg, opts)
 	if *jsonOut {
 		writeJSON(stdout, res)
 	} else if res.Action != "" {
@@ -784,6 +804,35 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 			return 4
 		}
 		fmt.Fprintf(stderr, "quai land: %v\n", err)
+		return 1
+	}
+	if !res.OK {
+		return 1
+	}
+	return 0
+}
+
+func runLandBatch(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opts land.BatchOptions, jsonOut bool, stdout, stderr io.Writer) int {
+	res, err := land.RunBatch(ctx, g, f, cfg, opts)
+	if jsonOut {
+		writeJSON(stdout, res)
+	} else {
+		for _, e := range res.PRs {
+			fmt.Fprintf(stdout, "#%d: %s %s (%s)\n", e.PR, e.Status, e.Action, e.Reason)
+			if e.Error != "" {
+				fmt.Fprintf(stdout, "#%d: error: %s\n", e.PR, e.Error)
+			}
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "quai land: %v\n", err)
+		var te *lock.TimeoutError
+		switch {
+		case errors.As(err, &te):
+			return 4
+		case errors.Is(err, land.ErrBasePolicy):
+			return 2
+		}
 		return 1
 	}
 	if !res.OK {

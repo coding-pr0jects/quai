@@ -27,14 +27,14 @@ quai/
 │   ├── status/        # read-only quai status inspection and quai doctor readiness checks
 │   ├── verdict/       # review verdicts keyed by patch-id under refs/quai/verdicts/<patch-id>
 │   ├── forge/         # Forge interface, gh CLI implementation, transient-error retry
-│   └── land/          # pure DecideLand state machine, locked landing executor, stacked PR restack
+│   └── land/          # pure DecideLand state machine and PlanBatch planner, locked landing executor, batch landing, stacked PR restack
 ```
 
 ## Pure engines vs side-effect adapters
 
 `quai` separates deterministic decision logic from filesystem, process, git, and network side effects:
 
-- **Pure decision engines:** `internal/tier` (classification + tamper detection), `internal/patchid` (diff survival), and `internal/land` (`DecideLand`) take plain structs and return plain decisions. Unit tests cover every branch and edge case in milliseconds without spawning `gh` or touching a network.
+- **Pure decision engines:** `internal/tier` (classification + tamper detection), `internal/patchid` (diff survival), and `internal/land` (`DecideLand`, `PlanBatch`) take plain structs and return plain decisions. Unit tests cover every branch and edge case in milliseconds without spawning `gh` or touching a network.
 - **Side-effect adapters:** `internal/repo` (`repo.Git` interface + `ExecGit`) and `internal/forge` (`forge.Forge` interface + `GHForge`) isolate external binaries behind narrow interfaces so integration tests can use either real temporary git repositories or in-memory fakes.
 
 ## Core data shapes

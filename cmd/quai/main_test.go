@@ -170,6 +170,13 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 	if code := run(ctx, []string{"nope"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 2 {
 		t.Fatalf("expected exit 2 on unknown command, got %d", code)
 	}
+
+	for _, args := range [][]string{{"land"}, {"land", "7", "#7"}, {"land", "7", "x"}} {
+		errBuf.Reset()
+		if code := run(ctx, args, dir, bytes.NewReader(nil), &out, &errBuf); code != 2 {
+			t.Fatalf("%v: expected exit 2, got %d (%s)", args, code, errBuf.String())
+		}
+	}
 }
 
 func TestCLISignPushAndAttestCheck(t *testing.T) {

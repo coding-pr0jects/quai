@@ -118,5 +118,5 @@ Parallel agents frequently edit different functions in the same file, which caus
 - Run `quai verify` before pushing. For heavy ad-hoc commands, wrap them in `quai exec --pool heavy -- <cmd>`.
 - Run `quai tier --json` before review to determine whether `gate-only`, `diff-audit`, or `full-live` verification is required.
 - After rebasing a reviewed commit, run `quai patch-id <reviewed-sha> HEAD --json` to confirm whether the patch survived unchanged.
-- Land PRs via `quai land <pr> --dry-run` followed by `quai land <pr>`.
+- Land PRs via `quai land <pr> --dry-run` followed by `quai land <pr>`. Several finished PRs land together with `quai land <pr1> <pr2>... --dry-run`, then without `--dry-run`; read each entry's `status` in `--json`.
 ```

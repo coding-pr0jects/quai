@@ -147,6 +147,10 @@ quai exec --pool heavy -- make e2e
 # Preview or execute serialized PR landing
 quai land 42 --dry-run
 quai land 42
+
+# Land a batch: disjoint PRs first, then rebases, stacked parents before children
+quai land 41 42 43 --dry-run
+quai land 41 42 43
 ```
 
 `quai land` runs from any worktree of the repository. Off the PR branch, it rebases and verifies in a temporary worktree it removes afterwards, so a coordinator can land PRs whose branches are checked out in other worktrees. Transient `gh` network errors are retried, and a verification failure after the rebase resets the branch and pushes nothing. See [`docs/commands.md`](docs/commands.md#quai-land).
@@ -162,7 +166,7 @@ quai land 42
 | `quai tier [--since <ref>] [--json]` | Classify diff risk (`gate-only`, `diff-audit`, `full-live`), detect test tampering, list receipt status |
 | `quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]` | Verify whether a reviewed diff survived rebase unchanged (`SURVIVES` vs `CHANGED`) |
 | `quai verdict record\|check [flags...]` | Record and verify local or SSH-signed review verdicts keyed by `patch-id` and risk tier |
-| `quai land <pr> [--dry-run] [--method squash\|merge\|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]` | Land a GitHub PR with `git merge-tree` optimistic merge, stacked child retargeting/restacking, or locked rebase |
+| `quai land <pr>... [--dry-run] [--continue-on-error=false] [--method squash\|merge\|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]` | Land one GitHub PR, or a batch under one `land.lock` session, with `git merge-tree` optimistic merge, stacked child retargeting/restacking, or locked rebase |
 | `quai restack <old-parent-tip> [--base <ref>] [--push] [--json]` | Replay a stacked child branch onto the updated base via `git rebase --onto` with `patch-id` survival check |
 | `quai hooks install\|uninstall\|pre-push [--json]` | Manage the non-destructive `pre-push` receipt hook (with optional auto-sign/push) |
 | `quai gc [--dry-run] [--json]` | Prune expired receipts, attestation and verdict refs, and stale lock directories (also run automatically by `verify`/`land` when `[attest].auto_prune` is set on the remote default branch) |

@@ -21,7 +21,7 @@ Check a feature request against this list first.
 - A merge driver or a sandbox. Entity-level merging belongs to `weave`, and VM or container runners belong to the repository.
 - A service. State lives in `<git-common-dir>/quai/` and git refs. Receipts stay on the machine, and attestations are the only results that cross machines.
 - Multi-forge. GitHub through `gh` is the only forge.
-- A merge train. No batching, no automatic bisection.
+- A merge train with bisection. `quai land <pr>...` lands a batch in one `land.lock` session (owner sign-off on #18), but never batches PRs into one merge and never bisects a failure.
 
 ## Three ways to hurt yourself
 
