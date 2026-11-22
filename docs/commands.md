@@ -19,7 +19,7 @@ All `quai` commands work from the repository root or any subdirectory inside a m
 Run configured verification steps with slot throttling, mutation guard, input-fingerprinted receipts, and optional SSH-signed attestations.
 
 ```bash
-quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign] [--key <path>] [--push] [--remote <name>] [--json]
+quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [--key <path>] [--push|--no-push] [--remote <name>] [--json]
 ```
 
 ### Flags
@@ -27,15 +27,16 @@ quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign] [--key <pat
 - `--step <name>`: Run only the named step. Repeat `--step` to run multiple steps. Omit to run all configured steps in declaration order.
 - `--since <ref>`: Override the base reference used for `merge-base` and `{{base}}`. Defaults to `origin/<base>` or `<base>`.
 - `--no-cache`: Ignore existing receipts and force execution.
-- `--sign`: Sign each clean passing receipt into an in-toto v1 / DSSE v1 envelope using `ssh-keygen -Y sign` (namespace `quai`) and store it under `refs/quai/records/<step>-<fingerprint>`. Also enabled when `QUAI_SIGN=1`.
+- `--sign` / `--no-sign`: Enable or suppress SSH signing of clean passing receipts into `refs/quai/records/<step>-<fingerprint>`. Also controlled by `QUAI_SIGN=1|0` and `[attest].auto_sign`.
 - `--key <path>`: Explicit SSH private key path for `--sign` (overrides `QUAI_SIGNING_KEY`, `[attest].signing_key`, and `git config user.signingkey`).
-- `--push`: Push written attestation refs to `--remote` (implies `--sign`).
+- `--push` / `--no-push`: Push written attestation refs to `--remote` (implies `--sign`), or suppress `[attest].auto_push` / `QUAI_PUSH=1`.
 - `--remote <name>`: Remote name for `--push` (defaults to `[attest].remote`, `"origin"`).
 - `--json`: Print a structured JSON summary to stdout.
 
 ### Behavior
 
 - On a clean working tree, passing steps reuse an existing receipt if the fingerprint matches (`status: "cached"`).
+- Concurrent calls on the same `(step, fingerprint)` share one execution via an in-flight lock; waiting callers immediately receive `status: "cached"` once the first run succeeds.
 - On a dirty working tree, steps still execute, but no receipts are read or written (`clean: false`, `receipt_written: false`).
 - **Mutation guard:** if a passing step edits tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai` refuses to write a receipt, reports `status: "mutated"` with `mutated_paths`, and exits `1`.
 - Stops at the first failing or mutating step.
@@ -74,19 +75,26 @@ quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign] [--key <pat
 Verify SSH-signed in-toto v1 / DSSE v1 attestations in CI and synchronize `refs/quai/records/*` with a git remote.
 
 ```bash
-quai attest check [--step <name>...] [--onto <ref>] [--since <ref>] [--allowed-signers <path>] [--sample <0-100>] [--fetch] [--remote <name>] [--json]
+quai attest check [--step <name>...] [--onto <ref>] [--since <ref>] [--config-ref <ref>] [--allowed-signers <path>] [--sample <0-100>] [--fetch] [--remote <name>] [--json]
 quai attest push [--step <name>...] [--since <ref>] [--remote <name>] [--json]
 quai attest fetch [--remote <name>] [--json]
+quai attest prune [--max-age <duration>] [--remote <name>] [--local-only] [--dry-run] [--json]
 ```
 
 ### `quai attest check`
 
-- Fetches `refs/quai/records/*` when `--fetch` is set.
+- Computes step fingerprints first and fetches only the matching `refs/quai/records/<step>-<fingerprint>` refs via `git ls-remote` when `--fetch` is set.
+- When `--config-ref <ref>` is set (for example `--config-ref origin/main`), loads `.quai.toml` from that git ref via `git show` so a PR cannot weaken its own step policy.
 - Resolves the OpenSSH `allowed_signers` file by precedence: `--allowed-signers` > `QUAI_ALLOWED_SIGNERS` > `[attest].allowed_signers`. Passing `--allowed-signers` from a CI variable or `origin/main` prevents an untrusted PR branch from modifying its own trust root.
 - When `--onto <ref>` is set (for example `--onto origin/main` on a PR), runs virtual `git merge-tree --write-tree <onto> HEAD` without touching the working tree and computes each step's fingerprint on the merged tree. Exits `3` on conflict.
 - When `--sample <pct>` triggers (0 to 100), marks all steps `"sampled"` and exits `1` so CI runs an independent audit.
 - Verifies DSSE v1 PAE, in-toto Statement v1 fields, OpenSSH `SSHSIG` signature under namespace `quai` against the resolved `allowed_signers` file, per-step or `[attest].signers` allowlist, and `[attest].max_age`.
 - Exits `0` only if every selected step is cryptographically `"verified"`, else `1`.
+
+### `quai attest prune`
+
+- Deletes attestation refs under `refs/quai/records/*` whose signed `created_at` timestamp exceeds `--max-age` (default `[attest].max_age`) or whose payload is unreadable.
+- Prunes both local and remote refs unless `--local-only` is passed; pass `--dry-run` to preview without deleting.
 
 ### GitHub Actions usage
 
@@ -97,7 +105,7 @@ quai attest fetch [--remote <name>] [--json]
     ALLOWED_SIGNERS: ${{ vars.QUAI_ALLOWED_SIGNERS }}
   run: |
     printf '%s\n' "$ALLOWED_SIGNERS" > /tmp/quai_allowed_signers
-    if quai attest check --fetch --step fast --onto origin/main --allowed-signers /tmp/quai_allowed_signers --sample 10 --json; then
+    if quai attest check --fetch --step fast --onto origin/main --config-ref origin/main --allowed-signers /tmp/quai_allowed_signers --sample 10 --json; then
       echo "verified=true" >> "$GITHUB_OUTPUT"
     fi
 
@@ -220,7 +228,7 @@ Computes `git diff --binary <merge_base>..<sha> | git patch-id --stable` for bot
 Land a GitHub pull request with virtual `git merge-tree` optimistic merge or serialized locked rebase.
 
 ```bash
-quai land <pr> [--dry-run] [--method squash|merge|rebase] [--json]
+quai land <pr> [--dry-run] [--method squash|merge|rebase] [--no-sign] [--no-push] [--json]
 ```
 
 ### Arguments and flags
@@ -228,6 +236,7 @@ quai land <pr> [--dry-run] [--method squash|merge|rebase] [--json]
 - `<pr>`: Pull request number (accepts `42` or `#42`).
 - `--dry-run`: Evaluate and print the landing plan without acquiring `land.lock`, rebasing, pushing, or merging. Exits `0` if mergeable, `1` if refused.
 - `--method`: Override `land.method` (`squash`, `merge`, or `rebase`).
+- `--no-sign` / `--no-push`: Disable automatic attestation signing or pushing during `rebase-and-merge` verification.
 - `--json`: Print structured JSON.
 
 ### Decision outcomes
@@ -259,6 +268,26 @@ quai hooks pre-push [--json]
 
 ---
 
+## `quai status`
+
+Inspect active `land.lock`, configured slot pools, FIFO waiters, in-flight verifications, local receipt count, and local attestation count without mutating any state.
+
+```bash
+quai status [--json]
+```
+
+---
+
+## `quai doctor`
+
+Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation key and `allowed_signers` resolution, and stale lock detection. Exits `0` when healthy, `1` if any blocking check fails.
+
+```bash
+quai doctor [--json]
+```
+
+---
+
 ## `quai version`
 
-Print the binary version (`quai 0.1.0-alpha`).
+Print the binary version (`quai 0.2.0`).

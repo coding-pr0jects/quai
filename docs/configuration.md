@@ -46,6 +46,8 @@ signing_key = ""                          # Optional default SSH private key pat
 signers = []                              # Optional principal allowlist (empty = any key in allowed_signers).
 max_age = "14d"                           # Max attestation age (supports d/h/m/s). Default: "14d".
 remote = "origin"                         # Default remote for refs/quai/records/* push and fetch.
+auto_sign = false                         # Best-effort sign passing receipts in verify, pre-push, and land.
+auto_push = false                         # Implies auto_sign; push signed attestation refs automatically.
 ```
 
 Steps also accept an optional `signers = ["alice@example.com"]` array to restrict which principals may attest a specific step.

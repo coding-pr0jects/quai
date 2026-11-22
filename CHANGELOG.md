@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
+### Added
+- PID-namespace-safe leases (`host`, Linux `pid_ns`, periodic lease heartbeats) and fair FIFO ticket queues in `internal/lock` so locks are never stolen across container namespaces and waiting agents never starve (#1).
+- Automatic attestation signing and pushing via `[attest].auto_sign`, `[attest].auto_push`, `QUAI_SIGN`/`QUAI_PUSH`, and `--no-sign`/`--no-push` overrides across `quai verify`, `quai hooks pre-push`, and `quai land` rebase-and-merge (#2).
+- Targeted O(1) ref fetching via `git ls-remote` in `quai attest check --fetch` and `quai attest prune` to clean expired local and remote `refs/quai/records/*` (#3).
+- `--config-ref <ref>` on `quai attest check` to load `.quai.toml` from a trusted base ref instead of the PR working tree (#4).
+- Per-`(step, fingerprint)` in-flight deduplication in `quai verify` so concurrent agents share a single run and receive an immediate cache hit (#5).
+- `quai status` and `quai doctor` commands (`internal/status`) for multi-agent lock/slot observability and environment diagnostics (#6).
+
 ## [0.2.0-alpha] - 2026-11-21
 
 ### Added
