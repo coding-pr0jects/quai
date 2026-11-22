@@ -142,10 +142,14 @@ func checkRunControlFlags(fs *flag.FlagSet, detachRun, wait, stop bool) string {
 			extra = append(extra, "--"+f.Name)
 		}
 	})
-	if len(extra) > 0 {
-		return fmt.Sprintf("%s do not apply to --wait or --stop: pass them with --detach", strings.Join(extra, ", "))
+	switch len(extra) {
+	case 0:
+		return ""
+	case 1:
+		return extra[0] + " does not apply to --wait or --stop: pass it with --detach"
+	default:
+		return strings.Join(extra, ", ") + " do not apply to --wait or --stop: pass them with --detach"
 	}
-	return ""
 }
 
 func isFlagSet(fs *flag.FlagSet, name string) bool {

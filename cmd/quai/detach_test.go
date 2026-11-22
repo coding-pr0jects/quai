@@ -354,4 +354,15 @@ func TestCLIRunControlFlagErrors(t *testing.T) {
 			t.Errorf("quai %v = %d %q %q, want 2", args, code, out, stderr)
 		}
 	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"verify", "--wait", "--priority", "5"}, "--priority does not apply to --wait or --stop: pass it with --detach"},
+		{[]string{"verify", "--stop", "--priority", "5", "--no-cache"}, "--no-cache, --priority do not apply to --wait or --stop: pass them with --detach"},
+	} {
+		if code, _, stderr := runCLI(t, dir, tc.args...); code != 2 || !strings.Contains(stderr, tc.want) {
+			t.Errorf("quai %v = %d %q, want 2 with %q", tc.args, code, stderr, tc.want)
+		}
+	}
 }
