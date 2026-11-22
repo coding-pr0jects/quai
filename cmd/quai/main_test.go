@@ -10,29 +10,7 @@ import (
 	"testing"
 )
 
-func initCLITestRepo(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	runGit := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, string(out))
-		}
-	}
-	write := func(rel, body string) {
-		t.Helper()
-		p := filepath.Join(dir, rel)
-		_ = os.MkdirAll(filepath.Dir(p), 0o755)
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	runGit("init", "-q", "-b", "main")
-	runGit("config", "user.name", "t")
-	runGit("config", "user.email", "t@example.com")
-	write(".quai.toml", `
+const defaultCLITestConfig = `
 version = 1
 base = "main"
 
@@ -54,7 +32,36 @@ slots = 1
 default = "diff-audit"
 full_live = ["ui/**"]
 gate_only = ["docs/**"]
-`)
+`
+
+func initCLITestRepo(t *testing.T) string {
+	t.Helper()
+	return initCLITestRepoWith(t, defaultCLITestConfig)
+}
+
+func initCLITestRepoWith(t *testing.T, quaiToml string) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	write := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(dir, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "user.name", "t")
+	runGit("config", "user.email", "t@example.com")
+	write(".quai.toml", quaiToml)
 	write("docs/a.md", "v1\n")
 	write("ui/app.ts", "export const x = 1\n")
 	runGit("add", "-A")
@@ -150,6 +157,11 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 }
 
 func TestCLISignPushAndAttestCheck(t *testing.T) {
+	t.Run("foreground", func(t *testing.T) { testSignPushAndAttestCheck(t, false) })
+	t.Run("detached", func(t *testing.T) { testSignPushAndAttestCheck(t, true) })
+}
+
+func testSignPushAndAttestCheck(t *testing.T, detached bool) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 	keyPath := filepath.Join(tmp, "signer")
@@ -216,7 +228,13 @@ max_age = "14d"
 
 	// Sign and push attestation via quai verify --sign --key ... --push.
 	var out, errBuf bytes.Buffer
-	code := run(ctx, []string{"verify", "--sign", "--key", keyPath, "--push", "--json"}, devDir, bytes.NewReader(nil), &out, &errBuf)
+	var code int
+	if detached {
+		started := detachRun(t, devDir, "verify", "--sign", "--key", keyPath, "--push")
+		code, out, errBuf = runCLIBuffers(t, devDir, "verify", "--wait", started.RunID, "--max", "60s", "--json")
+	} else {
+		code = run(ctx, []string{"verify", "--sign", "--key", keyPath, "--push", "--json"}, devDir, bytes.NewReader(nil), &out, &errBuf)
+	}
 	if code != 0 {
 		t.Fatalf("verify --sign --push failed (%d): %s %s", code, out.String(), errBuf.String())
 	}

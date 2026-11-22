@@ -30,6 +30,7 @@ type Options struct {
 	JSON           bool
 	Stdout         io.Writer
 	Stderr         io.Writer
+	OnStepStart    func(execrun.Process)
 }
 
 // ResolveAutoAttest resolves whether verification should sign and push attestations,
@@ -295,6 +296,7 @@ func runOneStep(
 			Command:  "quai verify --step " + step.Name,
 			Worktree: topLevel,
 		},
+		OnStart: opts.OnStepStart,
 	})
 	dur := time.Since(started).Milliseconds()
 	if runErr != nil || code != 0 {

@@ -3,6 +3,7 @@ package lock
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -267,4 +268,51 @@ func TestParseMeminfoAvailableAndMemoryGuard(t *testing.T) {
 		t.Fatalf("expected slot acquisition after memory recovery, got %v", err)
 	}
 	defer sl.Release()
+}
+
+func TestReleaseDeadRemovesOnlyTheDeadPIDsLeasesAndTickets(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+	deadPID := spawnDeadPID(t)
+
+	dead, err := AcquireDir(ctx, filepath.Join(root, "slot-heavy-0.lock"), Owner{PID: deadPID, Command: "crashed"}, Options{Wait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = dead
+	live, err := AcquireDir(ctx, filepath.Join(root, "slot-heavy-1.lock"), Owner{Command: "live"}, Options{Wait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Release()
+	queue := filepath.Join(root, "slot-heavy.queue")
+	deadTicket, err := enqueueTicket(queue, normalizeOwner(Owner{PID: deadPID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveTicket, err := enqueueTicket(queue, normalizeOwner(Owner{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := ReleaseDead(root, os.Getpid()); err != nil || len(got) != 0 {
+		t.Fatalf("ReleaseDead(live pid) = %v, %v; want nothing released", got, err)
+	}
+	got, err := ReleaseDead(root, deadPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || filepath.Base(got[0]) != "slot-heavy-0.lock" {
+		t.Fatalf("released %v, want only slot-heavy-0.lock", got)
+	}
+	for path, want := range map[string]bool{
+		filepath.Join(root, "slot-heavy-0.lock"): false,
+		filepath.Join(root, "slot-heavy-1.lock"): true,
+		deadTicket:                               false,
+		liveTicket:                               true,
+	} {
+		if _, err := os.Stat(path); (err == nil) != want {
+			t.Errorf("%s exists = %v, want %v", path, err == nil, want)
+		}
+	}
 }

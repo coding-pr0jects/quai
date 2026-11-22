@@ -13,6 +13,7 @@ import (
 
 	"github.com/coding-pr0jects/quai/internal/attest"
 	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/detach"
 	"github.com/coding-pr0jects/quai/internal/hooks"
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
@@ -43,6 +44,7 @@ type Report struct {
 	InFlight          []InFlightStatus  `json:"in_flight,omitempty"`
 	ReceiptCount      int               `json:"receipt_count"`
 	AttestCount       int               `json:"attestation_count"`
+	Runs              []detach.Status   `json:"runs,omitempty"`
 }
 
 type CheckItem struct {
@@ -154,6 +156,7 @@ func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error
 	if refs, err := g.ListRefs(ctx, attest.RefPrefix); err == nil {
 		rep.AttestCount = len(refs)
 	}
+	rep.Runs = detach.NewStore(commonDir).Active()
 
 	return rep, nil
 }
@@ -260,6 +263,11 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 			add(CheckItem{Name: "locks", Status: "warn", Message: fmt.Sprintf("%d stale lock(s) detected (will be recovered automatically on next acquire)", staleCount)})
 		} else {
 			add(CheckItem{Name: "locks", Status: "ok", Message: "no stale locks"})
+		}
+		for _, r := range st.Runs {
+			if r.State == detach.Dead {
+				add(CheckItem{Name: "detached-runs", Status: "warn", Message: fmt.Sprintf("detached run %s died without an exit record (pid %d)", r.ID, r.PID), Fix: "quai verify --wait " + r.ID})
+			}
 		}
 	}
 

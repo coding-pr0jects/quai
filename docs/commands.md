@@ -10,7 +10,7 @@ All `quai` commands work from the repository root or any subdirectory inside a m
 | `1` | Verification failed, step mutated the working tree, `CHANGED`, or PR refused |
 | `2` | Invalid arguments, missing or invalid `.quai.toml`, or not inside a git repository |
 | `3` | Git rebase conflict encountered and cleanly aborted |
-| `4` | Lock or slot acquisition timed out |
+| `4` | Lock or slot acquisition timed out, or `quai verify --wait` reached `--max` while the detached run still runs: retry later |
 
 ---
 
@@ -19,7 +19,9 @@ All `quai` commands work from the repository root or any subdirectory inside a m
 Run configured verification steps with slot throttling, mutation guard, input-fingerprinted receipts, and optional SSH-signed attestations.
 
 ```bash
-quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [--key <path>] [--push|--no-push] [--remote <name>] [--json]
+quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [--key <path>] [--push|--no-push] [--remote <name>] [--detach] [--json]
+quai verify --wait [<run-id>] [--max <duration>] [--json]
+quai verify --stop [<run-id>] [--json]
 ```
 
 ### Flags
@@ -32,6 +34,10 @@ quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [
 - `--push` / `--no-push`: Push written attestation refs to `--remote` (implies `--sign`), or suppress `[attest].auto_push` / `QUAI_PUSH=1`.
 - `--remote <name>`: Remote name for `--push` (defaults to `[attest].remote`, `"origin"`).
 - `--json`: Print a structured JSON summary to stdout.
+- `--detach`: Start the run as a detached run (see below), print its run ID, and exit `0` at once.
+- `--wait [<run-id>]`: Wait for a detached run. Defaults to the latest run started from the current worktree.
+- `--max <duration>`: With `--wait`, the longest wait before exiting `4` (default `8m`, under the 10-minute limit of agent tool calls). `--max 0` checks without blocking.
+- `--stop [<run-id>]`: Stop a detached run. Defaults to the latest run started from the current worktree.
 
 ### Behavior
 
@@ -67,6 +73,41 @@ quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [
 	]
 }
 ```
+
+### Detached runs
+
+A detached run executes `quai verify` (or `quai exec`) in the background, so a verification longer than an agent's tool-call timeout still takes its slots, writes its receipts, and signs and pushes its attestations exactly as in the foreground.
+
+- `--detach` checks the arguments and `.quai.toml`, then starts the same command in a new session (its own process group), with stdin from `/dev/null` and stdout and stderr appended to the run's `output.log`. It prints `Started quai run <run-id>: quai verify --wait <run-id>`, or with `--json` the run's status (`run_id`, `pid`, `worktree`, `log_path`, `state`).
+- `--wait` prints the lines of `output.log` written since the previous `--wait` on that run, as they arrive, until the run finishes or `--max` passes. A run ends as soon as a step fails, so a failing step returns at once, followed by a one-line summary naming the failed step. It exits `0` when the run passed, `1` when it failed or died, and `4` when it still runs at `--max`.
+- A run whose process is gone without an exit record (for example after `SIGKILL`) is `dead`. The next `--wait` or `--stop` kills the process groups of its steps and releases the locks and queue tickets its lease still holds.
+- `--stop` sends `SIGTERM` to the run's process group. The run then stops its step the usual way (`SIGTERM`, `SIGKILL` 5 seconds later) and releases its locks. If the run is still alive 10 seconds after `SIGTERM`, `--stop` sends `SIGKILL` to its group, kills its step groups, and releases its locks itself. It exits `0` once the run no longer runs, `2` for an unknown run ID.
+- `--wait` and `--stop` accept the run IDs of `quai exec --detach` too, since `quai exec --wait` already names the slot wait.
+- Runs live in `<git-common-dir>/quai/runs/<run-id>/`, one directory per run, so two worktrees never share a log or a read position. Starting a run deletes the finished runs beyond the 20 most recent.
+- A run started on another host or PID namespace is never declared dead from here, and `--stop` refuses it.
+
+`quai verify --wait --json` prints one object when the wait ends:
+
+```json
+{
+	"run_id": "20261122T230242Z-9b845f27",
+	"args": ["verify"],
+	"worktree": "/work/wt-agent-1",
+	"pid": 41234,
+	"start_time": 13158963,
+	"started_at": "2026-11-22T23:02:42Z",
+	"state": "failed",
+	"log_path": "/work/repo/.git/quai/runs/20261122T230242Z-9b845f27/output.log",
+	"exit": {
+		"exit_code": 1,
+		"finished_at": "2026-11-22T23:02:45Z",
+		"result": { "ok": false, "steps": [{ "name": "fast", "status": "failed", "error": "exit status 1" }] }
+	},
+	"output": "run     fast\n...\n"
+}
+```
+
+`state` is `running`, `passed`, `failed`, or `dead`. `exit` is absent while the run runs or when it died; `exit.result` holds the verify JSON of a `quai verify` run, and `exit.stopped` is `true` after `--stop`. A dead run also lists `killed_groups` and `released_locks`.
 
 ---
 
@@ -121,7 +162,7 @@ quai attest prune [--max-age <duration>] [--remote <name>] [--local-only] [--dry
 Run any arbitrary command behind a named slot pool from `[slots]`.
 
 ```bash
-quai exec --pool <name> [--slots <n>] [--wait <duration>] -- <command...>
+quai exec --pool <name> [--slots <n>] [--wait <duration>] [--detach] -- <command...>
 ```
 
 ### Flags
@@ -129,6 +170,7 @@ quai exec --pool <name> [--slots <n>] [--wait <duration>] -- <command...>
 - `--pool <name>`: Required pool name declared under `[slots]` in `.quai.toml`.
 - `--slots <n>`: Number of slots to acquire (default `1`).
 - `--wait <duration>`: Maximum wait duration before exiting `4` (default `30m`).
+- `--detach`: Run the command as a detached run with stdin from `/dev/null`, print its run ID, and exit `0`. Follow it with `quai verify --wait <run-id>` or `quai verify --stop <run-id>`; its `exit.exit_code` is the command's own.
 
 ### Behavior
 
@@ -272,7 +314,7 @@ quai hooks pre-push [--json]
 
 ## `quai status`
 
-Inspect active `land.lock`, configured slot pools, FIFO waiters, in-flight verifications, local receipt count, and local attestation count without mutating any state.
+Inspect active `land.lock`, configured slot pools, FIFO waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), local receipt count, and local attestation count without mutating any state.
 
 ```bash
 quai status [--json]
@@ -282,7 +324,7 @@ quai status [--json]
 
 ## `quai doctor`
 
-Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation key and `allowed_signers` resolution, and stale lock detection. Exits `0` when healthy, `1` if any blocking check fails.
+Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation key and `allowed_signers` resolution, stale lock detection, and detached runs that died without an exit record. Exits `0` when healthy, `1` if any blocking check fails.
 
 ```bash
 quai doctor [--json]

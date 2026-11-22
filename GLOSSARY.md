@@ -38,6 +38,10 @@ _Avoid_: signed receipt, record (except in the ref name).
 **Allowed signers**
 The OpenSSH `allowed_signers` file that decides which keys `quai attest check` and `quai verdict check` accept. CI passes it from a trusted source so a PR cannot widen its own trust root.
 
+**Detached run**
+A `quai verify` or `quai exec` started with `--detach`, running in the background under `runs/<run-id>/` with its own log and read cursor. `quai verify --wait` streams it, `quai verify --stop` ends it. A detached run gone without an exit record is `dead`.
+_Avoid_: job, background task, daemon.
+
 **Sampled**
 The `status` that `quai attest check --sample` gives every step on a sampled run, telling CI to rerun the steps itself as an audit.
 
@@ -107,7 +111,7 @@ What `quai conflicts` reports: virtual merge conflicts and file overlaps between
 ## Places
 
 **Common dir**
-`<git-common-dir>/quai/`, the state shared by the main checkout and every linked worktree: locks, queues, and receipts.
+`<git-common-dir>/quai/`, the state shared by the main checkout and every linked worktree: locks, queues, receipts, and detached runs.
 
 **Forge**
 The hosting service behind PRs and checks. Today only GitHub, reached through `gh`.

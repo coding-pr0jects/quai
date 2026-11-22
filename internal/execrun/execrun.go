@@ -28,6 +28,7 @@ type Request struct {
 	MinFreeMemBytes uint64
 	LockWait        time.Duration
 	Owner           lock.Owner
+	OnStart         func(Process)
 }
 
 // Run executes a command inside its own process group, optionally bounded by a slot pool,
@@ -70,6 +71,9 @@ func Run(ctx context.Context, req Request) (int, error) {
 
 	if err := cmd.Start(); err != nil {
 		return 1, err
+	}
+	if req.OnStart != nil {
+		req.OnStart(identify(cmd.Process.Pid))
 	}
 
 	done := make(chan error, 1)
