@@ -46,6 +46,8 @@ type Options struct {
 	PRNumber      int
 	DryRun        bool
 	Method        config.MergeMethod // optional override
+	NoSign        bool
+	NoPush        bool
 	JSON          bool
 	Stdout        io.Writer
 	Stderr        io.Writer
@@ -255,11 +257,15 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 			}
 
 			if len(cfg.Steps) > 0 {
+				doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, false, opts.NoSign, false, opts.NoPush)
 				vRes, vErr := verify.Run(ctx, g, cfg, verify.Options{
-					Since:  "origin/" + pr.BaseRefName,
-					JSON:   opts.JSON,
-					Stdout: opts.Stdout,
-					Stderr: opts.Stderr,
+					Since:          "origin/" + pr.BaseRefName,
+					Sign:           doSign,
+					BestEffortSign: bestEffort,
+					Push:           doPush,
+					JSON:           opts.JSON,
+					Stdout:         opts.Stdout,
+					Stderr:         opts.Stderr,
 				})
 				if vErr != nil {
 					return Result{

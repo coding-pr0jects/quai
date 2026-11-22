@@ -274,3 +274,128 @@ required_checks = ["check"]
 		t.Fatal("expected clean working tree after conflict abort")
 	}
 }
+
+type originSyncForge struct {
+	originDir string
+	pr        forge.PullRequest
+	checks    []forge.Check
+	mergedSHA string
+	merged    bool
+}
+
+func (f *originSyncForge) ViewPR(ctx context.Context, number int) (forge.PullRequest, error) {
+	pr := f.pr
+	if out, err := exec.Command("git", "-C", f.originDir, "rev-parse", "refs/heads/"+pr.HeadRefName).Output(); err == nil {
+		pr.HeadRefOid = strings.TrimSpace(string(out))
+	}
+	if f.merged {
+		pr.State = "MERGED"
+	}
+	return pr, nil
+}
+
+func (f *originSyncForge) Checks(ctx context.Context, number int) ([]forge.Check, error) {
+	return f.checks, nil
+}
+
+func (f *originSyncForge) MergePR(ctx context.Context, number int, method config.MergeMethod, expectedHeadSHA string) error {
+	f.merged = true
+	f.mergedSHA = expectedHeadSHA
+	return nil
+}
+
+func TestRunRebaseAutoSignsAndPushesAttestation(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	work := filepath.Join(tmp, "work")
+	keyPath := filepath.Join(tmp, "signer")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyPath).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v\n%s", err, string(out))
+	}
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	write := func(rel, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(work, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run(tmp, "init", "--bare", "-q", "-b", "main", origin)
+	run(tmp, "init", "-q", "-b", "main", work)
+	run(work, "config", "user.name", "t")
+	run(work, "config", "user.email", "t@example.com")
+	run(work, "remote", "add", "origin", origin)
+	write("a.txt", "a1\n")
+	write("b.txt", "b1\n")
+	run(work, "add", "-A")
+	run(work, "commit", "-qm", "base")
+	run(work, "push", "-q", "-u", "origin", "main")
+
+	run(work, "switch", "-q", "-c", "feat/rebase-sign")
+	write("b.txt", "b2\n")
+	run(work, "commit", "-qam", "feat")
+	run(work, "push", "-q", "-u", "origin", "feat/rebase-sign")
+
+	// Main advances on a.txt; optimistic_merge = false forces rebase-and-merge.
+	run(work, "switch", "-q", "main")
+	write("a.txt", "a2\n")
+	run(work, "commit", "-qam", "main advance")
+	run(work, "push", "-q", "origin", "main")
+	run(work, "switch", "-q", "feat/rebase-sign")
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+[[steps]]
+name = "fast"
+run = "true"
+
+[land]
+optimistic_merge = false
+required_checks = ["check"]
+
+[attest]
+signing_key = "` + keyPath + `"
+auto_push = true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := repo.NewExecGit(work)
+	ff := &originSyncForge{
+		originDir: origin,
+		pr: forge.PullRequest{
+			Number:           11,
+			State:            "OPEN",
+			BaseRefName:      "main",
+			HeadRefName:      "feat/rebase-sign",
+			MergeStateStatus: "CLEAN",
+			URL:              "https://github.com/o/r/pull/11",
+		},
+		checks: []forge.Check{{Name: "check", State: "SUCCESS", Bucket: "pass"}},
+	}
+
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, ff, cfg, Options{
+		PRNumber:   11,
+		Stdout:     &buf,
+		Stderr:     &buf,
+		ChecksPoll: 10 * time.Millisecond,
+	})
+	if err != nil || !res.OK || !res.Merged || res.Action != ActionRebaseAndMerge {
+		t.Fatalf("expected rebase-and-merge to succeed, got res=%+v err=%v", res, err)
+	}
+	remoteRefs, err := g.ListRemoteRefs(ctx, "origin", []string{"refs/quai/records/*"})
+	if err != nil || len(remoteRefs) != 1 {
+		t.Fatalf("expected post-rebase attestation pushed to origin, got refs=%v err=%v", remoteRefs, err)
+	}
+}

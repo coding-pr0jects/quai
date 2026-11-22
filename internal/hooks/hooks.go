@@ -98,7 +98,8 @@ func Uninstall(ctx context.Context, g repo.Git) (string, error) {
 	return fmt.Sprintf("removed managed pre-push hook at %s", hookPath), nil
 }
 
-// RunPrePush runs all steps configured with hook = "pre-push", reusing cached receipts when valid.
+// RunPrePush runs all steps configured with hook = "pre-push", reusing cached receipts when valid
+// and honoring [attest].auto_sign / auto_push (or QUAI_SIGN / QUAI_PUSH).
 func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, jsonOut bool, stdout, stderr io.Writer) (verify.Result, error) {
 	steps := cfg.PrePushSteps()
 	if len(steps) == 0 {
@@ -108,10 +109,14 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, jsonOut boo
 	for i, s := range steps {
 		names[i] = s.Name
 	}
+	doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, false, false, false, false)
 	return verify.Run(ctx, g, cfg, verify.Options{
-		StepNames: names,
-		JSON:      jsonOut,
-		Stdout:    stdout,
-		Stderr:    stderr,
+		StepNames:      names,
+		Sign:           doSign,
+		BestEffortSign: bestEffort,
+		Push:           doPush,
+		JSON:           jsonOut,
+		Stdout:         stdout,
+		Stderr:         stderr,
 	})
 }

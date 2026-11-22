@@ -59,6 +59,8 @@ type AttestPolicy struct {
 	Signers        []string      `toml:"signers"`
 	MaxAge         string        `toml:"max_age"`
 	Remote         string        `toml:"remote"`
+	AutoSign       bool          `toml:"auto_sign"`
+	AutoPush       bool          `toml:"auto_push"`
 	MaxAgeDur      time.Duration `toml:"-"`
 }
 
@@ -231,6 +233,9 @@ func (c *Config) normalizeAndValidate() error {
 
 	if c.Attest.Remote == "" {
 		c.Attest.Remote = "origin"
+	}
+	if c.Attest.AutoPush {
+		c.Attest.AutoSign = true
 	}
 	if c.Attest.MaxAge == "" {
 		c.Attest.MaxAgeDur = 14 * 24 * time.Hour

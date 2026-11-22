@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,16 +19,52 @@ import (
 )
 
 type Options struct {
-	StepNames  []string
-	Since      string
-	NoCache    bool
-	Sign       bool
-	SigningKey string
-	Push       bool
-	Remote     string
-	JSON       bool
-	Stdout     io.Writer
-	Stderr     io.Writer
+	StepNames      []string
+	Since          string
+	NoCache        bool
+	Sign           bool
+	BestEffortSign bool
+	SigningKey     string
+	Push           bool
+	Remote         string
+	JSON           bool
+	Stdout         io.Writer
+	Stderr         io.Writer
+}
+
+// ResolveAutoAttest resolves whether verification should sign and push attestations,
+// combining explicit CLI flags, QUAI_SIGN/QUAI_PUSH env vars, and [attest] config defaults.
+// bestEffort is true only when signing came implicitly from .quai.toml rather than an explicit flag or env var.
+func ResolveAutoAttest(cfg *config.Config, flagSign, flagNoSign, flagPush, flagNoPush bool) (sign, push, bestEffort bool) {
+	if flagNoSign {
+		return false, false, false
+	}
+	envSign := strings.TrimSpace(os.Getenv("QUAI_SIGN"))
+	envPush := strings.TrimSpace(os.Getenv("QUAI_PUSH"))
+	wantAutoPush := !flagNoPush && envPush != "0" && (envPush == "1" || cfg.Attest.AutoPush)
+
+	if flagPush {
+		return true, true, false
+	}
+	if flagSign {
+		return true, wantAutoPush, false
+	}
+	if envPush == "1" {
+		return true, !flagNoPush, false
+	}
+	if envSign == "1" {
+		return true, wantAutoPush, false
+	}
+	if envSign == "0" {
+		return false, false, false
+	}
+	if cfg.Attest.AutoPush && !flagNoPush && envPush != "0" {
+		return true, true, true
+	}
+	if cfg.Attest.AutoSign {
+		return true, false, true
+	}
+	return false, false, false
 }
 
 type StepResult struct {
@@ -99,9 +136,18 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 	if opts.Sign && clean {
 		signingKey, err = attest.ResolveSigningKey(ctx, g, cfg, opts.SigningKey)
 		if err != nil {
-			return Result{}, err
+			if opts.BestEffortSign {
+				if !opts.JSON && opts.Stderr != nil {
+					fmt.Fprintf(opts.Stderr, "quai: auto_sign skipped (%v)\n", err)
+				}
+				opts.Sign = false
+				opts.Push = false
+			} else {
+				return Result{}, err
+			}
+		} else {
+			principal, _ = g.ConfigGet(ctx, "user.email")
 		}
-		principal, _ = g.ConfigGet(ctx, "user.email")
 	}
 
 	store := receipt.NewStore(commonDir)

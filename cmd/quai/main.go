@@ -114,9 +114,11 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 	fs.Var(&steps, "step", "step name to run (repeatable)")
 	since := fs.String("since", "", "base ref")
 	noCache := fs.Bool("no-cache", false, "ignore existing receipts")
-	sign := fs.Bool("sign", os.Getenv("QUAI_SIGN") == "1", "sign passing receipts with SSH key into refs/quai/records/*")
+	sign := fs.Bool("sign", false, "sign passing receipts with SSH key into refs/quai/records/*")
+	noSign := fs.Bool("no-sign", false, "disable automatic attestation signing even when configured")
 	keyPath := fs.String("key", "", "SSH private key path for --sign")
 	push := fs.Bool("push", false, "push signed attestation refs to remote (implies --sign)")
+	noPush := fs.Bool("no-push", false, "disable automatic attestation push even when configured")
 	remote := fs.String("remote", "", "git remote for --push (defaults to [attest].remote)")
 	jsonOut := fs.Bool("json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
@@ -131,18 +133,19 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 		fmt.Fprintf(stderr, "quai verify: %v\n", err)
 		return 2
 	}
-	doSign := *sign || *push
+	doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, *sign, *noSign, *push, *noPush)
 	res, err := verify.Run(ctx, g, cfg, verify.Options{
-		StepNames:  steps,
-		Since:      *since,
-		NoCache:    *noCache,
-		Sign:       doSign,
-		SigningKey: *keyPath,
-		Push:       *push,
-		Remote:     *remote,
-		JSON:       *jsonOut,
-		Stdout:     stdout,
-		Stderr:     stderr,
+		StepNames:      steps,
+		Since:          *since,
+		NoCache:        *noCache,
+		Sign:           doSign,
+		BestEffortSign: bestEffort,
+		SigningKey:     *keyPath,
+		Push:           doPush,
+		Remote:         *remote,
+		JSON:           *jsonOut,
+		Stdout:         stdout,
+		Stderr:         stderr,
 	})
 	if *jsonOut {
 		writeJSON(stdout, res)
@@ -568,12 +571,14 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 	fs.SetOutput(stderr)
 	dryRun := fs.Bool("dry-run", false, "preview landing decision without mutating")
 	methodStr := fs.String("method", "", "merge method override (squash|merge|rebase)")
+	noSign := fs.Bool("no-sign", false, "disable automatic attestation signing during rebase verify")
+	noPush := fs.Bool("no-push", false, "disable automatic attestation push during rebase verify")
 	jsonOut := fs.Bool("json", false, "output JSON")
 	if err := fs.Parse(reordered); err != nil {
 		return 2
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "Usage: quai land <pr> [--dry-run] [--method squash|merge|rebase] [--json]")
+		fmt.Fprintln(stderr, "Usage: quai land <pr> [--dry-run] [--method squash|merge|rebase] [--no-sign] [--no-push] [--json]")
 		return 2
 	}
 	prNum, err := strconv.Atoi(strings.TrimPrefix(fs.Arg(0), "#"))
@@ -598,6 +603,8 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 		PRNumber: prNum,
 		DryRun:   *dryRun,
 		Method:   method,
+		NoSign:   *noSign,
+		NoPush:   *noPush,
 		JSON:     *jsonOut,
 		Stdout:   stdout,
 		Stderr:   stderr,

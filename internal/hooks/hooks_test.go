@@ -107,3 +107,87 @@ hook = "pre-push"
 		t.Fatalf("cached pre-push took %s, expected fast hit", elapsed)
 	}
 }
+
+func TestPrePushAutoSignsAndPushesAndFallsBackWithoutKey(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	work := filepath.Join(tmp, "work")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	run(tmp, "init", "--bare", "-q", "-b", "main", origin)
+	run(tmp, "init", "-q", "-b", "main", work)
+	run(work, "config", "user.name", "t")
+	run(work, "config", "user.email", "t@example.com")
+	run(work, "remote", "add", "origin", origin)
+	if err := os.WriteFile(filepath.Join(work, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(work, "add", "-A")
+	run(work, "commit", "-qm", "init")
+	run(work, "push", "-q", "-u", "origin", "main")
+
+	keyPath := filepath.Join(tmp, "signer")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyPath).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v\n%s", err, string(out))
+	}
+
+	g := repo.NewExecGit(work)
+	cfgWithKey, err := config.Parse([]byte(`
+version = 1
+[[steps]]
+name = "fast"
+run = "true"
+hook = "pre-push"
+
+[attest]
+signing_key = "` + keyPath + `"
+auto_push = true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfgWithKey.Attest.AutoSign || !cfgWithKey.Attest.AutoPush {
+		t.Fatalf("expected auto_push to imply auto_sign: %+v", cfgWithKey.Attest)
+	}
+
+	var buf bytes.Buffer
+	res, err := RunPrePush(ctx, g, cfgWithKey, false, &buf, &buf)
+	if err != nil || !res.OK || !res.Pushed || len(res.Attestations) != 1 {
+		t.Fatalf("expected pre-push auto_sign + auto_push to succeed, got res=%+v err=%v", res, err)
+	}
+	remoteRefs, err := g.ListRemoteRefs(ctx, "origin", []string{"refs/quai/records/*"})
+	if err != nil || len(remoteRefs) != 1 || remoteRefs[0] != res.Attestations[0] {
+		t.Fatalf("expected remote attestation ref %v, got %v (err=%v)", res.Attestations, remoteRefs, err)
+	}
+
+	// Best-effort auto_sign without any signing key configured must succeed with a warning instead of failing git push.
+	t.Setenv("QUAI_SIGNING_KEY", "")
+	t.Setenv("QUAI_SIGN", "")
+	t.Setenv("QUAI_PUSH", "")
+	cfgNoKey, err := config.Parse([]byte(`
+version = 1
+[[steps]]
+name = "fast"
+run = "true"
+hook = "pre-push"
+
+[attest]
+auto_sign = true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outBuf, errBuf bytes.Buffer
+	res2, err := RunPrePush(ctx, g, cfgNoKey, false, &outBuf, &errBuf)
+	if err != nil || !res2.OK {
+		t.Fatalf("expected best-effort auto_sign without key to still pass, got res=%+v err=%v", res2, err)
+	}
+}
