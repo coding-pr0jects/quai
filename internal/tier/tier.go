@@ -186,6 +186,30 @@ func Classify(changes []repo.FileChange, untracked []string, tampered []TamperFi
 	}
 }
 
+// ScanDiff lists the changes between from and to (the working tree when to is empty)
+// and the test-tamper findings among them.
+func ScanDiff(ctx context.Context, g repo.Git, policy config.TierPolicy, from, to string) ([]repo.FileChange, []TamperFinding, error) {
+	changes, err := g.DiffNameStatus(ctx, from, to, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	testGlobs := effectiveTestGlobs(policy)
+	patches := make(map[string][]byte)
+	for _, ch := range changes {
+		if ch.Status == "D" || ch.Status == "R100" {
+			continue
+		}
+		if glob.MatchAny(testGlobs, ch.Path) {
+			p, err := g.DiffFilePatch(ctx, from, to, ch.Path)
+			if err != nil {
+				return nil, nil, err
+			}
+			patches[ch.Path] = p
+		}
+	}
+	return changes, DetectTestTamper(changes, patches, policy), nil
+}
+
 // Evaluate computes the branch tier, test-tamper findings, and receipt statuses from git.
 func Evaluate(ctx context.Context, g repo.Git, cfg *config.Config, since string) (Result, error) {
 	commonDir, err := g.CommonDir(ctx)
@@ -221,27 +245,10 @@ func Evaluate(ctx context.Context, g repo.Git, cfg *config.Config, since string)
 			return Result{}, err
 		}
 	}
-	changes, err := g.DiffNameStatus(ctx, baseSHA, to, true)
+	changes, tampered, err := ScanDiff(ctx, g, cfg.Tiers, baseSHA, to)
 	if err != nil {
 		return Result{}, err
 	}
-
-	testGlobs := effectiveTestGlobs(cfg.Tiers)
-	patches := make(map[string][]byte)
-	for _, ch := range changes {
-		if ch.Status == "D" || ch.Status == "R100" {
-			continue
-		}
-		if glob.MatchAny(testGlobs, ch.Path) {
-			p, err := g.DiffFilePatch(ctx, baseSHA, to, ch.Path)
-			if err != nil {
-				return Result{}, err
-			}
-			patches[ch.Path] = p
-		}
-	}
-
-	tampered := DetectTestTamper(changes, patches, cfg.Tiers)
 	dec := Classify(changes, untracked, tampered, cfg.Tiers)
 
 	store := receipt.NewStore(commonDir)

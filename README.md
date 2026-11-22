@@ -155,7 +155,7 @@ quai land 42
 |---|---|
 | `quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign\|--no-sign] [--key <path>] [--push\|--no-push] [--detach] [--json]` | Run steps with slot locks, in-flight deduplication, mutation guard, receipts, and optional SSH-signed attestations, in the foreground or as a detached run |
 | `quai verify --wait [<run-id>] [--max <duration>] [--json]`, `quai verify --stop [<run-id>] [--json]` | Stream a detached run's new output until it ends or `--max` passes, or stop it and its steps |
-| `quai attest check\|push\|fetch\|prune [flags...]` | Verify SSH-signed in-toto/DSSE attestations in CI (`--onto`, `--config-ref`, `--sample`), sync, and prune expired `refs/quai/records/*` |
+| `quai attest check\|push\|fetch\|prune [flags...]` | Verify SSH-signed in-toto/DSSE attestations in CI (`--onto`, `--head`, `--config-ref`, `--sample`), sync, and prune expired `refs/quai/records/*` |
 | `quai exec --pool <name> [--slots <n>] [--wait <duration>] [--detach] -- <cmd...>` | Serialize any command behind a FIFO slot pool in its own process group |
 | `quai tier [--since <ref>] [--json]` | Classify diff risk (`gate-only`, `diff-audit`, `full-live`), detect test tampering, list receipt status |
 | `quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]` | Verify whether a reviewed diff survived rebase unchanged (`SURVIVES` vs `CHANGED`) |
