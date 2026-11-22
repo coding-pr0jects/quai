@@ -18,7 +18,7 @@ quai/
 │   ├── lock/          # mkdir locks, leases with heartbeats, priority queues, slot pools, min_free_mem
 │   ├── execrun/       # process-group command runner (Setpgid) with signal cleanup and slot binding
 │   ├── receipt/       # input fingerprinting, atomic JSON writes, lookup, retention pruning
-│   ├── verify/        # step orchestration, cache lookup, mutation guard
+│   ├── verify/        # step orchestration, conditional pool routing, cache lookup, mutation guard
 │   ├── detach/        # detached runs: start, wait with a read cursor, stop, dead-run cleanup, pruning
 │   ├── tier/          # pure diff risk classifier, R100 rename handling, test-tamper scanner
 │   ├── patchid/       # pure patch-id survival comparator and per-file drift detector
