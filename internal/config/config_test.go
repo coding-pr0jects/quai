@@ -336,3 +336,50 @@ func TestParseAttestAutoPrune(t *testing.T) {
 		}
 	}
 }
+
+func TestRejectsOptionInjectionInBaseAndRemote(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "base",
+			raw: `version = 1
+base = "--upload-pack=touch /tmp/quai-pwn;true"
+
+[[steps]]
+name = "fast"
+run = "true"
+`,
+			want: "invalid base",
+		},
+		{
+			name: "attest remote",
+			raw: `version = 1
+
+[[steps]]
+name = "fast"
+run = "true"
+
+[attest]
+remote = "--upload-pack=touch /tmp/quai-pwn;true"
+`,
+			want: "invalid [attest].remote",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.raw))
+			if err == nil {
+				t.Fatalf("expected %s starting with %q to be rejected", tc.name, "-")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not name %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "must not start with") {
+				t.Fatalf("error %q does not say what to fix", err)
+			}
+		})
+	}
+}

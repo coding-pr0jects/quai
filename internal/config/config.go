@@ -230,6 +230,9 @@ func (c *Config) normalizeAndValidate() error {
 	if c.Base == "" {
 		c.Base = "main"
 	}
+	if strings.HasPrefix(c.Base, "-") {
+		return fmt.Errorf("invalid base %q in %s: a base branch must not start with \"-\"; set base = \"main\" or the branch you target", c.Base, FileName)
+	}
 	for pool, sp := range c.Slots {
 		if !stepNameRe.MatchString(pool) {
 			return fmt.Errorf("invalid slot pool name %q: must match %s", pool, stepNameRe.String())
@@ -362,6 +365,9 @@ func (c *Config) normalizeAndValidate() error {
 
 	if c.Attest.Remote == "" {
 		c.Attest.Remote = "origin"
+	}
+	if strings.HasPrefix(c.Attest.Remote, "-") {
+		return fmt.Errorf("invalid [attest].remote %q in %s: a remote name must not start with \"-\"; set remote = \"origin\" or another configured git remote", c.Attest.Remote, FileName)
 	}
 	if c.Attest.AutoPush {
 		c.Attest.AutoSign = true

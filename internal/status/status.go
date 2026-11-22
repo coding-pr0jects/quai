@@ -17,6 +17,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/attest"
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/detach"
+	"github.com/coding-pr0jects/quai/internal/execrun"
 	"github.com/coding-pr0jects/quai/internal/gc"
 	"github.com/coding-pr0jects/quai/internal/hooks"
 	"github.com/coding-pr0jects/quai/internal/land"
@@ -388,23 +389,23 @@ func checkAgentKey(ctx context.Context, keyPath string) CheckItem {
 	if _, err := exec.LookPath("ssh-add"); err != nil {
 		return CheckItem{Name: name, Status: "warn", Message: "ssh-add not found on PATH; cannot confirm the signing key is loaded in ssh-agent", Fix: "Install OpenSSH client tools"}
 	}
-	agentCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(agentCtx, "ssh-add", "-l")
 	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			switch exitErr.ExitCode() {
-			case 1:
-				return CheckItem{Name: name, Status: "warn", Message: "ssh-agent has no loaded identities", Fix: "ssh-add " + keyPath}
-			case 2:
-				return CheckItem{Name: name, Status: "warn", Message: "no ssh-agent is running", Fix: `eval "$(ssh-agent -s)" && ssh-add ` + keyPath}
-			}
+	code, err := execrun.Run(ctx, execrun.Request{
+		Argv:    []string{"ssh-add", "-l"},
+		Timeout: 5 * time.Second,
+		Stdout:  &buf,
+		Stderr:  &buf,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+			return CheckItem{Name: name, Status: "warn", Message: "ssh-add -l timed out; cannot confirm the signing key is loaded in ssh-agent"}
+		case code == 1:
+			return CheckItem{Name: name, Status: "warn", Message: "ssh-agent has no loaded identities", Fix: "ssh-add " + shellQuote(keyPath)}
+		case code == 2:
+			return CheckItem{Name: name, Status: "warn", Message: "no ssh-agent is running", Fix: `eval "$(ssh-agent -s)" && ssh-add ` + shellQuote(keyPath)}
 		}
-		return CheckItem{Name: name, Status: "warn", Message: fmt.Sprintf("ssh-add -l failed: %v", err), Fix: "ssh-add " + keyPath}
+		return CheckItem{Name: name, Status: "warn", Message: fmt.Sprintf("ssh-add -l failed: %v", err), Fix: "ssh-add " + shellQuote(keyPath)}
 	}
 
 	fingerprint := sshKeyFingerprint(ctx, keyPath)
@@ -418,7 +419,7 @@ func checkAgentKey(ctx context.Context, keyPath string) CheckItem {
 		return CheckItem{Name: name, Status: "ok", Message: fmt.Sprintf("signing key %s is loaded in ssh-agent", fingerprint)}
 	}
 	if fingerprint != "" {
-		return CheckItem{Name: name, Status: "warn", Message: fmt.Sprintf("signing key %s is not loaded in ssh-agent (%d identity(ies) loaded)", fingerprint, identities), Fix: "ssh-add " + keyPath}
+		return CheckItem{Name: name, Status: "warn", Message: fmt.Sprintf("signing key %s is not loaded in ssh-agent (%d identity(ies) loaded)", fingerprint, identities), Fix: "ssh-add " + shellQuote(keyPath)}
 	}
 	return CheckItem{Name: name, Status: "ok", Message: fmt.Sprintf("ssh-agent holds %d identity(ies)", identities)}
 }
@@ -428,13 +429,23 @@ func sshKeyFingerprint(ctx context.Context, keyPath string) string {
 	if _, err := os.Stat(keyPath + ".pub"); err == nil {
 		target = keyPath + ".pub"
 	}
-	keyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(keyCtx, "ssh-keygen", "-l", "-f", target).Output()
-	if err != nil {
+	var out bytes.Buffer
+	code, err := execrun.Run(ctx, execrun.Request{
+		Argv:    []string{"ssh-keygen", "-l", "-f", target},
+		Timeout: 5 * time.Second,
+		Stdout:  &out,
+	})
+	if err != nil || code != 0 {
 		return ""
 	}
-	return sshFingerprintRe.FindString(string(out))
+	return sshFingerprintRe.FindString(out.String())
+}
+
+func shellQuote(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\n\r'\"\\$`;&|<>()*?[]{}!#~") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func checkAttestRemote(ctx context.Context, g repo.Git, remote string, required bool) CheckItem {

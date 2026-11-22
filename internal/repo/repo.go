@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
+
+var commitSHARe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 type FileChange struct {
 	Status  string // A, M, D, R100, etc.
@@ -164,15 +167,15 @@ func (g *ExecGit) HeadSHA(ctx context.Context) (string, error) {
 }
 
 func (g *ExecGit) TreeSHA(ctx context.Context, rev string) (string, error) {
-	return g.output(ctx, "rev-parse", rev+"^{tree}")
+	return g.output(ctx, "rev-parse", "--verify", "--end-of-options", rev+"^{tree}")
 }
 
 func (g *ExecGit) RevParse(ctx context.Context, rev string) (string, error) {
-	return g.output(ctx, "rev-parse", "--verify", rev+"^{commit}")
+	return g.output(ctx, "rev-parse", "--verify", "--end-of-options", rev+"^{commit}")
 }
 
 func (g *ExecGit) MergeBase(ctx context.Context, a, b string) (string, error) {
-	return g.output(ctx, "merge-base", a, b)
+	return g.output(ctx, "merge-base", "--end-of-options", a, b)
 }
 
 func (g *ExecGit) ResolveBaseRef(ctx context.Context, base string) (string, error) {
@@ -216,6 +219,7 @@ func (g *ExecGit) DiffNameStatus(ctx context.Context, from, to string, detectRen
 	} else {
 		args = append(args, "--no-renames")
 	}
+	args = append(args, "--end-of-options")
 	if to == "" {
 		args = append(args, from)
 	} else {
@@ -262,7 +266,7 @@ func parseNameStatusZ(data []byte) []FileChange {
 }
 
 func (g *ExecGit) DiffNameOnly(ctx context.Context, from, to string) ([]string, error) {
-	args := []string{"diff", "--name-only", "--no-renames", "-z"}
+	args := []string{"diff", "--name-only", "--no-renames", "-z", "--end-of-options"}
 	if to == "" {
 		args = append(args, from)
 	} else {
@@ -276,7 +280,7 @@ func (g *ExecGit) DiffNameOnly(ctx context.Context, from, to string) ([]string, 
 }
 
 func (g *ExecGit) DiffFilePatch(ctx context.Context, from, to, filePath string) ([]byte, error) {
-	args := []string{"diff", "--binary", "--no-renames", "-U0"}
+	args := []string{"diff", "--binary", "--no-renames", "-U0", "--end-of-options"}
 	if to == "" {
 		args = append(args, from)
 	} else {
@@ -291,7 +295,7 @@ func (g *ExecGit) DiffFilePatch(ctx context.Context, from, to, filePath string) 
 }
 
 func (g *ExecGit) DiffBinary(ctx context.Context, from, to string) ([]byte, error) {
-	args := []string{"diff", "--binary", "--no-renames", from, to}
+	args := []string{"diff", "--binary", "--no-renames", "--end-of-options", from, to}
 	out, errOut, err := g.run(ctx, nil, args...)
 	if err != nil {
 		return nil, fmt.Errorf("git diff --binary: %w (%s)", err, strings.TrimSpace(string(errOut)))
@@ -323,7 +327,7 @@ func (g *ExecGit) UntrackedFiles(ctx context.Context) ([]string, error) {
 }
 
 func (g *ExecGit) ListTree(ctx context.Context, treeOrRev string) ([]TreeEntry, error) {
-	out, errOut, err := g.run(ctx, nil, "ls-tree", "-r", "-z", treeOrRev)
+	out, errOut, err := g.run(ctx, nil, "ls-tree", "-r", "-z", "--end-of-options", treeOrRev)
 	if err != nil {
 		return nil, fmt.Errorf("git ls-tree %s: %w (%s)", treeOrRev, err, strings.TrimSpace(string(errOut)))
 	}
@@ -350,7 +354,7 @@ func (g *ExecGit) ListTree(ctx context.Context, treeOrRev string) ([]TreeEntry, 
 
 // MergeTree performs a virtual merge without touching HEAD or the working tree (requires git 2.38+).
 func (g *ExecGit) MergeTree(ctx context.Context, baseRev, headRev string) (MergeTreeResult, error) {
-	out, errOut, err := g.run(ctx, nil, "merge-tree", "--write-tree", "--name-only", "--no-messages", baseRev, headRev)
+	out, errOut, err := g.run(ctx, nil, "merge-tree", "--write-tree", "--name-only", "--no-messages", "--end-of-options", baseRev, headRev)
 	lines := nonEmptyLines(string(out))
 	if err == nil {
 		if len(lines) == 0 {
@@ -372,7 +376,7 @@ func (g *ExecGit) MergeTree(ctx context.Context, baseRev, headRev string) (Merge
 }
 
 func (g *ExecGit) Fetch(ctx context.Context, remote, ref string) error {
-	_, errOut, err := g.run(ctx, nil, "fetch", "--quiet", remote, ref)
+	_, errOut, err := g.run(ctx, nil, "fetch", "--quiet", "--end-of-options", remote, ref)
 	if err != nil {
 		return fmt.Errorf("git fetch %s %s: %w (%s)", remote, ref, err, strings.TrimSpace(string(errOut)))
 	}
@@ -380,7 +384,7 @@ func (g *ExecGit) Fetch(ctx context.Context, remote, ref string) error {
 }
 
 func (g *ExecGit) Rebase(ctx context.Context, onto string) error {
-	out, errOut, err := g.run(ctx, nil, "rebase", onto)
+	out, errOut, err := g.run(ctx, nil, "rebase", "--end-of-options", onto)
 	if err == nil {
 		return nil
 	}
@@ -394,7 +398,7 @@ func (g *ExecGit) Rebase(ctx context.Context, onto string) error {
 
 // RebaseOnto replays commits after oldUpstream onto newBase, aborting cleanly on conflict.
 func (g *ExecGit) RebaseOnto(ctx context.Context, newBase, oldUpstream string) error {
-	out, errOut, err := g.run(ctx, nil, "rebase", "--onto", newBase, oldUpstream)
+	out, errOut, err := g.run(ctx, nil, "rebase", "--onto", newBase, "--end-of-options", oldUpstream)
 	if err == nil {
 		return nil
 	}
@@ -416,7 +420,7 @@ func (g *ExecGit) unmergedFiles(ctx context.Context) ([]string, error) {
 
 func (g *ExecGit) PushForceWithLease(ctx context.Context, remote, branch, expectedSHA string) error {
 	lease := fmt.Sprintf("--force-with-lease=refs/heads/%s:%s", branch, expectedSHA)
-	_, errOut, err := g.run(ctx, nil, "push", lease, remote, "HEAD:refs/heads/"+branch)
+	_, errOut, err := g.run(ctx, nil, "push", lease, "--end-of-options", remote, "HEAD:refs/heads/"+branch)
 	if err != nil {
 		return fmt.Errorf("git push %s: %w (%s)", lease, err, strings.TrimSpace(string(errOut)))
 	}
@@ -464,7 +468,7 @@ func (g *ExecGit) WriteRefBlob(ctx context.Context, refName, fileName string, co
 	}
 	commitSHA := strings.TrimSpace(string(commitOut))
 
-	if _, errOut, err := g.run(ctx, nil, "update-ref", refName, commitSHA); err != nil {
+	if _, errOut, err := g.run(ctx, nil, "update-ref", "--end-of-options", refName, commitSHA); err != nil {
 		return fmt.Errorf("git update-ref %s: %w (%s)", refName, err, strings.TrimSpace(string(errOut)))
 	}
 	return nil
@@ -472,10 +476,10 @@ func (g *ExecGit) WriteRefBlob(ctx context.Context, refName, fileName string, co
 
 // ReadRefBlob reads fileName from refName if the ref exists.
 func (g *ExecGit) ReadRefBlob(ctx context.Context, refName, fileName string) ([]byte, bool, error) {
-	if _, _, err := g.run(ctx, nil, "rev-parse", "--verify", "--quiet", refName+"^{commit}"); err != nil {
+	if _, _, err := g.run(ctx, nil, "rev-parse", "--verify", "--quiet", "--end-of-options", refName+"^{commit}"); err != nil {
 		return nil, false, nil
 	}
-	out, errOut, err := g.run(ctx, nil, "show", refName+":"+fileName)
+	out, errOut, err := g.run(ctx, nil, "show", "--end-of-options", refName+":"+fileName)
 	if err != nil {
 		return nil, false, fmt.Errorf("git show %s:%s: %w (%s)", refName, fileName, err, strings.TrimSpace(string(errOut)))
 	}
@@ -487,8 +491,8 @@ func (g *ExecGit) PushRefs(ctx context.Context, remote string, refs []string) er
 	if len(refs) == 0 {
 		return nil
 	}
-	args := make([]string, 0, len(refs)+2)
-	args = append(args, "push", remote)
+	args := make([]string, 0, len(refs)+3)
+	args = append(args, "push", "--end-of-options", remote)
 	for _, r := range refs {
 		args = append(args, r+":"+r)
 	}
@@ -509,8 +513,8 @@ func (g *ExecGit) FetchRefspecs(ctx context.Context, remote string, refspecs []s
 	if len(refspecs) == 0 {
 		return nil
 	}
-	args := make([]string, 0, len(refspecs)+3)
-	args = append(args, "fetch", "--quiet", remote)
+	args := make([]string, 0, len(refspecs)+4)
+	args = append(args, "fetch", "--quiet", "--end-of-options", remote)
 	args = append(args, refspecs...)
 	_, errOut, err := g.run(ctx, nil, args...)
 	if err != nil {
@@ -525,7 +529,7 @@ func (g *ExecGit) FetchRefspecs(ctx context.Context, remote string, refspecs []s
 
 // ListRefs returns all local ref names matching prefix.
 func (g *ExecGit) ListRefs(ctx context.Context, prefix string) ([]string, error) {
-	out, errOut, err := g.run(ctx, nil, "for-each-ref", "--format=%(refname)", prefix)
+	out, errOut, err := g.run(ctx, nil, "for-each-ref", "--format=%(refname)", "--end-of-options", prefix)
 	if err != nil {
 		return nil, fmt.Errorf("git for-each-ref %s: %w (%s)", prefix, err, strings.TrimSpace(string(errOut)))
 	}
@@ -534,8 +538,8 @@ func (g *ExecGit) ListRefs(ctx context.Context, prefix string) ([]string, error)
 
 // ListRemoteRefs queries remote via ls-remote for refs matching patterns and returns their ref names.
 func (g *ExecGit) ListRemoteRefs(ctx context.Context, remote string, patterns []string) ([]string, error) {
-	args := make([]string, 0, len(patterns)+3)
-	args = append(args, "ls-remote", "--quiet", remote)
+	args := make([]string, 0, len(patterns)+4)
+	args = append(args, "ls-remote", "--quiet", "--end-of-options", remote)
 	args = append(args, patterns...)
 	out, errOut, err := g.run(ctx, nil, args...)
 	if err != nil {
@@ -553,7 +557,7 @@ func (g *ExecGit) ListRemoteRefs(ctx context.Context, remote string, patterns []
 
 // DeleteLocalRef removes a single local ref.
 func (g *ExecGit) DeleteLocalRef(ctx context.Context, refName string) error {
-	if _, errOut, err := g.run(ctx, nil, "update-ref", "-d", refName); err != nil {
+	if _, errOut, err := g.run(ctx, nil, "update-ref", "-d", "--end-of-options", refName); err != nil {
 		return fmt.Errorf("git update-ref -d %s: %w (%s)", refName, err, strings.TrimSpace(string(errOut)))
 	}
 	return nil
@@ -564,8 +568,8 @@ func (g *ExecGit) DeleteRemoteRefs(ctx context.Context, remote string, refs []st
 	if len(refs) == 0 {
 		return nil
 	}
-	args := make([]string, 0, len(refs)+2)
-	args = append(args, "push", remote)
+	args := make([]string, 0, len(refs)+3)
+	args = append(args, "push", "--end-of-options", remote)
 	for _, r := range refs {
 		args = append(args, ":"+r)
 	}
@@ -577,7 +581,7 @@ func (g *ExecGit) DeleteRemoteRefs(ctx context.Context, remote string, refs []st
 
 // ShowFile returns the raw bytes of filePath at git revision rev.
 func (g *ExecGit) ShowFile(ctx context.Context, rev, filePath string) ([]byte, error) {
-	out, errOut, err := g.run(ctx, nil, "show", rev+":"+filePath)
+	out, errOut, err := g.run(ctx, nil, "show", "--end-of-options", rev+":"+filePath)
 	if err != nil {
 		return nil, fmt.Errorf("git show %s:%s: %w (%s)", rev, filePath, err, strings.TrimSpace(string(errOut)))
 	}
@@ -596,14 +600,14 @@ func (g *ExecGit) Worktrees(ctx context.Context) ([]Worktree, error) {
 // AddDetachedWorktree checks rev out at path in a new linked worktree with a detached HEAD,
 // which git allows even when a branch at rev is checked out in another worktree.
 func (g *ExecGit) AddDetachedWorktree(ctx context.Context, path, rev string) error {
-	_, err := g.output(ctx, "worktree", "add", "--quiet", "--detach", path, rev)
+	_, err := g.output(ctx, "worktree", "add", "--quiet", "--detach", "--end-of-options", path, rev)
 	return err
 }
 
 // RemoveWorktree deletes the linked worktree at path, discarding its changes and any
 // rebase left in progress, then prunes its administrative files.
 func (g *ExecGit) RemoveWorktree(ctx context.Context, path string) error {
-	_, removeErr := g.output(ctx, "worktree", "remove", "--force", "--force", path)
+	_, removeErr := g.output(ctx, "worktree", "remove", "--force", "--force", "--end-of-options", path)
 	if removeErr != nil {
 		if err := os.RemoveAll(path); err != nil {
 			return errors.Join(removeErr, err)
@@ -614,13 +618,21 @@ func (g *ExecGit) RemoveWorktree(ctx context.Context, path string) error {
 }
 
 // ResetHard moves HEAD, the index, and the tracked files of the worktree to rev.
+// git reset has no --end-of-options, so rev must already be a 40-character commit SHA.
 func (g *ExecGit) ResetHard(ctx context.Context, rev string) error {
+	if !commitSHARe.MatchString(rev) {
+		return fmt.Errorf("reset --hard requires a 40-character commit SHA, got %q", rev)
+	}
 	_, err := g.output(ctx, "reset", "--quiet", "--hard", rev)
 	return err
 }
 
 // CheckRefFormatBranch reports whether name is a valid branch name.
+// git check-ref-format has no --end-of-options, so an option-shaped name is refused here.
 func (g *ExecGit) CheckRefFormatBranch(ctx context.Context, name string) error {
+	if name == "" || strings.HasPrefix(name, "-") {
+		return fmt.Errorf("invalid branch name %q: must not be empty or start with \"-\"", name)
+	}
 	if _, errOut, err := g.run(ctx, nil, "check-ref-format", "--branch", name); err != nil {
 		return fmt.Errorf("git check-ref-format --branch %q: %w (%s)", name, err, strings.TrimSpace(string(errOut)))
 	}
@@ -629,7 +641,7 @@ func (g *ExecGit) CheckRefFormatBranch(ctx context.Context, name string) error {
 
 // SymbolicRef resolves a symbolic ref such as refs/remotes/origin/HEAD to its target.
 func (g *ExecGit) SymbolicRef(ctx context.Context, name string) (string, error) {
-	out, errOut, err := g.run(ctx, nil, "symbolic-ref", "--quiet", name)
+	out, errOut, err := g.run(ctx, nil, "symbolic-ref", "--quiet", "--end-of-options", name)
 	if err != nil {
 		return "", fmt.Errorf("git symbolic-ref %s: %w (%s)", name, err, strings.TrimSpace(string(errOut)))
 	}

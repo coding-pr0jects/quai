@@ -8,7 +8,7 @@ Every repository adopts `quai` by committing a `.quai.toml` file at the reposito
 
 ```toml
 version = 1                     # Required. Must be 1.
-base = "main"                   # Default base branch. Defaults to "main".
+base = "main"                   # Default base branch. Defaults to "main". Must not start with "-".
 
 [slots]
 # Named concurrency pools shared across all linked worktrees of the repo.
@@ -57,7 +57,7 @@ allowed_signers = ".quai/allowed_signers" # OpenSSH allowed_signers file for ver
 signing_key = ""                          # Optional default SSH private key path (or QUAI_SIGNING_KEY / git user.signingkey).
 signers = []                              # Optional principal allowlist (empty = any key in allowed_signers).
 max_age = "14d"                           # Max attestation age (supports d/h/m/s; minimum 1m). Default: "14d".
-remote = "origin"                         # Default remote for refs/quai/records/* push and fetch.
+remote = "origin"                         # Default remote for refs/quai/records/* push and fetch. Must not start with "-".
 auto_sign = false                         # Best-effort sign passing receipts in verify, pre-push, and land.
 auto_push = false                         # Implies auto_sign; push signed attestation refs automatically.
 auto_prune = false                        # Best-effort prune of expired state after verify or land. Default: false.

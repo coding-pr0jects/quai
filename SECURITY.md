@@ -23,7 +23,7 @@ You can expect an initial acknowledgment within 72 hours and a coordinated fix b
 
 `quai` executes repository-configured verification steps and interacts with `git` and `gh`. Its design enforces six invariants:
 
-1. **No shell interpolation from forge metadata.** Pull request titles, bodies, branch names, and check names are never passed to `sh -c`. All `git` and `gh` calls use explicit argument slices (`exec.CommandContext`).
+1. **No shell interpolation from forge metadata.** Pull request titles, bodies, branch names, and check names are never passed to `sh -c`. All `git` and `gh` calls use explicit argument slices (`exec.CommandContext`). A remote, ref, base, or refspec that comes from `.quai.toml` or forge metadata follows `--end-of-options`, and `base` / `[attest].remote` may not start with `-`, so no such value can be parsed as a git option. `git reset --hard`, which has no `--end-of-options`, accepts only a validated 40-character commit SHA.
 2. **Validated step placeholders.** Template placeholders in `steps[].run` (`{{base}}`, `{{head}}`, `{{tree}}`) are substituted only with validated 40-character hexadecimal git SHAs.
 3. **No forged or dirty receipts.** `quai` provides no flag to mark a step passed without running it, refuses to write receipts on dirty working trees, and aborts receipt writes if a step mutates tracked files, adds untracked non-ignored files, or moves `HEAD`.
 4. **No privilege escalation on merge.** `quai land` never passes `--admin` and never passes `--delete-branch` to `gh pr merge`.

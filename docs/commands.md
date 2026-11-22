@@ -149,6 +149,7 @@ quai attest prune [--max-age <duration>] [--remote <name>] [--local-only] [--dry
 - Reports a normalized `reason` for every step, so CI logs explain a fallback to a full run without reading raw git refs:
   `verified`, `no_record`, `base_mismatch`, `tree_mismatch`, `config_mismatch`, `signature_invalid`, `expired`, `sampled`.
 - Each step also carries `base_sha`, `tree_sha`, and `fingerprint`; `base_mismatch` names the base the stored record was signed against and suggests fetching `origin/<base>` when it is stale.
+- `reason` is advisory: a miss is diagnosed by reading other stored records for the step without verifying their signatures, so treat the wording as a hint while `status` and `ok` stay the trust decision.
 - Exits `0` only if every selected step is cryptographically `"verified"`, else `1`.
 
 ### `quai attest check` JSON output
