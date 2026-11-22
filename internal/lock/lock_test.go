@@ -222,3 +222,49 @@ func TestAcquireSlotsBoundsConcurrency(t *testing.T) {
 		t.Fatalf("expected parallel utilization of 2 slots, maxSeen = %d", got)
 	}
 }
+
+func TestParseMeminfoAvailableAndMemoryGuard(t *testing.T) {
+	sample := "MemTotal:       16384000 kB\nMemFree:         2048000 kB\nMemAvailable:    6144000 kB\n"
+	got, ok := ParseMeminfoAvailable(sample)
+	if !ok || got != 6144000*1024 {
+		t.Fatalf("ParseMeminfoAvailable = (%d, %v), want (%d, true)", got, ok, 6144000*1024)
+	}
+	fallback, ok := ParseMeminfoAvailable("MemTotal: 8000 kB\nMemFree: 1000 kB\n")
+	if !ok || fallback != 1000*1024 {
+		t.Fatalf("MemFree fallback = (%d, %v)", fallback, ok)
+	}
+
+	// AcquireSlots must wait when available RAM is below MinFreeMemBytes and proceed once memory recovers.
+	locksRoot := t.TempDir()
+	ctx := context.Background()
+	var freeMem atomic.Uint64
+	freeMem.Store(1 * 1024 * 1024 * 1024) // 1 GiB
+
+	const threshold = uint64(4 * 1024 * 1024 * 1024) // 4 GiB
+	_, err := AcquireSlots(ctx, locksRoot, "heavy", 1, 2, Owner{Command: "blocked"}, Options{
+		Wait:            60 * time.Millisecond,
+		PollInterval:    10 * time.Millisecond,
+		MinFreeMemBytes: threshold,
+		AvailableMem:    func() (uint64, bool) { return freeMem.Load(), true },
+	})
+	var te *TimeoutError
+	if !errors.As(err, &te) {
+		t.Fatalf("expected TimeoutError under low memory, got %v", err)
+	}
+
+	go func() {
+		time.Sleep(45 * time.Millisecond)
+		freeMem.Store(6 * 1024 * 1024 * 1024) // recover to 6 GiB
+	}()
+
+	sl, err := AcquireSlots(ctx, locksRoot, "heavy", 1, 2, Owner{Command: "recovered"}, Options{
+		Wait:            time.Second,
+		PollInterval:    10 * time.Millisecond,
+		MinFreeMemBytes: threshold,
+		AvailableMem:    func() (uint64, bool) { return freeMem.Load(), true },
+	})
+	if err != nil {
+		t.Fatalf("expected slot acquisition after memory recovery, got %v", err)
+	}
+	defer sl.Release()
+}

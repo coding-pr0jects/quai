@@ -273,20 +273,24 @@ func runOneStep(
 	}
 
 	capacity := 0
+	var minFreeMem uint64
 	if step.Pool != "" {
-		capacity = cfg.Slots[step.Pool]
+		sp := cfg.Slots[step.Pool]
+		capacity = sp.Capacity
+		minFreeMem = sp.MinFreeMemBytes
 	}
 	code, runErr := execrun.Run(ctx, execrun.Request{
-		Dir:       topLevel,
-		ShellCmd:  expanded,
-		Timeout:   step.Duration,
-		Stdout:    stdout,
-		Stderr:    stderr,
-		LocksRoot: locksRoot,
-		Pool:      step.Pool,
-		Slots:     step.Slots,
-		Capacity:  capacity,
-		LockWait:  cfg.Land.LockWaitDur,
+		Dir:             topLevel,
+		ShellCmd:        expanded,
+		Timeout:         step.Duration,
+		Stdout:          stdout,
+		Stderr:          stderr,
+		LocksRoot:       locksRoot,
+		Pool:            step.Pool,
+		Slots:           step.Slots,
+		Capacity:        capacity,
+		MinFreeMemBytes: minFreeMem,
+		LockWait:        cfg.Land.LockWaitDur,
 		Owner: lock.Owner{
 			Command:  "quai verify --step " + step.Name,
 			Worktree: topLevel,

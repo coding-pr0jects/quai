@@ -14,19 +14,20 @@ import (
 const gracePeriod = 5 * time.Second
 
 type Request struct {
-	Dir       string
-	Argv      []string
-	ShellCmd  string // if non-empty, runs via sh -c <ShellCmd>
-	Timeout   time.Duration
-	Stdin     io.Reader
-	Stdout    io.Writer
-	Stderr    io.Writer
-	LocksRoot string
-	Pool      string
-	Slots     int
-	Capacity  int
-	LockWait  time.Duration
-	Owner     lock.Owner
+	Dir             string
+	Argv            []string
+	ShellCmd        string // if non-empty, runs via sh -c <ShellCmd>
+	Timeout         time.Duration
+	Stdin           io.Reader
+	Stdout          io.Writer
+	Stderr          io.Writer
+	LocksRoot       string
+	Pool            string
+	Slots           int
+	Capacity        int
+	MinFreeMemBytes uint64
+	LockWait        time.Duration
+	Owner           lock.Owner
 }
 
 // Run executes a command inside its own process group, optionally bounded by a slot pool,
@@ -34,9 +35,10 @@ type Request struct {
 func Run(ctx context.Context, req Request) (int, error) {
 	if req.Slots > 0 {
 		sl, err := lock.AcquireSlots(ctx, req.LocksRoot, req.Pool, req.Slots, req.Capacity, req.Owner, lock.Options{
-			Wait:         req.LockWait,
-			PollInterval: 200 * time.Millisecond,
-			StatusWriter: req.Stderr,
+			Wait:            req.LockWait,
+			PollInterval:    200 * time.Millisecond,
+			MinFreeMemBytes: req.MinFreeMemBytes,
+			StatusWriter:    req.Stderr,
 		})
 		if err != nil {
 			return 1, err

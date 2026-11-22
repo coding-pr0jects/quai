@@ -19,12 +19,13 @@ import (
 )
 
 type PoolStatus struct {
-	Name     string              `json:"name"`
-	Capacity int                 `json:"capacity"`
-	Held     int                 `json:"held"`
-	Stale    int                 `json:"stale"`
-	Slots    []lock.InspectState `json:"slots,omitempty"`
-	Waiters  []lock.Owner        `json:"waiters,omitempty"`
+	Name            string              `json:"name"`
+	Capacity        int                 `json:"capacity"`
+	MinFreeMemBytes uint64              `json:"min_free_mem_bytes,omitempty"`
+	Held            int                 `json:"held"`
+	Stale           int                 `json:"stale"`
+	Slots           []lock.InspectState `json:"slots,omitempty"`
+	Waiters         []lock.Owner        `json:"waiters,omitempty"`
 }
 
 type InFlightStatus struct {
@@ -33,14 +34,15 @@ type InFlightStatus struct {
 }
 
 type Report struct {
-	OK           bool              `json:"ok"`
-	RepoRoot     string            `json:"repo_root"`
-	CommonDir    string            `json:"common_dir"`
-	LandLock     lock.InspectState `json:"land_lock"`
-	Pools        []PoolStatus      `json:"pools,omitempty"`
-	InFlight     []InFlightStatus  `json:"in_flight,omitempty"`
-	ReceiptCount int               `json:"receipt_count"`
-	AttestCount  int               `json:"attestation_count"`
+	OK                bool              `json:"ok"`
+	RepoRoot          string            `json:"repo_root"`
+	CommonDir         string            `json:"common_dir"`
+	AvailableMemBytes uint64            `json:"available_mem_bytes,omitempty"`
+	LandLock          lock.InspectState `json:"land_lock"`
+	Pools             []PoolStatus      `json:"pools,omitempty"`
+	InFlight          []InFlightStatus  `json:"in_flight,omitempty"`
+	ReceiptCount      int               `json:"receipt_count"`
+	AttestCount       int               `json:"attestation_count"`
 }
 
 type CheckItem struct {
@@ -91,6 +93,9 @@ func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error
 		CommonDir: commonDir,
 		LandLock:  lock.InspectDir(filepath.Join(locksRoot, "land.lock"), lock.DefaultStaleAfter),
 	}
+	if avail, ok := lock.ReadAvailableMemory(); ok {
+		rep.AvailableMemBytes = avail
+	}
 
 	if cfg != nil && len(cfg.Slots) > 0 {
 		names := make([]string, 0, len(cfg.Slots))
@@ -99,13 +104,14 @@ func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error
 		}
 		sort.Strings(names)
 		for _, pool := range names {
-			capacity := cfg.Slots[pool]
+			sp := cfg.Slots[pool]
 			ps := PoolStatus{
-				Name:     pool,
-				Capacity: capacity,
-				Waiters:  lock.InspectWaiters(filepath.Join(locksRoot, fmt.Sprintf("slot-%s.queue", pool)), lock.DefaultStaleAfter),
+				Name:            pool,
+				Capacity:        sp.Capacity,
+				MinFreeMemBytes: sp.MinFreeMemBytes,
+				Waiters:         lock.InspectWaiters(filepath.Join(locksRoot, fmt.Sprintf("slot-%s.queue", pool)), lock.DefaultStaleAfter),
 			}
-			for i := 0; i < capacity; i++ {
+			for i := 0; i < sp.Capacity; i++ {
 				dir := filepath.Join(locksRoot, fmt.Sprintf("slot-%s-%d.lock", pool, i))
 				st := lock.InspectDir(dir, lock.DefaultStaleAfter)
 				if st.Held {

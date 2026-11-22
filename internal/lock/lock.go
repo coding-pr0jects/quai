@@ -40,6 +40,8 @@ type Options struct {
 	MissingOwnerWarn  time.Duration
 	HeartbeatInterval time.Duration
 	StaleAfter        time.Duration
+	MinFreeMemBytes   uint64
+	AvailableMem      func() (uint64, bool)
 	StatusWriter      io.Writer
 }
 
@@ -268,8 +270,25 @@ func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity i
 	opts = normalizeOptions(opts, 500*time.Millisecond)
 	localHost, localPIDNS := currentHost(), currentPIDNS()
 	queueDir := filepath.Join(locksRoot, fmt.Sprintf("slot-%s.queue", pool))
+	memFn := opts.AvailableMem
+	if memFn == nil {
+		memFn = ReadAvailableMemory
+	}
+	memSatisfied := func() (bool, uint64) {
+		if opts.MinFreeMemBytes == 0 {
+			return true, 0
+		}
+		avail, ok := memFn()
+		if !ok {
+			return true, 0
+		}
+		return avail >= opts.MinFreeMemBytes, avail
+	}
 
 	tryAll := func() (*SlotLease, bool, error) {
+		if okMem, _ := memSatisfied(); !okMem {
+			return nil, false, nil
+		}
 		var held []*Lease
 		for i := 0; i < capacity && len(held) < count; i++ {
 			dir := filepath.Join(locksRoot, fmt.Sprintf("slot-%s-%d.lock", pool, i))
@@ -344,7 +363,12 @@ func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity i
 
 		if opts.StatusWriter != nil && time.Since(lastReport) >= opts.ReportEvery {
 			lastReport = time.Now()
-			fmt.Fprintf(opts.StatusWriter, "quai lock: waiting for %d slot(s) in pool %q (%s elapsed)\n", count, pool, time.Since(start).Round(time.Second))
+			if okMem, avail := memSatisfied(); !okMem {
+				fmt.Fprintf(opts.StatusWriter, "quai lock: waiting for >= %s free memory for pool %q (currently %s, %s elapsed)\n",
+					FormatBytes(opts.MinFreeMemBytes), pool, FormatBytes(avail), time.Since(start).Round(time.Second))
+			} else {
+				fmt.Fprintf(opts.StatusWriter, "quai lock: waiting for %d slot(s) in pool %q (%s elapsed)\n", count, pool, time.Since(start).Round(time.Second))
+			}
 		}
 
 		timer := time.NewTimer(opts.PollInterval)

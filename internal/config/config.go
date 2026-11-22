@@ -30,14 +30,52 @@ const (
 	MergeRebase MergeMethod = "rebase"
 )
 
+type SlotPool struct {
+	Capacity        int
+	MinFreeMem      string
+	MinFreeMemBytes uint64
+}
+
+// UnmarshalTOML accepts either an integer capacity (heavy = 2) or a table
+// ([slots.heavy] capacity = 2, min_free_mem = "4G").
+func (p *SlotPool) UnmarshalTOML(v any) error {
+	switch val := v.(type) {
+	case int64:
+		p.Capacity = int(val)
+		return nil
+	case map[string]any:
+		for k, raw := range val {
+			switch k {
+			case "capacity":
+				n, ok := raw.(int64)
+				if !ok {
+					return fmt.Errorf("slot pool capacity must be an integer")
+				}
+				p.Capacity = int(n)
+			case "min_free_mem":
+				s, ok := raw.(string)
+				if !ok {
+					return fmt.Errorf("slot pool min_free_mem must be a string (e.g. \"4G\")")
+				}
+				p.MinFreeMem = s
+			default:
+				return fmt.Errorf("unknown key %q in slot pool", k)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("slot pool must be an integer or table with capacity/min_free_mem")
+	}
+}
+
 type Config struct {
-	Version int            `toml:"version"`
-	Base    string         `toml:"base"`
-	Slots   map[string]int `toml:"slots"`
-	Steps   []Step         `toml:"steps"`
-	Tiers   TierPolicy     `toml:"tiers"`
-	Land    LandPolicy     `toml:"land"`
-	Attest  AttestPolicy   `toml:"attest"`
+	Version int                 `toml:"version"`
+	Base    string              `toml:"base"`
+	Slots   map[string]SlotPool `toml:"slots"`
+	Steps   []Step              `toml:"steps"`
+	Tiers   TierPolicy          `toml:"tiers"`
+	Land    LandPolicy          `toml:"land"`
+	Attest  AttestPolicy        `toml:"attest"`
 }
 
 type Step struct {
@@ -113,11 +151,17 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parse %s: %w", FileName, err)
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		keys := make([]string, len(undecoded))
-		for i, k := range undecoded {
-			keys[i] = k.String()
+		var keys []string
+		for _, k := range undecoded {
+			// BurntSushi/toml records subkeys decoded manually by SlotPool.UnmarshalTOML as undecoded.
+			if len(k) == 3 && k[0] == "slots" && (k[2] == "capacity" || k[2] == "min_free_mem") {
+				continue
+			}
+			keys = append(keys, k.String())
 		}
-		return nil, fmt.Errorf("unknown keys in %s: %s", FileName, strings.Join(keys, ", "))
+		if len(keys) > 0 {
+			return nil, fmt.Errorf("unknown keys in %s: %s", FileName, strings.Join(keys, ", "))
+		}
 	}
 	if err := cfg.normalizeAndValidate(); err != nil {
 		return nil, err
@@ -132,12 +176,20 @@ func (c *Config) normalizeAndValidate() error {
 	if c.Base == "" {
 		c.Base = "main"
 	}
-	for pool, count := range c.Slots {
+	for pool, sp := range c.Slots {
 		if !stepNameRe.MatchString(pool) {
 			return fmt.Errorf("invalid slot pool name %q: must match %s", pool, stepNameRe.String())
 		}
-		if count <= 0 {
-			return fmt.Errorf("slot pool %q must be > 0, got %d", pool, count)
+		if sp.Capacity <= 0 {
+			return fmt.Errorf("slot pool %q capacity must be > 0, got %d", pool, sp.Capacity)
+		}
+		if strings.TrimSpace(sp.MinFreeMem) != "" {
+			b, err := ParseByteSize(sp.MinFreeMem)
+			if err != nil || b == 0 {
+				return fmt.Errorf("slot pool %q has invalid min_free_mem %q", pool, sp.MinFreeMem)
+			}
+			sp.MinFreeMemBytes = b
+			c.Slots[pool] = sp
 		}
 	}
 
@@ -167,12 +219,12 @@ func (c *Config) normalizeAndValidate() error {
 			if s.Pool == "" {
 				return fmt.Errorf("step %q requests %d slot(s) without a pool", s.Name, s.Slots)
 			}
-			capSlots, ok := c.Slots[s.Pool]
+			sp, ok := c.Slots[s.Pool]
 			if !ok {
 				return fmt.Errorf("step %q references unknown slot pool %q", s.Name, s.Pool)
 			}
-			if s.Slots > capSlots {
-				return fmt.Errorf("step %q requests %d slots in pool %q (capacity %d)", s.Name, s.Slots, s.Pool, capSlots)
+			if s.Slots > sp.Capacity {
+				return fmt.Errorf("step %q requests %d slots in pool %q (capacity %d)", s.Name, s.Slots, s.Pool, sp.Capacity)
 			}
 		} else if s.Pool != "" {
 			if _, ok := c.Slots[s.Pool]; !ok {
@@ -247,6 +299,44 @@ func (c *Config) normalizeAndValidate() error {
 		c.Attest.MaxAgeDur = d
 	}
 	return nil
+}
+
+// ParseByteSize parses human-readable memory sizes like "512M", "4G", "4GiB", or "2048MB".
+func ParseByteSize(raw string) (uint64, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, fmt.Errorf("empty byte size")
+	}
+	upper := strings.ToUpper(s)
+	suffixes := []struct {
+		suffix string
+		mult   uint64
+	}{
+		{"GIB", 1024 * 1024 * 1024},
+		{"GB", 1024 * 1024 * 1024},
+		{"G", 1024 * 1024 * 1024},
+		{"MIB", 1024 * 1024},
+		{"MB", 1024 * 1024},
+		{"M", 1024 * 1024},
+		{"KIB", 1024},
+		{"KB", 1024},
+		{"K", 1024},
+		{"B", 1},
+	}
+	mult := uint64(1)
+	numPart := upper
+	for _, sf := range suffixes {
+		if strings.HasSuffix(upper, sf.suffix) {
+			mult = sf.mult
+			numPart = strings.TrimSpace(strings.TrimSuffix(upper, sf.suffix))
+			break
+		}
+	}
+	var val uint64
+	if _, err := fmt.Sscanf(numPart, "%d", &val); err != nil || fmt.Sprintf("%d", val) != numPart || val == 0 {
+		return 0, fmt.Errorf("invalid byte size %q", raw)
+	}
+	return val * mult, nil
 }
 
 // ParseDuration parses a Go duration string and additionally supports day suffixes like "14d".

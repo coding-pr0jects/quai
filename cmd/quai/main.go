@@ -425,13 +425,13 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 		fmt.Fprintf(stderr, "quai exec: %v\n", err)
 		return 2
 	}
-	capacity, ok := cfg.Slots[*pool]
+	sp, ok := cfg.Slots[*pool]
 	if !ok {
 		fmt.Fprintf(stderr, "quai exec: unknown slot pool %q in %s\n", *pool, config.FileName)
 		return 2
 	}
-	if *slots > capacity {
-		fmt.Fprintf(stderr, "quai exec: requested %d slots in pool %q (capacity %d)\n", *slots, *pool, capacity)
+	if *slots > sp.Capacity {
+		fmt.Fprintf(stderr, "quai exec: requested %d slots in pool %q (capacity %d)\n", *slots, *pool, sp.Capacity)
 		return 2
 	}
 	commonDir, err := g.CommonDir(ctx)
@@ -444,16 +444,17 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 		absCwd = top
 	}
 	code, err := execrun.Run(ctx, execrun.Request{
-		Dir:       absCwd,
-		Argv:      cmdArgs,
-		Stdin:     stdin,
-		Stdout:    stdout,
-		Stderr:    stderr,
-		LocksRoot: filepath.Join(commonDir, "quai", "locks"),
-		Pool:      *pool,
-		Slots:     *slots,
-		Capacity:  capacity,
-		LockWait:  waitDur,
+		Dir:             absCwd,
+		Argv:            cmdArgs,
+		Stdin:           stdin,
+		Stdout:          stdout,
+		Stderr:          stderr,
+		LocksRoot:       filepath.Join(commonDir, "quai", "locks"),
+		Pool:            *pool,
+		Slots:           *slots,
+		Capacity:        sp.Capacity,
+		MinFreeMemBytes: sp.MinFreeMemBytes,
+		LockWait:        waitDur,
 		Owner: lock.Owner{
 			Command:  "quai exec --pool " + *pool + " -- " + strings.Join(cmdArgs, " "),
 			Worktree: top,

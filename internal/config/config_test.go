@@ -139,3 +139,40 @@ remote = "upstream"
 		t.Fatalf("step 1 principals = %v", got)
 	}
 }
+
+func TestParseSlotPoolMemoryLimitAndByteSize(t *testing.T) {
+	raw := `
+version = 1
+
+[slots]
+light = 4
+
+[slots.heavy]
+capacity = 2
+min_free_mem = "4G"
+
+[[steps]]
+name = "e2e"
+run = "true"
+pool = "heavy"
+slots = 1
+`
+	cfg, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if cfg.Slots["light"].Capacity != 4 || cfg.Slots["light"].MinFreeMemBytes != 0 {
+		t.Fatalf("light pool = %+v", cfg.Slots["light"])
+	}
+	wantBytes := uint64(4 * 1024 * 1024 * 1024)
+	if cfg.Slots["heavy"].Capacity != 2 || cfg.Slots["heavy"].MinFreeMemBytes != wantBytes {
+		t.Fatalf("heavy pool = %+v, want cap=2 bytes=%d", cfg.Slots["heavy"], wantBytes)
+	}
+
+	if _, err := Parse([]byte("version = 1\n[slots.heavy]\ncapacity = 2\nmin_free_mem = '0G'\n")); err == nil {
+		t.Fatal("expected error for zero min_free_mem")
+	}
+	if _, err := Parse([]byte("version = 1\n[slots.heavy]\ncapacity = 2\nextra = 1\n")); err == nil {
+		t.Fatal("expected error for unknown key in slot pool")
+	}
+}
