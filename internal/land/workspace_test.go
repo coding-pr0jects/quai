@@ -3,6 +3,7 @@ package land
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/forge"
+	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
 )
 
@@ -140,10 +142,11 @@ func (fx *coordinatorFixture) assertNothingLeftBehind() {
 func TestLandFromCoordinatorWorktree(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
-		name     string
-		mainFile string
-		cfg      string
-		want     Action
+		name       string
+		mainFile   string
+		cfg        string
+		want       Action
+		wantOwners bool
 	}{
 		{name: "direct merge", cfg: "version = 1\n[land]\nrequired_checks = [\"check\"]\n", want: ActionDirectMerge},
 		{name: "optimistic merge", mainFile: "a.txt", cfg: "version = 1\n[land]\nrequired_checks = [\"check\"]\n", want: ActionOptimisticMerge},
@@ -151,20 +154,26 @@ func TestLandFromCoordinatorWorktree(t *testing.T) {
 			name:     "rebase and merge in a temporary worktree",
 			mainFile: "a.txt",
 			cfg: `version = 1
+[slots]
+heavy = 1
 [[steps]]
 name = "pr-content"
-run = "grep -q b2 b.txt && grep -q 'main moved' a.txt"
+run = "grep -q b2 b.txt && grep -q 'main moved' a.txt && cat 'LOCKS/slot-heavy-0.lock/owner' > 'OUT/slot-owner.json' && cat 'LOCKS/land.lock/owner' > 'OUT/land-owner.json'"
+pool = "heavy"
+slots = 1
 [land]
 optimistic_merge = false
 required_checks = ["check"]
 `,
-			want: ActionRebaseAndMerge,
+			want:       ActionRebaseAndMerge,
+			wantOwners: true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newCoordinatorFixture(t, tc.mainFile)
 			mainTip := fx.originHead("main")
+			tc.cfg = strings.NewReplacer("LOCKS", filepath.Join(fx.commonDir, "quai", "locks"), "OUT", fx.tmp).Replace(tc.cfg)
 
 			dry, err := fx.run(ctx, fx.coordGit, tc.cfg, Options{DryRun: true})
 			if err != nil || !dry.OK || dry.Action != tc.want {
@@ -187,9 +196,31 @@ required_checks = ["check"]
 			} else if landed != fx.featSHA {
 				t.Fatalf("%s rewrote origin/feat from %s to %s", tc.want, fx.featSHA, landed)
 			}
+			if tc.wantOwners {
+				slot := fx.readOwner("slot-owner.json")
+				if slot.Role != lock.RoleLand || slot.Priority != SlotPriority || !strings.Contains(slot.Worktree, TempWorktreePrefix) {
+					t.Fatalf("post-rebase verify slot owner = %+v, want land/%d in the temporary worktree", slot, SlotPriority)
+				}
+				if landLock := fx.readOwner("land-owner.json"); landLock.Role != lock.RoleLand || landLock.Priority != SlotPriority {
+					t.Fatalf("land.lock owner = %+v, want land/%d", landLock, SlotPriority)
+				}
+			}
 			fx.assertNothingLeftBehind()
 		})
 	}
+}
+
+func (fx *coordinatorFixture) readOwner(name string) lock.Owner {
+	fx.t.Helper()
+	raw, err := os.ReadFile(filepath.Join(fx.tmp, name))
+	if err != nil {
+		fx.t.Fatalf("step did not record %s: %v", name, err)
+	}
+	var o lock.Owner
+	if err := json.Unmarshal(raw, &o); err != nil {
+		fx.t.Fatalf("decode %s: %v", name, err)
+	}
+	return o
 }
 
 func TestLandRefusesStaleRemoteHeadFromCoordinator(t *testing.T) {

@@ -14,6 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `quai land` resets the rebased branch to its original head when verification or the push fails after a rebase, and reports `"failure": "post-rebase-verify-failed"` for a failed verification (#12).
 - `quai status` lists temporary land worktrees (`land_worktrees`), and `quai doctor` warns about ones left while `land.lock` is free (#12).
 - `quai attest check --head <pr-head-sha>`: on a checked-out merge commit whose base moved since local `quai verify`, accepts the PR head's attestation on its old merge base when the base's changes are disjoint from the PR, touch no `[land].global_paths` (read from `--config-ref`), merge cleanly, and tamper with no test. JSON adds `match_mode` (`exact` | `disjoint-base`), `head_sha`, `old_base_sha`, and `disjoint_refusal` (#13).
+- Priority slot queues (`internal/lock`): waiters are served by `priority` plus a capped aging boost, then FIFO. `quai land` queues at priority `10` so it passes waiting `quai verify` runs; `quai verify` and `quai exec` take `--priority <int>`. Leases and tickets record their `role` (`land`, `verify`, `exec`) and `priority`, shown by `quai status` and `quai status --json` (#14).
 
 ### Changed
 - `docs/agents.md` is now `docs/agent-integration.md`; the `verify-quai` harness moved to `.agents/skills/verify-quai/`, linked from `.claude/skills/` and `.cursor/skills/`.

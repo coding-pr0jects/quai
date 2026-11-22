@@ -3,6 +3,7 @@ package land
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/forge"
+	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
 	"github.com/coding-pr0jects/quai/internal/verdict"
 )
@@ -402,11 +404,17 @@ func TestRunRebaseAutoSignsAndPushesAttestation(t *testing.T) {
 	run(work, "push", "-q", "origin", "main")
 	run(work, "switch", "-q", "feat/rebase-sign")
 
+	slotOwner := filepath.Join(tmp, "slot-owner.json")
 	cfg, err := config.Parse([]byte(`
 version = 1
+[slots]
+heavy = 1
+
 [[steps]]
 name = "fast"
-run = "true"
+run = "cat '` + filepath.Join(work, ".git", "quai", "locks", "slot-heavy-0.lock", "owner") + `' > '` + slotOwner + `'"
+pool = "heavy"
+slots = 1
 
 [land]
 optimistic_merge = false
@@ -447,6 +455,14 @@ auto_push = true
 	remoteRefs, err := g.ListRemoteRefs(ctx, "origin", []string{"refs/quai/records/*"})
 	if err != nil || len(remoteRefs) != 1 {
 		t.Fatalf("expected post-rebase attestation pushed to origin, got refs=%v err=%v", remoteRefs, err)
+	}
+	raw, err := os.ReadFile(slotOwner)
+	if err != nil {
+		t.Fatalf("step did not record its slot owner: %v", err)
+	}
+	var owner lock.Owner
+	if err := json.Unmarshal(raw, &owner); err != nil || owner.Role != lock.RoleLand || owner.Priority != SlotPriority {
+		t.Fatalf("expected post-rebase verify to hold its slot as land/%d, got %s (err=%v)", SlotPriority, raw, err)
 	}
 }
 

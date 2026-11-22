@@ -15,7 +15,7 @@ quai/
 │   ├── conflicts/     # read-only merge-tree and file-overlap checks across linked worktrees
 │   ├── glob/          # double-star (**) path glob matcher shared by config, receipt, tier, land
 │   ├── repo/          # Git interface and ExecGit adapter (diff, ls-tree, merge-tree, patch-id, rebase)
-│   ├── lock/          # mkdir locks, leases with heartbeats, FIFO queues, slot pools, min_free_mem
+│   ├── lock/          # mkdir locks, leases with heartbeats, priority queues, slot pools, min_free_mem
 │   ├── execrun/       # process-group command runner (Setpgid) with signal cleanup and slot binding
 │   ├── receipt/       # input fingerprinting, atomic JSON writes, lookup, retention pruning
 │   ├── verify/        # step orchestration, cache lookup, mutation guard
@@ -75,7 +75,7 @@ All mutable state lives inside `<git-common-dir>/quai/` (resolved via `git rev-p
 ├── locks/
 │   ├── land.lock/
 │   │   └── owner
-│   ├── land.lock.queue/          # FIFO waiter tickets
+│   ├── land.lock.queue/          # waiter tickets: <enqueue-unix-nanos>-<token>.ticket
 │   ├── slot-<pool>-<index>.lock/
 │   │   └── owner
 │   ├── slot-<pool>.queue/
@@ -94,9 +94,9 @@ All mutable state lives inside `<git-common-dir>/quai/` (resolved via `git rev-p
 
 ### Atomic lock and dead-PID recovery (`internal/lock`)
 
-1. When the lock is held or others already wait, a waiter writes a ticket into the lock's queue directory (`land.lock.queue/`, `slot-<pool>.queue/`), and only the oldest live ticket may try to acquire, so waiters never starve.
+1. When the lock is held or others already wait, a waiter writes a ticket into the lock's queue directory (`land.lock.queue/`, `slot-<pool>.queue/`), and only the first live ticket in service order may try to acquire. Service order is `(priority + aging boost) DESC, enqueue time ASC`, where the aging boost is one point per 30 seconds waited, capped at 10 (`lock.EffectivePriority`). `quai land` queues at priority 10, everything else at 0 unless `--priority` says otherwise. Equal priorities stay FIFO, and the boost lets a priority 0 waiter catch up with a landing, so waiters never starve.
 2. Acquisition creates `<lock-dir>` with `os.Mkdir`, which is atomic on POSIX filesystems.
-3. The holder writes `<lock-dir>/owner` atomically via temp file + rename. The owner is a lease: `{pid, host, pid_ns, token, command, worktree, acquired_at, heartbeat_at}`, with `heartbeat_at` refreshed every 5 seconds.
+3. The holder writes `<lock-dir>/owner` atomically via temp file + rename. The owner is a lease: `{pid, host, pid_ns, token, role, priority, command, worktree, acquired_at, heartbeat_at}`, where `role` is `land`, `verify`, or `exec`, with `heartbeat_at` refreshed every 5 seconds.
 4. A holder is dead when its heartbeat is older than 30 seconds, or, on the same host and Linux PID namespace, when `kill(pid, 0)` returns `ESRCH`. A PID from another host or namespace is never probed, so a container never steals a live lock.
 5. To take over a dead holder, the waiter acquires `<lock-dir>.takeover`, re-reads `owner` to confirm the same dead lease, atomically replaces `owner` with its own, and removes `.takeover`.
 6. If `owner` is absent for over 10 seconds, the waiter emits a warning naming the lock directory without breaking it.

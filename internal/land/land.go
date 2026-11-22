@@ -22,6 +22,10 @@ import (
 
 type Action string
 
+// SlotPriority is the queue priority of quai land, so a landing passes queued
+// quai verify and quai exec waiters, which default to priority 0.
+const SlotPriority = 10
+
 const (
 	ActionRefuse          Action = "refuse"
 	ActionDirectMerge     Action = "direct-merge"
@@ -217,6 +221,8 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 
 	lockDir := filepath.Join(commonDir, "quai", "locks", "land.lock")
 	lease, err := lock.AcquireDir(ctx, lockDir, lock.Owner{
+		Role:     lock.RoleLand,
+		Priority: SlotPriority,
 		Command:  fmt.Sprintf("quai land %d", opts.PRNumber),
 		Worktree: topLevel,
 	}, lock.Options{
@@ -446,6 +452,8 @@ func rebaseVerifyPush(ctx context.Context, wg repo.Git, cfg *config.Config, opts
 			JSON:           opts.JSON,
 			Stdout:         opts.Stdout,
 			Stderr:         opts.Stderr,
+			Role:           lock.RoleLand,
+			Priority:       SlotPriority,
 		})
 		rolledBack := fmt.Sprintf("PR head reset to %s, nothing pushed", short(preRebaseSHA))
 		if vErr != nil {

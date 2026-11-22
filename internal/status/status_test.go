@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,11 +85,34 @@ slots = 1
 	}
 	defer landLease.Release()
 
-	slotLease, err := lock.AcquireSlots(ctx, locksRoot, "heavy", 1, 2, lock.Owner{Command: "quai verify", Worktree: dir}, lock.Options{Wait: time.Second})
+	slotLease, err := lock.AcquireSlots(ctx, locksRoot, "heavy", 2, 2, lock.Owner{Role: lock.RoleVerify, Command: "quai verify", Worktree: dir}, lock.Options{Wait: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer slotLease.Release()
+
+	waitCtx, stopWaiters := context.WithCancel(ctx)
+	var waiters sync.WaitGroup
+	defer waiters.Wait()
+	defer stopWaiters()
+	queueDir := filepath.Join(locksRoot, "slot-heavy.queue")
+	for _, w := range []lock.Owner{
+		{Role: lock.RoleVerify, Command: "quai verify --step fast"},
+		{Role: lock.RoleLand, Priority: 10, Command: "quai land 99"},
+	} {
+		waiters.Add(1)
+		go func() {
+			defer waiters.Done()
+			_, _ = lock.AcquireSlots(waitCtx, locksRoot, "heavy", 1, 2, w, lock.Options{PollInterval: 10 * time.Millisecond})
+		}()
+		want := len(lock.InspectWaiters(queueDir, 0)) + 1
+		for deadline := time.Now().Add(5 * time.Second); len(lock.InspectWaiters(queueDir, 0)) < want; {
+			if time.Now().After(deadline) {
+				t.Fatalf("waiter %q never queued", w.Command)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 
 	rep, err := Inspect(ctx, g, cfg)
 	if err != nil {
@@ -97,8 +121,16 @@ slots = 1
 	if !rep.OK || !rep.LandLock.Held || !rep.LandLock.Alive {
 		t.Fatalf("expected live land.lock, got %+v", rep.LandLock)
 	}
-	if len(rep.Pools) != 1 || rep.Pools[0].Name != "heavy" || rep.Pools[0].Held != 1 || rep.Pools[0].Capacity != 2 {
+	if len(rep.Pools) != 1 || rep.Pools[0].Name != "heavy" || rep.Pools[0].Held != 2 || rep.Pools[0].Capacity != 2 {
 		t.Fatalf("unexpected pool status: %+v", rep.Pools)
+	}
+	for _, sl := range rep.Pools[0].Slots {
+		if sl.Owner == nil || sl.Owner.Role != lock.RoleVerify || sl.Owner.Priority != 0 {
+			t.Fatalf("expected verify holders at priority 0, got %+v", sl)
+		}
+	}
+	if w := rep.Pools[0].Waiters; len(w) != 2 || w[0].Role != lock.RoleLand || w[0].Priority != 10 || w[1].Role != lock.RoleVerify || w[1].Priority != 0 {
+		t.Fatalf("expected waiters [land/10 verify/0] in service order, got %+v", w)
 	}
 
 	leftover := filepath.Join(commonDir, "quai", land.TempWorktreePrefix+"7-4242")

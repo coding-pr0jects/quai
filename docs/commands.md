@@ -19,7 +19,7 @@ All `quai` commands work from the repository root or any subdirectory inside a m
 Run configured verification steps with slot throttling, mutation guard, input-fingerprinted receipts, and optional SSH-signed attestations.
 
 ```bash
-quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [--key <path>] [--push|--no-push] [--remote <name>] [--detach] [--json]
+quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [--key <path>] [--push|--no-push] [--remote <name>] [--priority <int>] [--detach] [--json]
 quai verify --wait [<run-id>] [--max <duration>] [--json]
 quai verify --stop [<run-id>] [--json]
 ```
@@ -33,6 +33,7 @@ quai verify --stop [<run-id>] [--json]
 - `--key <path>`: Explicit SSH private key path for `--sign` (overrides `QUAI_SIGNING_KEY`, `[attest].signing_key`, and `git config user.signingkey`).
 - `--push` / `--no-push`: Push written attestation refs to `--remote` (implies `--sign`), or suppress `[attest].auto_push` / `QUAI_PUSH=1`.
 - `--remote <name>`: Remote name for `--push` (defaults to `[attest].remote`, `"origin"`).
+- `--priority <int>`: Queue priority for the slot and in-flight locks of every step, from `-1000` to `1000` (default `0`). See [Slot queue order](#slot-queue-order). Out of range exits `2`.
 - `--json`: Print a structured JSON summary to stdout.
 - `--detach`: Start the run as a detached run (see below), print its run ID, and exit `0` at once.
 - `--wait [<run-id>]`: Wait for a detached run. Defaults to the latest run started from the current worktree.
@@ -208,7 +209,7 @@ On `pull_request` events, `actions/checkout` checks out the merge commit instead
 Run any arbitrary command behind a named slot pool from `[slots]`.
 
 ```bash
-quai exec --pool <name> [--slots <n>] [--wait <duration>] [--detach] -- <command...>
+quai exec --pool <name> [--slots <n>] [--wait <duration>] [--priority <int>] [--detach] -- <command...>
 ```
 
 ### Flags
@@ -216,6 +217,7 @@ quai exec --pool <name> [--slots <n>] [--wait <duration>] [--detach] -- <command
 - `--pool <name>`: Required pool name declared under `[slots]` in `.quai.toml`.
 - `--slots <n>`: Number of slots to acquire (default `1`).
 - `--wait <duration>`: Maximum wait duration before exiting `4` (default `30m`).
+- `--priority <int>`: Queue priority in the pool, from `-1000` to `1000` (default `0`). See [Slot queue order](#slot-queue-order). Out of range exits `2`.
 - `--detach`: Run the command as a detached run with stdin from `/dev/null`, print its run ID, and exit `0`. Follow it with `quai verify --wait <run-id>` or `quai verify --stop <run-id>`; its `exit.exit_code` is the command's own.
 
 ### Behavior
@@ -336,7 +338,7 @@ quai land <pr> [--dry-run] [--method squash|merge|rebase] [--restack] [--require
 | `refuse` | PR closed/draft/fork, required checks failed/missing, or the PR head out of sync: the caller's `HEAD` (on the PR branch) or `origin/<pr-head>` (elsewhere) differs from the head GitHub reports. On the PR branch only, a dirty working tree |
 | `direct-merge` | `origin/<base>` equals `merge_base`; verifies required checks and merges with `--match-head-commit` |
 | `optimistic-merge` | `origin/<base>` moved, `optimistic_merge = true`, `git merge-tree --write-tree` is clean, base delta is disjoint from PR files and `global_paths`, and GitHub does not block `BEHIND`; merges without rebasing |
-| `rebase-and-merge` | `origin/<base>` moved and optimistic merge is disqualified or disabled; acquires `land.lock`, rebases onto `origin/<base>`, runs `patch-id` and `verify` (reusing unchanged step receipts), pushes with `--force-with-lease`, waits for required checks, and merges with `--match-head-commit` |
+| `rebase-and-merge` | `origin/<base>` moved and optimistic merge is disqualified or disabled; acquires `land.lock`, rebases onto `origin/<base>`, runs `patch-id` and `verify` (reusing unchanged step receipts, and queueing for slots at priority `10`), pushes with `--force-with-lease`, waits for required checks, and merges with `--match-head-commit` |
 
 If `git rebase` conflicts, `quai` runs `git rebase --abort`, releases `land.lock`, reports the conflicting files, and exits `3`.
 
@@ -395,11 +397,24 @@ quai hooks pre-push [--json]
 
 ## `quai status`
 
-Inspect active `land.lock`, configured slot pools, FIFO waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), temporary land worktrees (`land_worktrees`), local receipt count, and local attestation count without mutating any state.
+Inspect active `land.lock`, configured slot pools, their holders and queued waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), temporary land worktrees (`land_worktrees`), local receipt count, and local attestation count without mutating any state.
 
 ```bash
 quai status [--json]
 ```
+
+Every holder (`pools[].slots[].owner`, `land_lock.owner`) and waiter (`pools[].waiters[]`, `land_lock.waiters[]`) carries its `role` (`land`, `verify`, or `exec`) and its `priority`. Waiters are listed in service order. The human output prints one line per holder and waiter under its lock:
+
+```text
+pool heavy:     1/1 held (stale=0, waiters=2)
+  holder verify priority=0    pid 4120: quai verify --step test
+  waiter land   priority=10   pid 4188: quai land 42
+  waiter verify priority=0    pid 4153: quai verify --step test
+```
+
+### Slot queue order
+
+A waiter that finds its lock held writes a ticket into the lock's queue, and only the first ticket in service order may try to acquire. Service order is effective priority, highest first, then enqueue time, oldest first, so waiters of equal priority stay FIFO. The effective priority is the ticket's `priority` plus one point of aging boost per 30 seconds waited, capped at `10`. `quai land` queues at priority `10`, so it passes waiting `quai verify` and `quai exec` runs, which would verify a `main` it is about to move. A priority `0` waiter catches up with a landing after 5 minutes and then wins by enqueue time, so it never starves. A ticket written by a `quai` without priorities reads as priority `0`.
 
 ---
 
