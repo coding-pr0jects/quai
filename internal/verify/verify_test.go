@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/coding-pr0jects/quai/internal/config"
@@ -83,6 +84,60 @@ inputs = ["**/*.go"]
 	raw, _ := os.ReadFile(counter)
 	if len(bytes.Split(bytes.TrimSpace(raw), []byte("\n"))) != 1 {
 		t.Fatalf("expected command to run exactly once, log=%q", string(raw))
+	}
+}
+
+func TestVerifyInFlightDeduplicatesConcurrentRuns(t *testing.T) {
+	ctx := context.Background()
+	_, g := setupRepo(t)
+	counter := filepath.Join(t.TempDir(), "concurrent.log")
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+[[steps]]
+name = "slow"
+run = "sleep 0.25 && echo x >> ` + counter + `"
+inputs = ["**/*.go"]
+`))
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+
+	results := make([]Result, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			var buf bytes.Buffer
+			results[idx], errs[idx] = Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < 2; i++ {
+		if errs[i] != nil || !results[i].OK || len(results[i].Steps) != 1 {
+			t.Fatalf("caller %d failed: res=%+v err=%v", i, results[i], errs[i])
+		}
+	}
+
+	passed, cached := 0, 0
+	for _, r := range results {
+		switch r.Steps[0].Status {
+		case "passed":
+			passed++
+		case "cached":
+			cached++
+		}
+	}
+	if passed != 1 || cached != 1 {
+		t.Fatalf("expected 1 passed and 1 cached, got statuses=%q,%q", results[0].Steps[0].Status, results[1].Steps[0].Status)
+	}
+
+	raw, _ := os.ReadFile(counter)
+	if len(bytes.Split(bytes.TrimSpace(raw), []byte("\n"))) != 1 {
+		t.Fatalf("expected command to run exactly once concurrently, log=%q", string(raw))
 	}
 }
 

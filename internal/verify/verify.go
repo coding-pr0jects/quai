@@ -53,7 +53,8 @@ type Result struct {
 }
 
 // Run executes the selected verification steps, enforces slot limits and the working-tree
-// mutation guard, and writes input-fingerprinted receipts on clean passing runs.
+// mutation guard, deduplicates concurrent runs on identical fingerprints, and writes
+// input-fingerprinted receipts on clean passing runs.
 func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Result, error) {
 	topLevel, err := g.TopLevel(ctx)
 	if err != nil {
@@ -115,165 +116,29 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 	}
 
 	for _, step := range selected {
-		started := time.Now()
-		var fp string
-		if clean {
-			fp, err = receipt.Fingerprint(ctx, g, step, treeSHA, baseSHA)
-			if err != nil {
-				return res, err
-			}
-			if !opts.NoCache {
-				if cachedRec, hit, err := store.Lookup(step.Name, fp); err == nil && hit {
-					var attRef string
-					if opts.Sign {
-						ref := attest.RefName(step.Name, fp)
-						if _, exists, err := attest.ReadRecord(ctx, g, step.Name, fp); err != nil {
-							return res, err
-						} else if !exists {
-							if _, _, err := attest.WriteRecord(ctx, g, *cachedRec, signingKey, principal); err != nil {
-								return res, err
-							}
-						}
-						attRef = ref
-						res.Attestations = append(res.Attestations, ref)
-					}
-					res.Steps = append(res.Steps, StepResult{
-						Name:           step.Name,
-						Status:         "cached",
-						Fingerprint:    fp,
-						DurationMS:     time.Since(started).Milliseconds(),
-						AttestationRef: attRef,
-					})
-					if !opts.JSON && opts.Stdout != nil {
-						fmt.Fprintf(opts.Stdout, "cached  %s (%s)\n", step.Name, shortSHA(fp))
-					}
-					continue
-				}
-			}
-		}
-
-		expanded, err := config.ExpandCommand(step.Run, baseSHA, headSHA, treeSHA)
-		if err != nil {
-			return res, err
-		}
-
-		var beforeStatus string
-		if clean {
-			beforeStatus, err = g.StatusPorcelain(ctx)
-			if err != nil {
-				return res, err
-			}
-		}
-
-		var capBuf bytes.Buffer
-		stdout, stderr := opts.Stdout, opts.Stderr
-		if opts.JSON {
-			stdout, stderr = &capBuf, &capBuf
-		} else if opts.Stdout != nil {
-			fmt.Fprintf(opts.Stdout, "run     %s\n", step.Name)
-		}
-
-		capacity := 0
-		if step.Pool != "" {
-			capacity = cfg.Slots[step.Pool]
-		}
-		code, runErr := execrun.Run(ctx, execrun.Request{
-			Dir:       topLevel,
-			ShellCmd:  expanded,
-			Timeout:   step.Duration,
-			Stdout:    stdout,
-			Stderr:    stderr,
-			LocksRoot: locksRoot,
-			Pool:      step.Pool,
-			Slots:     step.Slots,
-			Capacity:  capacity,
-			LockWait:  cfg.Land.LockWaitDur,
-			Owner: lock.Owner{
-				Command:  "quai verify --step " + step.Name,
-				Worktree: topLevel,
-			},
-		})
-		dur := time.Since(started).Milliseconds()
-		if runErr != nil || code != 0 {
-			res.OK = false
-			errMsg := ""
-			if runErr != nil {
-				errMsg = runErr.Error()
-			} else {
-				errMsg = fmt.Sprintf("exit code %d", code)
-			}
-			res.Steps = append(res.Steps, StepResult{
-				Name:        step.Name,
-				Status:      "failed",
-				Fingerprint: fp,
-				DurationMS:  dur,
-				Error:       errMsg,
-			})
-			return res, runErr
-		}
-
-		var attRef string
-		if clean {
-			afterHead, err := g.HeadSHA(ctx)
-			if err != nil {
-				return res, err
-			}
-			afterStatus, err := g.StatusPorcelain(ctx)
-			if err != nil {
-				return res, err
-			}
-			if afterHead != headSHA || afterStatus != beforeStatus {
-				res.OK = false
-				mutated := parseStatusPaths(afterStatus)
-				if afterHead != headSHA {
-					mutated = append(mutated, fmt.Sprintf("HEAD moved (%s -> %s)", shortSHA(headSHA), shortSHA(afterHead)))
-				}
-				res.Steps = append(res.Steps, StepResult{
-					Name:         step.Name,
-					Status:       "mutated",
-					Fingerprint:  fp,
-					DurationMS:   dur,
-					MutatedPaths: mutated,
-					Error:        "step mutated the working tree or HEAD; refusing to record receipt",
-				})
-				return res, nil
-			}
-
-			r := receipt.Receipt{
-				Version:     receipt.CurrentVersion,
-				Fingerprint: fp,
-				TreeSHA:     treeSHA,
-				HeadSHA:     headSHA,
-				BaseSHA:     baseSHA,
-				Step:        step.Name,
-				Passed:      true,
-				DurationMS:  dur,
-				CreatedAt:   time.Now().UTC(),
-			}
-			if err := store.Write(r); err != nil {
-				return res, err
-			}
+		stepRes, receiptWritten, attRef, stepErr := runOneStep(
+			ctx, g, cfg, store, locksRoot, topLevel,
+			step, clean, headSHA, treeSHA, baseSHA,
+			signingKey, principal, opts,
+		)
+		if receiptWritten {
 			res.ReceiptWritten = true
-
-			if opts.Sign {
-				ref, _, err := attest.WriteRecord(ctx, g, r, signingKey, principal)
-				if err != nil {
-					return res, err
-				}
-				attRef = ref
-				res.Attestations = append(res.Attestations, ref)
-			}
 		}
-
-		res.Steps = append(res.Steps, StepResult{
-			Name:           step.Name,
-			Status:         "passed",
-			Fingerprint:    fp,
-			DurationMS:     dur,
-			AttestationRef: attRef,
-		})
-		if !opts.JSON && opts.Stdout != nil {
-			fmt.Fprintf(opts.Stdout, "pass    %s (%dms)\n", step.Name, dur)
+		if attRef != "" {
+			res.Attestations = append(res.Attestations, attRef)
+		}
+		if stepRes.Name != "" {
+			res.Steps = append(res.Steps, stepRes)
+		}
+		if stepErr != nil {
+			if stepRes.Status == "failed" {
+				res.OK = false
+			}
+			return res, stepErr
+		}
+		if stepRes.Status == "failed" || stepRes.Status == "mutated" {
+			res.OK = false
+			return res, nil
 		}
 	}
 
@@ -288,6 +153,216 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 		res.Pushed = true
 	}
 	return res, nil
+}
+
+func runOneStep(
+	ctx context.Context,
+	g repo.Git,
+	cfg *config.Config,
+	store *receipt.Store,
+	locksRoot, topLevel string,
+	step config.Step,
+	clean bool,
+	headSHA, treeSHA, baseSHA string,
+	signingKey, principal string,
+	opts Options,
+) (StepResult, bool, string, error) {
+	started := time.Now()
+	var fp string
+	var inflightLease *lock.Lease
+
+	if clean {
+		var err error
+		fp, err = receipt.Fingerprint(ctx, g, step, treeSHA, baseSHA)
+		if err != nil {
+			return StepResult{}, false, "", err
+		}
+		if !opts.NoCache {
+			if sr, attRef, hit, err := checkCache(ctx, g, store, step.Name, fp, started, signingKey, principal, opts); err != nil || hit {
+				return sr, false, attRef, err
+			}
+		}
+
+		// Deduplicate concurrent executions of the exact same (step, fingerprint) across worktrees.
+		inflightDir := filepath.Join(locksRoot, fmt.Sprintf("inflight-%s-%s.lock", step.Name, fp))
+		inflightLease, err = lock.AcquireDir(ctx, inflightDir, lock.Owner{
+			Command:  "quai verify --step " + step.Name,
+			Worktree: topLevel,
+		}, lock.Options{
+			Wait:         cfg.Land.LockWaitDur,
+			PollInterval: 200 * time.Millisecond,
+			StatusWriter: opts.Stderr,
+		})
+		if err != nil {
+			return StepResult{}, false, "", err
+		}
+		defer inflightLease.Release()
+
+		if !opts.NoCache {
+			if sr, attRef, hit, err := checkCache(ctx, g, store, step.Name, fp, started, signingKey, principal, opts); err != nil || hit {
+				return sr, false, attRef, err
+			}
+		}
+	}
+
+	expanded, err := config.ExpandCommand(step.Run, baseSHA, headSHA, treeSHA)
+	if err != nil {
+		return StepResult{}, false, "", err
+	}
+
+	var beforeStatus string
+	if clean {
+		beforeStatus, err = g.StatusPorcelain(ctx)
+		if err != nil {
+			return StepResult{}, false, "", err
+		}
+	}
+
+	var capBuf bytes.Buffer
+	stdout, stderr := opts.Stdout, opts.Stderr
+	if opts.JSON {
+		stdout, stderr = &capBuf, &capBuf
+	} else if opts.Stdout != nil {
+		fmt.Fprintf(opts.Stdout, "run     %s\n", step.Name)
+	}
+
+	capacity := 0
+	if step.Pool != "" {
+		capacity = cfg.Slots[step.Pool]
+	}
+	code, runErr := execrun.Run(ctx, execrun.Request{
+		Dir:       topLevel,
+		ShellCmd:  expanded,
+		Timeout:   step.Duration,
+		Stdout:    stdout,
+		Stderr:    stderr,
+		LocksRoot: locksRoot,
+		Pool:      step.Pool,
+		Slots:     step.Slots,
+		Capacity:  capacity,
+		LockWait:  cfg.Land.LockWaitDur,
+		Owner: lock.Owner{
+			Command:  "quai verify --step " + step.Name,
+			Worktree: topLevel,
+		},
+	})
+	dur := time.Since(started).Milliseconds()
+	if runErr != nil || code != 0 {
+		errMsg := ""
+		if runErr != nil {
+			errMsg = runErr.Error()
+		} else {
+			errMsg = fmt.Sprintf("exit code %d", code)
+		}
+		return StepResult{
+			Name:        step.Name,
+			Status:      "failed",
+			Fingerprint: fp,
+			DurationMS:  dur,
+			Error:       errMsg,
+		}, false, "", runErr
+	}
+
+	var attRef string
+	receiptWritten := false
+	if clean {
+		afterHead, err := g.HeadSHA(ctx)
+		if err != nil {
+			return StepResult{}, false, "", err
+		}
+		afterStatus, err := g.StatusPorcelain(ctx)
+		if err != nil {
+			return StepResult{}, false, "", err
+		}
+		if afterHead != headSHA || afterStatus != beforeStatus {
+			mutated := parseStatusPaths(afterStatus)
+			if afterHead != headSHA {
+				mutated = append(mutated, fmt.Sprintf("HEAD moved (%s -> %s)", shortSHA(headSHA), shortSHA(afterHead)))
+			}
+			return StepResult{
+				Name:         step.Name,
+				Status:       "mutated",
+				Fingerprint:  fp,
+				DurationMS:   dur,
+				MutatedPaths: mutated,
+				Error:        "step mutated the working tree or HEAD; refusing to record receipt",
+			}, false, "", nil
+		}
+
+		r := receipt.Receipt{
+			Version:     receipt.CurrentVersion,
+			Fingerprint: fp,
+			TreeSHA:     treeSHA,
+			HeadSHA:     headSHA,
+			BaseSHA:     baseSHA,
+			Step:        step.Name,
+			Passed:      true,
+			DurationMS:  dur,
+			CreatedAt:   time.Now().UTC(),
+		}
+		if err := store.Write(r); err != nil {
+			return StepResult{}, false, "", err
+		}
+		receiptWritten = true
+
+		if opts.Sign {
+			ref, _, err := attest.WriteRecord(ctx, g, r, signingKey, principal)
+			if err != nil {
+				return StepResult{}, receiptWritten, "", err
+			}
+			attRef = ref
+		}
+	}
+
+	sr := StepResult{
+		Name:           step.Name,
+		Status:         "passed",
+		Fingerprint:    fp,
+		DurationMS:     dur,
+		AttestationRef: attRef,
+	}
+	if !opts.JSON && opts.Stdout != nil {
+		fmt.Fprintf(opts.Stdout, "pass    %s (%dms)\n", step.Name, dur)
+	}
+	return sr, receiptWritten, attRef, nil
+}
+
+func checkCache(
+	ctx context.Context,
+	g repo.Git,
+	store *receipt.Store,
+	stepName, fp string,
+	started time.Time,
+	signingKey, principal string,
+	opts Options,
+) (StepResult, string, bool, error) {
+	cachedRec, hit, err := store.Lookup(stepName, fp)
+	if err != nil || !hit {
+		return StepResult{}, "", false, nil
+	}
+	var attRef string
+	if opts.Sign {
+		ref := attest.RefName(stepName, fp)
+		if _, exists, err := attest.ReadRecord(ctx, g, stepName, fp); err != nil {
+			return StepResult{}, "", false, err
+		} else if !exists {
+			if _, _, err := attest.WriteRecord(ctx, g, *cachedRec, signingKey, principal); err != nil {
+				return StepResult{}, "", false, err
+			}
+		}
+		attRef = ref
+	}
+	sr := StepResult{
+		Name:           stepName,
+		Status:         "cached",
+		Fingerprint:    fp,
+		DurationMS:     time.Since(started).Milliseconds(),
+		AttestationRef: attRef,
+	}
+	if !opts.JSON && opts.Stdout != nil {
+		fmt.Fprintf(opts.Stdout, "cached  %s (%s)\n", stepName, shortSHA(fp))
+	}
+	return sr, attRef, true, nil
 }
 
 func selectSteps(cfg *config.Config, names []string) ([]config.Step, error) {
