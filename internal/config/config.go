@@ -139,7 +139,7 @@ func Load(repoRoot string) (*Config, error) {
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("missing %s at %s", FileName, p)
+			return nil, fmt.Errorf("missing %s at %s: %w", FileName, p, os.ErrNotExist)
 		}
 		return nil, fmt.Errorf("read %s: %w", p, err)
 	}

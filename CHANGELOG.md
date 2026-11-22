@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Added
 - `AGENTS.md` (imported by `CLAUDE.md`) and `GLOSSARY.md` for contributors and coding agents.
 - Detached runs (`internal/detach`): `quai verify --detach` and `quai exec --detach` start the command in the background under `<git-common-dir>/quai/runs/<run-id>/`; `quai verify --wait [<run-id>] [--max <duration>]` streams the new output and exits `0` passed, `1` failed or dead, `4` still running; `quai verify --stop [<run-id>]` stops the run and its steps. Dead runs have their step groups killed and their locks released, and `quai status` and `quai doctor` list running and dead runs (#11).
+- `quai land` works from any worktree: off the PR branch it evaluates `origin/<pr-head>`, and rebases and verifies in a temporary detached worktree under `<git-common-dir>/quai/`, removed on every exit and signal, even when the PR branch is checked out elsewhere. It reads `.quai.toml` from `origin/<base>` when the caller's worktree has none (#12).
+- `quai land` retries `gh` calls failing on a transient network error (TLS handshake timeout, EOF, connection reset, i/o timeout, HTTP 5xx) after 2 s, 5 s, and 10 s; semantic refusals are never retried (#12).
+- `quai land` resets the rebased branch to its original head when verification or the push fails after a rebase, and reports `"failure": "post-rebase-verify-failed"` for a failed verification (#12).
+- `quai status` lists temporary land worktrees (`land_worktrees`), and `quai doctor` warns about ones left while `land.lock` is free (#12).
 
 ### Changed
 - `docs/agents.md` is now `docs/agent-integration.md`; the `verify-quai` harness moved to `.agents/skills/verify-quai/`, linked from `.claude/skills/` and `.cursor/skills/`.

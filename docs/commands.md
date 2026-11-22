@@ -287,12 +287,47 @@ quai land <pr> [--dry-run] [--method squash|merge|rebase] [--restack] [--require
 
 | Action | When taken |
 |---|---|
-| `refuse` | Dirty working tree, wrong checked-out branch, PR closed/draft/fork, local `HEAD` out of sync with remote PR head, or required checks failed/missing |
+| `refuse` | PR closed/draft/fork, required checks failed/missing, or the PR head out of sync: the caller's `HEAD` (on the PR branch) or `origin/<pr-head>` (elsewhere) differs from the head GitHub reports. On the PR branch only, a dirty working tree |
 | `direct-merge` | `origin/<base>` equals `merge_base`; verifies required checks and merges with `--match-head-commit` |
 | `optimistic-merge` | `origin/<base>` moved, `optimistic_merge = true`, `git merge-tree --write-tree` is clean, base delta is disjoint from PR files and `global_paths`, and GitHub does not block `BEHIND`; merges without rebasing |
 | `rebase-and-merge` | `origin/<base>` moved and optimistic merge is disqualified or disabled; acquires `land.lock`, rebases onto `origin/<base>`, runs `patch-id` and `verify` (reusing unchanged step receipts), pushes with `--force-with-lease`, waits for required checks, and merges with `--match-head-commit` |
 
 If `git rebase` conflicts, `quai` runs `git rebase --abort`, releases `land.lock`, reports the conflicting files, and exits `3`.
+
+### Where `quai land` runs
+
+`quai land` works from any worktree of the repository, such as a coordinator's worktree on its own branch while the PR branch is checked out in another worktree.
+
+- **On the PR branch:** the caller's worktree must be clean and its `HEAD` must equal the PR head. A `rebase-and-merge` rebases and verifies in place.
+- **Anywhere else** (another branch or a detached `HEAD`): `quai` fetches `origin/<pr-head>` and evaluates `direct-merge` and `optimistic-merge` from git objects and the GitHub API, ignoring the caller's own working tree. A `rebase-and-merge`, and a verdict check, run in a temporary detached worktree at `<git-common-dir>/quai/land-worktree-<pr>-<pid>`, which works even when `<pr-head>` is checked out in another worktree. The temporary worktree is removed on every exit, including errors, `SIGINT`, `SIGTERM`, and `SIGHUP`; `quai status` lists any that remain and `quai doctor` warns about them.
+- **Without `.quai.toml`:** when the caller's worktree predates `.quai.toml`, `quai land` reads it from `origin/<base>`.
+
+The rebase push always uses `--force-with-lease=refs/heads/<pr-head>:<sha>`, pinned to the PR head read before rebasing.
+
+### Failed verification after rebase
+
+When verification fails after the rebase (or the lease-pinned push is refused), `quai` resets the rebased checkout back to the PR head it started from, pushes nothing, reports `"failure": "post-rebase-verify-failed"` for a verification failure, and exits `1`. The caller's `HEAD` therefore never stays diverged from the remote PR head.
+
+### Transient GitHub errors
+
+Every `gh` call retries up to 3 times, waiting 2 s, 5 s, then 10 s, when it fails on a transient network error: `TLS handshake timeout`, `EOF`, `connection reset`, `i/o timeout`, or HTTP 5xx. Each retry is reported on stderr. Semantic refusals (HTTP 4xx such as 403 and 422, `CONFLICTING`, failing checks) are never retried. When a `gh pr merge` response is lost, `quai` checks that the PR is merged at the expected head before retrying, so a merge that already happened is reported as merged.
+
+### JSON output
+
+```json
+{
+	"ok": false,
+	"dry_run": false,
+	"merged": false,
+	"pr": 42,
+	"action": "rebase-and-merge",
+	"reason": "verification failed after rebase; PR head reset to 1a2b3c4d5, nothing pushed",
+	"head_sha": "99887766...",
+	"failure": "post-rebase-verify-failed"
+}
+```
+
+`failure` is absent unless a landing failed for a reason with a stable code; today the only code is `post-rebase-verify-failed`.
 
 ---
 
@@ -314,7 +349,7 @@ quai hooks pre-push [--json]
 
 ## `quai status`
 
-Inspect active `land.lock`, configured slot pools, FIFO waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), local receipt count, and local attestation count without mutating any state.
+Inspect active `land.lock`, configured slot pools, FIFO waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), temporary land worktrees (`land_worktrees`), local receipt count, and local attestation count without mutating any state.
 
 ```bash
 quai status [--json]
@@ -324,7 +359,7 @@ quai status [--json]
 
 ## `quai doctor`
 
-Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation key and `allowed_signers` resolution, stale lock detection, and detached runs that died without an exit record. Exits `0` when healthy, `1` if any blocking check fails.
+Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation key and `allowed_signers` resolution, stale lock detection, detached runs that died without an exit record, and temporary land worktrees left while no `quai land` holds `land.lock`. Exits `0` when healthy, `1` if any blocking check fails.
 
 ```bash
 quai doctor [--json]

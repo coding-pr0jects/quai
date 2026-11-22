@@ -84,6 +84,9 @@ type Git interface {
 	DeleteRemoteRefs(ctx context.Context, remote string, refs []string) error
 	ShowFile(ctx context.Context, rev, filePath string) ([]byte, error)
 	Worktrees(ctx context.Context) ([]Worktree, error)
+	AddDetachedWorktree(ctx context.Context, path, rev string) error
+	RemoveWorktree(ctx context.Context, path string) error
+	ResetHard(ctx context.Context, rev string) error
 }
 
 type ExecGit struct {
@@ -379,8 +382,8 @@ func (g *ExecGit) Rebase(ctx context.Context, onto string) error {
 	if err == nil {
 		return nil
 	}
-	conflicts, _ := g.unmergedFiles(ctx)
-	_, _, _ = g.run(ctx, nil, "rebase", "--abort")
+	conflicts, _ := g.unmergedFiles(context.WithoutCancel(ctx))
+	_, _, _ = g.run(context.WithoutCancel(ctx), nil, "rebase", "--abort")
 	return &RebaseConflictError{
 		ConflictFiles: conflicts,
 		Output:        strings.TrimSpace(string(out) + "\n" + string(errOut)),
@@ -393,8 +396,8 @@ func (g *ExecGit) RebaseOnto(ctx context.Context, newBase, oldUpstream string) e
 	if err == nil {
 		return nil
 	}
-	conflicts, _ := g.unmergedFiles(ctx)
-	_, _, _ = g.run(ctx, nil, "rebase", "--abort")
+	conflicts, _ := g.unmergedFiles(context.WithoutCancel(ctx))
+	_, _, _ = g.run(context.WithoutCancel(ctx), nil, "rebase", "--abort")
 	return &RebaseConflictError{
 		ConflictFiles: conflicts,
 		Output:        strings.TrimSpace(string(out) + "\n" + string(errOut)),
@@ -586,6 +589,32 @@ func (g *ExecGit) Worktrees(ctx context.Context) ([]Worktree, error) {
 		return nil, fmt.Errorf("git worktree list: %w (%s)", err, strings.TrimSpace(string(errOut)))
 	}
 	return ParseWorktreeList(string(out)), nil
+}
+
+// AddDetachedWorktree checks rev out at path in a new linked worktree with a detached HEAD,
+// which git allows even when a branch at rev is checked out in another worktree.
+func (g *ExecGit) AddDetachedWorktree(ctx context.Context, path, rev string) error {
+	_, err := g.output(ctx, "worktree", "add", "--quiet", "--detach", path, rev)
+	return err
+}
+
+// RemoveWorktree deletes the linked worktree at path, discarding its changes and any
+// rebase left in progress, then prunes its administrative files.
+func (g *ExecGit) RemoveWorktree(ctx context.Context, path string) error {
+	_, removeErr := g.output(ctx, "worktree", "remove", "--force", "--force", path)
+	if removeErr != nil {
+		if err := os.RemoveAll(path); err != nil {
+			return errors.Join(removeErr, err)
+		}
+	}
+	_, err := g.output(ctx, "worktree", "prune")
+	return err
+}
+
+// ResetHard moves HEAD, the index, and the tracked files of the worktree to rev.
+func (g *ExecGit) ResetHard(ctx context.Context, rev string) error {
+	_, err := g.output(ctx, "reset", "--quiet", "--hard", rev)
+	return err
 }
 
 // ParseWorktreeList parses `git worktree list --porcelain` output into Worktree structs.

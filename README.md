@@ -147,6 +147,8 @@ quai land 42 --dry-run
 quai land 42
 ```
 
+`quai land` runs from any worktree of the repository. Off the PR branch, it rebases and verifies in a temporary worktree it removes afterwards, so a coordinator can land PRs whose branches are checked out in other worktrees. Transient `gh` network errors are retried, and a verification failure after the rebase resets the branch and pushes nothing. See [`docs/commands.md`](docs/commands.md#quai-land).
+
 ## Commands and exit codes
 
 | Command | Purpose |

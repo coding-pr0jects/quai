@@ -2,6 +2,8 @@
 
 Every repository adopts `quai` by committing a `.quai.toml` file at the repository root. Unknown keys are rejected strictly with exit code `2` so typos fail immediately.
 
+`quai land` reads `.quai.toml` from the caller's worktree, or from `origin/<base>` of the PR when that worktree predates it.
+
 ## Full schema
 
 ```toml

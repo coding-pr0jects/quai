@@ -7,11 +7,13 @@
 - `land-dry-run`: prints the landing plan (`direct-merge`, `optimistic-merge`, `rebase-and-merge`, or `refuse`) without mutating git or GitHub.
 - `land-optimistic`: merges at the original head SHA without rebasing when `main` moved on disjoint non-global files and `git merge-tree` is clean.
 - `land-rebase-conflict`: exits `3`, runs `git rebase --abort`, leaves the working tree clean, and releases `land.lock`.
-- `land-refusals`: refuses drafts, forks, dirty trees, wrong checked-out branch, and failing or skipped required checks with exit code `1`.
+- `land-refusals`: refuses drafts, forks, a dirty tree on the PR branch, a PR head out of sync with GitHub, and failing or skipped required checks with exit code `1`.
+- `land-coordinator`: lands from a worktree on another branch while the PR branch is checked out in a second worktree; `rebase-and-merge` runs in `<git-common-dir>/quai/land-worktree-<pr>-<pid>`, which is gone afterwards.
+- `land-rollback`: a failing step after the rebase reports `"failure": "post-rebase-verify-failed"`, exits `1`, pushes nothing, and leaves no land worktree.
 
 ## How to get to it (user POV)
 
-- Run `quai land <pr> [--dry-run] [--method squash|merge|rebase] [--json]` from the checked-out PR branch.
+- Run `quai land <pr> [--dry-run] [--method squash|merge|rebase] [--json]` from the checked-out PR branch or from any other worktree of the repository.
 
 ## Driving it with quai-verify
 
@@ -24,4 +26,4 @@ Preconditions: `quai-verify launch` and `quai-verify doctor` succeeded. Place an
 ## Gotchas
 
 - Never run `quai land` without a fake `gh` shim in the scratch directory unless you explicitly intend to inspect or merge a real GitHub PR.
-- After any `quai land` invocation, verify `<git-common-dir>/quai/locks/land.lock` does not remain on disk.
+- After any `quai land` invocation, verify `<git-common-dir>/quai/locks/land.lock` and `<git-common-dir>/quai/land-worktree-*` do not remain on disk.
