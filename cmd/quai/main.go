@@ -1340,6 +1340,7 @@ func runRestack(ctx context.Context, cwd string, args []string, stdout, stderr i
 		BaseRef:     *baseRef,
 		Push:        *push,
 		Remote:      *remote,
+		Stderr:      stderr,
 	})
 	if *jsonOut {
 		writeJSON(stdout, res)

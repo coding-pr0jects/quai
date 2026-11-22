@@ -630,7 +630,7 @@ quai verdict check [--since <ref>] [--config-ref <ref>] [--require-signed] [--al
 
 ## `quai restack`
 
-Replay commits after `<old-parent-tip>` onto the updated base branch via `git rebase --onto`, report `patch-id` survival, and optionally push with `--force-with-lease`. Exits `3` on rebase conflict after cleanly aborting.
+Replay commits after `<old-parent-tip>` onto the updated base branch via `git rebase --onto`, report `patch-id` survival, and optionally push with `--force-with-lease`. Exits `3` on rebase conflict after cleanly aborting. When `[hooks.pre_push].on_missing = "refuse"`, the push of a restacked branch passes `QUAI_ALLOW_UNVERIFIED_PUSH=1` to its git child and prints a notice, so a restack never deadlocks before the branch is re-verified.
 
 ```bash
 quai restack <old-parent-tip> [--base <ref>] [--push] [--remote <name>] [--json]

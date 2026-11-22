@@ -409,6 +409,7 @@ func TestRequireCachedCheckStaysUnder100ms(t *testing.T) {
 		}
 	}
 	median := durations[len(durations)/2]
+	t.Logf("require_cached check median %s over %v", median, durations)
 	if median > 100*time.Millisecond {
 		t.Fatalf("require_cached check took %s, want <100ms (runs: %v)", median, durations)
 	}

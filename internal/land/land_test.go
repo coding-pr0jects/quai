@@ -986,7 +986,7 @@ func TestRestackPushBypassesRequireCachedRefusal(t *testing.T) {
 		t.Fatalf("expected the installed hook to block a plain push, code=%d err=%v out=%s", code, err, buf.String())
 	}
 
-	cfg, err := config.Parse([]byte("version = 1\n[hooks.pre_push]\nrequire_cached = [\"verify\"]\n[[steps]]\nname = \"verify\"\nrun = \"true\"\n"))
+	cfg, err := config.Parse([]byte("version = 1\n[hooks.pre_push]\nrequire_cached = [\"verify\"]\non_missing = \"refuse\"\n[[steps]]\nname = \"verify\"\nrun = \"true\"\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -995,9 +995,13 @@ func TestRestackPushBypassesRequireCachedRefusal(t *testing.T) {
 		BaseRef:     "origin/main",
 		Push:        true,
 		Remote:      "origin",
+		Stderr:      &buf,
 	})
 	if err != nil || !res.OK || !res.Pushed {
 		t.Fatalf("restack --push must bypass the refusal: res=%+v err=%v", res, err)
+	}
+	if !strings.Contains(buf.String(), "QUAI_ALLOW_UNVERIFIED_PUSH=1 for this push") {
+		t.Fatalf("expected an auditable bypass notice, got %q", buf.String())
 	}
 	if remoteHead := run(origin, "rev-parse", "refs/heads/feat/x"); remoteHead != res.NewHeadSHA {
 		t.Fatalf("remote feat/x = %s, want %s", remoteHead, res.NewHeadSHA)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/forge"
@@ -31,6 +32,7 @@ type RestackOptions struct {
 	BaseRef     string
 	Push        bool
 	Remote      string
+	Stderr      io.Writer
 }
 
 type RestackResult struct {
@@ -133,7 +135,14 @@ func Restack(ctx context.Context, g repo.Git, cfg *config.Config, opts RestackOp
 		}
 		// A restacked branch is re-verified after the push, so its own push must not deadlock on
 		// require_cached: the hook sees the same auditable escape hatch a human would use.
-		if err := g.PushForceWithLease(ctx, remote, branch, oldHead, map[string]string{hooks.EnvAllowUnverifiedPush: "1"}); err != nil {
+		var pushEnv map[string]string
+		if cfg != nil && cfg.Hooks.PrePush.OnMissing == config.OnMissingRefuse && len(cfg.Hooks.PrePush.RequireCached) > 0 {
+			pushEnv = map[string]string{hooks.EnvAllowUnverifiedPush: "1"}
+			if opts.Stderr != nil {
+				fmt.Fprintf(opts.Stderr, "quai restack: %s=1 for this push; run quai verify on %s after it\n", hooks.EnvAllowUnverifiedPush, branch)
+			}
+		}
+		if err := g.PushForceWithLease(ctx, remote, branch, oldHead, pushEnv); err != nil {
 			res.Error = err.Error()
 			return res, err
 		}
