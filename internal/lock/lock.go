@@ -2,30 +2,54 @@ package lock
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
+const (
+	DefaultHeartbeatInterval = 5 * time.Second
+	DefaultStaleAfter        = 30 * time.Second
+)
+
 type Owner struct {
-	PID        int       `json:"pid"`
-	Command    string    `json:"command"`
-	Worktree   string    `json:"worktree"`
-	AcquiredAt time.Time `json:"acquired_at"`
+	PID         int       `json:"pid"`
+	Host        string    `json:"host,omitempty"`
+	PIDNS       string    `json:"pid_ns,omitempty"`
+	Token       string    `json:"token,omitempty"`
+	Command     string    `json:"command"`
+	Worktree    string    `json:"worktree"`
+	AcquiredAt  time.Time `json:"acquired_at"`
+	HeartbeatAt time.Time `json:"heartbeat_at,omitempty"`
 }
 
 type Options struct {
-	Wait             time.Duration
-	PollInterval     time.Duration
-	ReportEvery      time.Duration
-	MissingOwnerWarn time.Duration
-	StatusWriter     io.Writer
+	Wait              time.Duration
+	PollInterval      time.Duration
+	ReportEvery       time.Duration
+	MissingOwnerWarn  time.Duration
+	HeartbeatInterval time.Duration
+	StaleAfter        time.Duration
+	StatusWriter      io.Writer
+}
+
+type InspectState struct {
+	Held    bool    `json:"held"`
+	Alive   bool    `json:"alive"`
+	Stale   bool    `json:"stale"`
+	Path    string  `json:"path"`
+	Owner   *Owner  `json:"owner,omitempty"`
+	Waiters []Owner `json:"waiters,omitempty"`
 }
 
 type TimeoutError struct {
@@ -44,24 +68,38 @@ func (e *TimeoutError) Error() string {
 type Lease struct {
 	dir      string
 	pid      int
+	token    string
 	mu       sync.Mutex
 	released bool
+	stopHB   context.CancelFunc
+	hbDone   chan struct{}
 }
 
-// Release frees the lock only if this lease's PID still owns it. Safe to call multiple times.
+// Release stops the lease heartbeat and frees the lock only if this lease still owns it.
+// Safe to call multiple times.
 func (l *Lease) Release() error {
 	if l == nil {
 		return nil
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.released {
+		l.mu.Unlock()
 		return nil
 	}
 	l.released = true
+	stop := l.stopHB
+	done := l.hbDone
+	l.mu.Unlock()
+
+	if stop != nil {
+		stop()
+	}
+	if done != nil {
+		<-done
+	}
 
 	owner, err := readOwner(l.dir)
-	if err == nil && owner.PID != l.pid {
+	if err == nil && !sameLease(owner, l.pid, l.token) {
 		return nil
 	}
 	_ = os.Remove(filepath.Join(l.dir, "owner"))
@@ -72,6 +110,39 @@ func (l *Lease) Release() error {
 }
 
 func (l *Lease) Path() string { return l.dir }
+
+func (l *Lease) startHeartbeat(parent context.Context, owner Owner, interval time.Duration) {
+	if interval <= 0 || owner.PID != os.Getpid() {
+		return
+	}
+	hbCtx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	l.mu.Lock()
+	l.stopHB = cancel
+	l.hbDone = done
+	l.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				cur, err := readOwner(l.dir)
+				if err != nil || !sameLease(cur, l.pid, l.token) {
+					return
+				}
+				cur.HeartbeatAt = time.Now().UTC()
+				if err := writeOwnerAtomic(l.dir, cur); err != nil {
+					return
+				}
+			}
+		}
+	}()
+}
 
 type SlotLease struct {
 	leases []*Lease
@@ -91,26 +162,32 @@ func (s *SlotLease) Release() error {
 	return firstErr
 }
 
-// AcquireDir atomically creates lockDir or takes it over if the holding PID is dead.
+// AcquireDir atomically creates lockDir in FIFO order, taking over dead or stale holders.
 func AcquireDir(ctx context.Context, lockDir string, owner Owner, opts Options) (*Lease, error) {
 	if err := os.MkdirAll(filepath.Dir(lockDir), 0o755); err != nil {
 		return nil, fmt.Errorf("create lock parent dir: %w", err)
 	}
-	if owner.PID == 0 {
-		owner.PID = os.Getpid()
+	owner = normalizeOwner(owner)
+	opts = normalizeOptions(opts, 500*time.Millisecond)
+	localHost, localPIDNS := currentHost(), currentPIDNS()
+	queueDir := lockDir + ".queue"
+
+	// Fast path when no live waiters are queued.
+	if !hasLiveWaiters(queueDir, localHost, localPIDNS, opts.StaleAfter, time.Now().UTC()) {
+		lease, ok, err := tryAcquireOnce(ctx, lockDir, owner, localHost, localPIDNS, opts)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return lease, nil
+		}
 	}
-	if owner.AcquiredAt.IsZero() {
-		owner.AcquiredAt = time.Now().UTC()
+
+	ticketPath, err := enqueueTicket(queueDir, owner)
+	if err != nil {
+		return nil, err
 	}
-	if opts.PollInterval <= 0 {
-		opts.PollInterval = 500 * time.Millisecond
-	}
-	if opts.ReportEvery <= 0 {
-		opts.ReportEvery = 30 * time.Second
-	}
-	if opts.MissingOwnerWarn <= 0 {
-		opts.MissingOwnerWarn = 10 * time.Second
-	}
+	defer removeTicket(queueDir, ticketPath)
 
 	start := time.Now()
 	var deadline time.Time
@@ -118,15 +195,25 @@ func AcquireDir(ctx context.Context, lockDir string, owner Owner, opts Options) 
 		deadline = start.Add(opts.Wait)
 	}
 	lastReport := start
+	lastTicketBeat := start
 	warnedMissing := false
 
 	for {
-		lease, ok, err := tryAcquireOnce(lockDir, owner)
-		if err != nil {
-			return nil, err
+		now := time.Now().UTC()
+		if time.Since(lastTicketBeat) >= opts.HeartbeatInterval {
+			lastTicketBeat = time.Now()
+			owner.HeartbeatAt = now
+			_ = writeTicketAtomic(ticketPath, owner)
 		}
-		if ok {
-			return lease, nil
+
+		if isFirstInQueue(queueDir, ticketPath, localHost, localPIDNS, opts.StaleAfter, now) {
+			lease, ok, err := tryAcquireOnce(ctx, lockDir, owner, localHost, localPIDNS, opts)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				return lease, nil
+			}
 		}
 
 		cur, readErr := readOwner(lockDir)
@@ -166,7 +253,7 @@ func AcquireDir(ctx context.Context, lockDir string, owner Owner, opts Options) 
 	}
 }
 
-// AcquireSlots acquires count distinct slots in pool (capacity total) inside locksRoot.
+// AcquireSlots acquires count distinct slots in pool (capacity total) inside locksRoot in FIFO order.
 func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity int, owner Owner, opts Options) (*SlotLease, error) {
 	if count <= 0 {
 		return &SlotLease{}, nil
@@ -177,18 +264,50 @@ func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity i
 	if err := os.MkdirAll(locksRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("create locks root: %w", err)
 	}
-	if owner.PID == 0 {
-		owner.PID = os.Getpid()
+	owner = normalizeOwner(owner)
+	opts = normalizeOptions(opts, 500*time.Millisecond)
+	localHost, localPIDNS := currentHost(), currentPIDNS()
+	queueDir := filepath.Join(locksRoot, fmt.Sprintf("slot-%s.queue", pool))
+
+	tryAll := func() (*SlotLease, bool, error) {
+		var held []*Lease
+		for i := 0; i < capacity && len(held) < count; i++ {
+			dir := filepath.Join(locksRoot, fmt.Sprintf("slot-%s-%d.lock", pool, i))
+			l, ok, err := tryAcquireOnce(ctx, dir, owner, localHost, localPIDNS, opts)
+			if err != nil {
+				for _, h := range held {
+					_ = h.Release()
+				}
+				return nil, false, err
+			}
+			if ok {
+				held = append(held, l)
+			}
+		}
+		if len(held) == count {
+			return &SlotLease{leases: held}, true, nil
+		}
+		for _, h := range held {
+			_ = h.Release()
+		}
+		return nil, false, nil
 	}
-	if owner.AcquiredAt.IsZero() {
-		owner.AcquiredAt = time.Now().UTC()
+
+	if !hasLiveWaiters(queueDir, localHost, localPIDNS, opts.StaleAfter, time.Now().UTC()) {
+		sl, ok, err := tryAll()
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return sl, nil
+		}
 	}
-	if opts.PollInterval <= 0 {
-		opts.PollInterval = 500 * time.Millisecond
+
+	ticketPath, err := enqueueTicket(queueDir, owner)
+	if err != nil {
+		return nil, err
 	}
-	if opts.ReportEvery <= 0 {
-		opts.ReportEvery = 30 * time.Second
-	}
+	defer removeTicket(queueDir, ticketPath)
 
 	start := time.Now()
 	var deadline time.Time
@@ -196,27 +315,24 @@ func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity i
 		deadline = start.Add(opts.Wait)
 	}
 	lastReport := start
+	lastTicketBeat := start
 
 	for {
-		var held []*Lease
-		for i := 0; i < capacity && len(held) < count; i++ {
-			dir := filepath.Join(locksRoot, fmt.Sprintf("slot-%s-%d.lock", pool, i))
-			l, ok, err := tryAcquireOnce(dir, owner)
+		now := time.Now().UTC()
+		if time.Since(lastTicketBeat) >= opts.HeartbeatInterval {
+			lastTicketBeat = time.Now()
+			owner.HeartbeatAt = now
+			_ = writeTicketAtomic(ticketPath, owner)
+		}
+
+		if isFirstInQueue(queueDir, ticketPath, localHost, localPIDNS, opts.StaleAfter, now) {
+			sl, ok, err := tryAll()
 			if err != nil {
-				for _, h := range held {
-					_ = h.Release()
-				}
 				return nil, err
 			}
 			if ok {
-				held = append(held, l)
+				return sl, nil
 			}
-		}
-		if len(held) == count {
-			return &SlotLease{leases: held}, nil
-		}
-		for _, h := range held {
-			_ = h.Release()
 		}
 
 		if !deadline.IsZero() && time.Now().After(deadline) {
@@ -241,33 +357,139 @@ func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity i
 	}
 }
 
-func tryAcquireOnce(lockDir string, owner Owner) (*Lease, bool, error) {
+// InspectDir reports read-only state for a single directory lock and its FIFO queue.
+func InspectDir(lockDir string, staleAfter time.Duration) InspectState {
+	if staleAfter <= 0 {
+		staleAfter = DefaultStaleAfter
+	}
+	localHost, localPIDNS := currentHost(), currentPIDNS()
+	now := time.Now().UTC()
+	st := InspectState{Path: lockDir}
+	if _, err := os.Stat(lockDir); err == nil {
+		st.Held = true
+		if owner, err := readOwner(lockDir); err == nil {
+			o := owner
+			st.Owner = &o
+			alive := OwnerAlive(owner, localHost, localPIDNS, staleAfter, now, processAlive)
+			st.Alive = alive
+			st.Stale = !alive
+		} else {
+			st.Stale = true
+		}
+	}
+	st.Waiters = readLiveWaiters(lockDir+".queue", localHost, localPIDNS, staleAfter, now)
+	return st
+}
+
+// InspectWaiters returns the live queued waiters for a slot pool queue directory.
+func InspectWaiters(queueDir string, staleAfter time.Duration) []Owner {
+	if staleAfter <= 0 {
+		staleAfter = DefaultStaleAfter
+	}
+	return readLiveWaiters(queueDir, currentHost(), currentPIDNS(), staleAfter, time.Now().UTC())
+}
+
+// OwnerAlive decides whether a lock owner is still live, using kill(pid, 0) only within
+// the same host and PID namespace and falling back to heartbeat freshness across namespaces.
+func OwnerAlive(cur Owner, localHost, localPIDNS string, staleAfter time.Duration, now time.Time, pidAlive func(int) bool) bool {
+	if staleAfter <= 0 {
+		staleAfter = DefaultStaleAfter
+	}
+	sameHost := cur.Host == "" || localHost == "" || cur.Host == localHost
+	sameNS := cur.PIDNS == "" || localPIDNS == "" || cur.PIDNS == localPIDNS
+	if sameHost && sameNS {
+		if cur.PID <= 0 || !pidAlive(cur.PID) {
+			return false
+		}
+		if !cur.HeartbeatAt.IsZero() && now.Sub(cur.HeartbeatAt) > staleAfter {
+			return false
+		}
+		return true
+	}
+	lastBeat := cur.HeartbeatAt
+	if lastBeat.IsZero() {
+		lastBeat = cur.AcquiredAt
+	}
+	if lastBeat.IsZero() {
+		return true
+	}
+	return now.Sub(lastBeat) <= staleAfter
+}
+
+func normalizeOwner(owner Owner) Owner {
+	now := time.Now().UTC()
+	if owner.PID == 0 {
+		owner.PID = os.Getpid()
+	}
+	if owner.Host == "" {
+		owner.Host = currentHost()
+	}
+	if owner.PIDNS == "" {
+		owner.PIDNS = currentPIDNS()
+	}
+	if owner.Token == "" {
+		owner.Token = newToken()
+	}
+	if owner.AcquiredAt.IsZero() {
+		owner.AcquiredAt = now
+	}
+	if owner.HeartbeatAt.IsZero() {
+		owner.HeartbeatAt = now
+	}
+	return owner
+}
+
+func normalizeOptions(opts Options, defaultPoll time.Duration) Options {
+	if opts.PollInterval <= 0 {
+		opts.PollInterval = defaultPoll
+	}
+	if opts.ReportEvery <= 0 {
+		opts.ReportEvery = 30 * time.Second
+	}
+	if opts.MissingOwnerWarn <= 0 {
+		opts.MissingOwnerWarn = 10 * time.Second
+	}
+	if opts.HeartbeatInterval <= 0 {
+		opts.HeartbeatInterval = DefaultHeartbeatInterval
+	}
+	if opts.StaleAfter <= 0 {
+		opts.StaleAfter = DefaultStaleAfter
+	}
+	return opts
+}
+
+func tryAcquireOnce(ctx context.Context, lockDir string, owner Owner, localHost, localPIDNS string, opts Options) (*Lease, bool, error) {
+	owner.HeartbeatAt = time.Now().UTC()
 	err := os.Mkdir(lockDir, 0o755)
 	if err == nil {
 		if err := writeOwnerAtomic(lockDir, owner); err != nil {
 			_ = os.Remove(lockDir)
 			return nil, false, err
 		}
-		return &Lease{dir: lockDir, pid: owner.PID}, true, nil
+		lease := &Lease{dir: lockDir, pid: owner.PID, token: owner.Token}
+		lease.startHeartbeat(ctx, owner, opts.HeartbeatInterval)
+		return lease, true, nil
 	}
 	if !errors.Is(err, os.ErrExist) {
 		return nil, false, fmt.Errorf("mkdir %s: %w", lockDir, err)
 	}
 
 	cur, readErr := readOwner(lockDir)
-	if readErr == nil && cur.PID > 0 && !processAlive(cur.PID) {
-		taken, takeErr := takeOverDead(lockDir, cur.PID, owner)
+	if readErr == nil && !OwnerAlive(cur, localHost, localPIDNS, opts.StaleAfter, time.Now().UTC(), processAlive) {
+		taken, takeErr := takeOverDead(lockDir, cur, owner, localHost, localPIDNS, opts.StaleAfter)
 		if takeErr != nil {
 			return nil, false, takeErr
 		}
 		if taken {
-			return &Lease{dir: lockDir, pid: owner.PID}, true, nil
+			lease := &Lease{dir: lockDir, pid: owner.PID, token: owner.Token}
+			lease.startHeartbeat(ctx, owner, opts.HeartbeatInterval)
+			return lease, true, nil
 		}
 	}
 	return nil, false, nil
 }
 
-func takeOverDead(lockDir string, deadPID int, newOwner Owner) (bool, error) {
+func takeOverDead(lockDir string, dead Owner, newOwner Owner, localHost, localPIDNS string, staleAfter time.Duration) (bool, error) {
 	takeoverDir := lockDir + ".takeover"
 	if err := os.Mkdir(takeoverDir, 0o755); err != nil {
 		if errors.Is(err, os.ErrExist) {
@@ -278,13 +500,128 @@ func takeOverDead(lockDir string, deadPID int, newOwner Owner) (bool, error) {
 	defer os.Remove(takeoverDir)
 
 	cur, err := readOwner(lockDir)
-	if err != nil || cur.PID != deadPID || processAlive(deadPID) {
+	if err != nil || !sameOwnerIdentity(cur, dead) || OwnerAlive(cur, localHost, localPIDNS, staleAfter, time.Now().UTC(), processAlive) {
 		return false, nil
 	}
+	newOwner.HeartbeatAt = time.Now().UTC()
 	if err := writeOwnerAtomic(lockDir, newOwner); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func enqueueTicket(queueDir string, owner Owner) (string, error) {
+	if err := os.MkdirAll(queueDir, 0o755); err != nil {
+		return "", fmt.Errorf("create queue dir %s: %w", queueDir, err)
+	}
+	name := fmt.Sprintf("%020d-%s.ticket", time.Now().UTC().UnixNano(), owner.Token)
+	p := filepath.Join(queueDir, name)
+	if err := writeTicketAtomic(p, owner); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+func writeTicketAtomic(ticketPath string, owner Owner) error {
+	data, err := json.Marshal(owner)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(ticketPath)
+	tmp, err := os.CreateTemp(dir, ".ticket-*")
+	if err != nil {
+		return fmt.Errorf("create temp ticket in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, ticketPath); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+func removeTicket(queueDir, ticketPath string) {
+	_ = os.Remove(ticketPath)
+	// Remove queueDir opportunistically if empty; ignore errors when other tickets remain.
+	_ = os.Remove(queueDir)
+}
+
+func hasLiveWaiters(queueDir, localHost, localPIDNS string, staleAfter time.Duration, now time.Time) bool {
+	return len(readLiveWaiters(queueDir, localHost, localPIDNS, staleAfter, now)) > 0
+}
+
+func readLiveWaiters(queueDir, localHost, localPIDNS string, staleAfter time.Duration, now time.Time) []Owner {
+	entries, err := os.ReadDir(queueDir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".ticket") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	var live []Owner
+	for _, name := range names {
+		raw, err := os.ReadFile(filepath.Join(queueDir, name))
+		if err != nil {
+			continue
+		}
+		var o Owner
+		if err := json.Unmarshal(raw, &o); err != nil {
+			continue
+		}
+		if OwnerAlive(o, localHost, localPIDNS, staleAfter, now, processAlive) {
+			live = append(live, o)
+		}
+	}
+	return live
+}
+
+func isFirstInQueue(queueDir, myTicket, localHost, localPIDNS string, staleAfter time.Duration, now time.Time) bool {
+	entries, err := os.ReadDir(queueDir)
+	if err != nil {
+		return true
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".ticket") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	myBase := filepath.Base(myTicket)
+	for _, name := range names {
+		if name == myBase {
+			return true
+		}
+		p := filepath.Join(queueDir, name)
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var o Owner
+		if err := json.Unmarshal(raw, &o); err != nil {
+			_ = os.Remove(p)
+			continue
+		}
+		if !OwnerAlive(o, localHost, localPIDNS, staleAfter, now, processAlive) {
+			_ = os.Remove(p)
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func writeOwnerAtomic(lockDir string, owner Owner) error {
@@ -323,6 +660,44 @@ func readOwner(lockDir string) (Owner, error) {
 		return Owner{}, err
 	}
 	return owner, nil
+}
+
+func sameLease(cur Owner, pid int, token string) bool {
+	if token != "" && cur.Token != "" {
+		return cur.Token == token
+	}
+	return cur.PID == pid
+}
+
+func sameOwnerIdentity(a, b Owner) bool {
+	if a.Token != "" && b.Token != "" {
+		return a.Token == b.Token
+	}
+	return a.PID == b.PID && a.Host == b.Host && a.PIDNS == b.PIDNS
+}
+
+func currentHost() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
+}
+
+func currentPIDNS() string {
+	ns, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		return ""
+	}
+	return ns
+}
+
+func newToken() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func processAlive(pid int) bool {
