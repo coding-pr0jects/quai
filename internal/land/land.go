@@ -14,6 +14,8 @@ import (
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/patchid"
 	"github.com/coding-pr0jects/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/tier"
+	"github.com/coding-pr0jects/quai/internal/verdict"
 	"github.com/coding-pr0jects/quai/internal/verify"
 )
 
@@ -43,16 +45,19 @@ type Decision struct {
 }
 
 type Options struct {
-	PRNumber      int
-	DryRun        bool
-	Method        config.MergeMethod // optional override
-	NoSign        bool
-	NoPush        bool
-	JSON          bool
-	Stdout        io.Writer
-	Stderr        io.Writer
-	ChecksPoll    time.Duration
-	CreationGrace time.Duration
+	PRNumber             int
+	DryRun               bool
+	Method               config.MergeMethod // optional override
+	NoSign               bool
+	NoPush               bool
+	RequireVerdict       bool
+	RequireSignedVerdict bool
+	AllowedSigners       string
+	JSON                 bool
+	Stdout               io.Writer
+	Stderr               io.Writer
+	ChecksPoll           time.Duration
+	CreationGrace        time.Duration
 }
 
 type Result struct {
@@ -67,6 +72,7 @@ type Result struct {
 	URL           string               `json:"url,omitempty"`
 	PatchID       *patchid.Result      `json:"patch_id,omitempty"`
 	Checks        *forge.ChecksVerdict `json:"checks,omitempty"`
+	Verdict       *verdict.CheckResult `json:"verdict,omitempty"`
 	ConflictFiles []string             `json:"conflict_files,omitempty"`
 }
 
@@ -297,20 +303,38 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 			headSHA = newHead
 		}
 
-		verdict, err := waitChecks(ctx, f, pr.Number, cfg.Land.RequiredChecks, cfg.Land.ChecksWaitDur, opts)
+		verdictRes, vRefuse, err := enforceVerdict(ctx, g, cfg, "origin/"+pr.BaseRefName, opts)
 		if err != nil {
 			return Result{}, err
 		}
-		if verdict.Kind != "green" {
+		if vRefuse != "" {
+			return Result{
+				OK:      false,
+				PR:      opts.PRNumber,
+				Action:  ActionRefuse,
+				Reason:  vRefuse,
+				HeadSHA: headSHA,
+				URL:     pr.URL,
+				PatchID: patchRes,
+				Verdict: verdictRes,
+			}, nil
+		}
+
+		verdictChecks, err := waitChecks(ctx, f, pr.Number, cfg.Land.RequiredChecks, cfg.Land.ChecksWaitDur, opts)
+		if err != nil {
+			return Result{}, err
+		}
+		if verdictChecks.Kind != "green" {
 			return Result{
 				OK:      false,
 				PR:      opts.PRNumber,
 				Action:  dec.Action,
-				Reason:  formatCheckFailure(verdict),
+				Reason:  formatCheckFailure(verdictChecks),
 				HeadSHA: headSHA,
 				URL:     pr.URL,
 				PatchID: patchRes,
-				Checks:  &verdict,
+				Checks:  &verdictChecks,
+				Verdict: verdictRes,
 			}, nil
 		}
 
@@ -354,7 +378,8 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 			MergeCommit: mergeCommit,
 			URL:         pr.URL,
 			PatchID:     patchRes,
-			Checks:      &verdict,
+			Checks:      &verdictChecks,
+			Verdict:     verdictRes,
 		}, nil
 	}
 
@@ -385,8 +410,15 @@ func runDry(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, 
 	if err != nil {
 		return Result{}, err
 	}
-	verdict := forge.EvaluateChecks(checks, cfg.Land.RequiredChecks)
-	ok := dec.Action != ActionRefuse && (verdict.Kind == "green" || dec.Action == ActionRebaseAndMerge)
+	verdictChecks := forge.EvaluateChecks(checks, cfg.Land.RequiredChecks)
+	verdictRes, vRefuse, err := enforceVerdict(ctx, g, cfg, baseTip, opts)
+	if err != nil {
+		return Result{}, err
+	}
+	if vRefuse != "" {
+		dec = Decision{Action: ActionRefuse, Reason: vRefuse}
+	}
+	ok := dec.Action != ActionRefuse && (verdictChecks.Kind == "green" || dec.Action == ActionRebaseAndMerge)
 	return Result{
 		OK:      ok,
 		DryRun:  true,
@@ -395,8 +427,43 @@ func runDry(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, 
 		Reason:  dec.Reason,
 		HeadSHA: headSHA,
 		URL:     pr.URL,
-		Checks:  &verdict,
+		Checks:  &verdictChecks,
+		Verdict: verdictRes,
 	}, nil
+}
+
+func enforceVerdict(ctx context.Context, g repo.Git, cfg *config.Config, since string, opts Options) (*verdict.CheckResult, string, error) {
+	if !opts.RequireVerdict && len(cfg.Land.RequireVerdictTiers) == 0 {
+		return nil, "", nil
+	}
+	tRes, err := tier.Evaluate(ctx, g, cfg, since)
+	if err != nil {
+		return nil, "", err
+	}
+	required := opts.RequireVerdict
+	if !required {
+		for _, rt := range cfg.Land.RequireVerdictTiers {
+			if rt == tRes.Tier {
+				required = true
+				break
+			}
+		}
+	}
+	if !required {
+		return nil, "", nil
+	}
+	vRes, err := verdict.Check(ctx, g, cfg, verdict.CheckOptions{
+		Since:          since,
+		RequireSigned:  opts.RequireSignedVerdict || cfg.Land.RequireSignedVerdict,
+		AllowedSigners: opts.AllowedSigners,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if !vRes.OK {
+		return &vRes, fmt.Sprintf("tier %q requires an approved review verdict (%s)", tRes.Tier, vRes.Error), nil
+	}
+	return &vRes, "", nil
 }
 
 func computeDecision(ctx context.Context, g repo.Git, cfg *config.Config, clean bool, branch, headSHA string, pr forge.PullRequest, baseTip string) (Decision, error) {

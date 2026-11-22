@@ -14,6 +14,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/forge"
 	"github.com/coding-pr0jects/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/verdict"
 )
 
 func TestDecideStateMachine(t *testing.T) {
@@ -397,5 +398,87 @@ auto_push = true
 	remoteRefs, err := g.ListRemoteRefs(ctx, "origin", []string{"refs/quai/records/*"})
 	if err != nil || len(remoteRefs) != 1 {
 		t.Fatalf("expected post-rebase attestation pushed to origin, got refs=%v err=%v", remoteRefs, err)
+	}
+}
+
+func TestLandEnforcesVerdictOnConfiguredTier(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	work := filepath.Join(tmp, "work")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	write := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(work, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run(tmp, "init", "--bare", "-q", "-b", "main", origin)
+	run(tmp, "init", "-q", "-b", "main", work)
+	run(work, "config", "user.name", "t")
+	run(work, "config", "user.email", "rev@example.com")
+	run(work, "remote", "add", "origin", origin)
+	write("ui/app.ts", "v1\n")
+	run(work, "add", "-A")
+	run(work, "commit", "-qm", "init")
+	run(work, "push", "-q", "-u", "origin", "main")
+
+	run(work, "switch", "-q", "-c", "feat/ui-gate")
+	write("ui/app.ts", "v2\n")
+	run(work, "commit", "-qam", "ui change")
+	run(work, "push", "-q", "-u", "origin", "feat/ui-gate")
+
+	g := repo.NewExecGit(work)
+	headSHA, _ := g.HeadSHA(ctx)
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+[tiers]
+full_live = ["ui/**"]
+[land]
+required_checks = ["check"]
+require_verdict_tiers = ["full-live"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ff := &fakeForge{
+		pr: forge.PullRequest{
+			Number:           21,
+			State:            "OPEN",
+			BaseRefName:      "main",
+			HeadRefName:      "feat/ui-gate",
+			HeadRefOid:       headSHA,
+			MergeStateStatus: "CLEAN",
+		},
+		checks: []forge.Check{{Name: "check", State: "SUCCESS", Bucket: "pass"}},
+	}
+
+	var buf bytes.Buffer
+	// Without verdict -> refused!
+	resRefused, err := Run(ctx, g, ff, cfg, Options{PRNumber: 21, Stdout: &buf, Stderr: &buf, ChecksPoll: 10 * time.Millisecond})
+	if err != nil || resRefused.OK || resRefused.Action != ActionRefuse || resRefused.Merged {
+		t.Fatalf("expected land refusal without verdict, got res=%+v err=%v", resRefused, err)
+	}
+
+	// Record approved verdict -> land succeeds!
+	if _, err := verdict.RecordVerdict(ctx, g, cfg, verdict.RecordOptions{Status: verdict.StatusApproved}); err != nil {
+		t.Fatalf("RecordVerdict failed: %v", err)
+	}
+	resOK, err := Run(ctx, g, ff, cfg, Options{PRNumber: 21, Stdout: &buf, Stderr: &buf, ChecksPoll: 10 * time.Millisecond})
+	if err != nil || !resOK.OK || !resOK.Merged || resOK.Verdict == nil || !resOK.Verdict.OK {
+		t.Fatalf("expected land to succeed with approved verdict, got res=%+v err=%v", resOK, err)
 	}
 }

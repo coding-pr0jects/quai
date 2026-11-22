@@ -27,6 +27,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/repo"
 	"github.com/coding-pr0jects/quai/internal/status"
 	"github.com/coding-pr0jects/quai/internal/tier"
+	"github.com/coding-pr0jects/quai/internal/verdict"
 	"github.com/coding-pr0jects/quai/internal/verify"
 )
 
@@ -40,7 +41,8 @@ Usage:
   quai exec --pool <name> [--slots <n>] [--wait <duration>] -- <command...>
   quai tier [--since <ref>] [--json]
   quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]
-  quai land <pr> [--dry-run] [--method squash|merge|rebase] [--no-sign] [--no-push] [--json]
+  quai verdict record|check [flags...]
+  quai land <pr> [--dry-run] [--method squash|merge|rebase] [--require-verdict] [--no-sign] [--no-push] [--json]
   quai hooks install|uninstall|pre-push [--json]
   quai status [--json]
   quai doctor [--json]
@@ -80,6 +82,8 @@ func run(ctx context.Context, args []string, cwd string, stdin io.Reader, stdout
 		return runTier(ctx, cwd, rest, stdout, stderr)
 	case "patch-id":
 		return runPatchID(ctx, cwd, rest, stdout, stderr)
+	case "verdict":
+		return runVerdict(ctx, cwd, rest, stdout, stderr)
 	case "land":
 		return runLand(ctx, cwd, rest, stdout, stderr)
 	case "hooks":
@@ -583,6 +587,7 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 	fs.SetOutput(stderr)
 	dryRun := fs.Bool("dry-run", false, "preview landing decision without mutating")
 	methodStr := fs.String("method", "", "merge method override (squash|merge|rebase)")
+	requireVerdict := fs.Bool("require-verdict", false, "require an approved review verdict for this PR regardless of tier")
 	noSign := fs.Bool("no-sign", false, "disable automatic attestation signing during rebase verify")
 	noPush := fs.Bool("no-push", false, "disable automatic attestation push during rebase verify")
 	jsonOut := fs.Bool("json", false, "output JSON")
@@ -590,7 +595,7 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 		return 2
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "Usage: quai land <pr> [--dry-run] [--method squash|merge|rebase] [--no-sign] [--no-push] [--json]")
+		fmt.Fprintln(stderr, "Usage: quai land <pr> [--dry-run] [--method squash|merge|rebase] [--require-verdict] [--no-sign] [--no-push] [--json]")
 		return 2
 	}
 	prNum, err := strconv.Atoi(strings.TrimPrefix(fs.Arg(0), "#"))
@@ -612,14 +617,15 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 		return 2
 	}
 	res, err := land.Run(ctx, g, forge.NewGHForge(top), cfg, land.Options{
-		PRNumber: prNum,
-		DryRun:   *dryRun,
-		Method:   method,
-		NoSign:   *noSign,
-		NoPush:   *noPush,
-		JSON:     *jsonOut,
-		Stdout:   stdout,
-		Stderr:   stderr,
+		PRNumber:       prNum,
+		DryRun:         *dryRun,
+		Method:         method,
+		RequireVerdict: *requireVerdict,
+		NoSign:         *noSign,
+		NoPush:         *noPush,
+		JSON:           *jsonOut,
+		Stdout:         stdout,
+		Stderr:         stderr,
 	})
 	if *jsonOut {
 		writeJSON(stdout, res)
@@ -862,6 +868,112 @@ func labelWT(branch, path string) string {
 		return branch
 	}
 	return path
+}
+
+func runVerdict(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "Usage: quai verdict record|check [flags...]")
+		return 2
+	}
+	action := args[0]
+	rest := args[1:]
+
+	switch action {
+	case "record":
+		fs := flag.NewFlagSet("verdict record", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		statusStr := fs.String("status", "approved", "verdict status (approved|rejected)")
+		tierStr := fs.String("tier", "", "risk tier override (defaults to current branch tier)")
+		reviewer := fs.String("reviewer", "", "reviewer identity (defaults to git user.email)")
+		note := fs.String("note", "", "optional short review note")
+		since := fs.String("since", "", "base ref")
+		sign := fs.Bool("sign", false, "sign verdict with SSH key into refs/quai/verdicts/<patch-id>")
+		keyPath := fs.String("key", "", "SSH signing key path for --sign")
+		push := fs.Bool("push", false, "push signed verdict ref to remote (implies --sign)")
+		remote := fs.String("remote", "", "git remote for --push")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(rest); err != nil {
+			return 2
+		}
+		if fs.NArg() > 0 {
+			fmt.Fprintf(stderr, "quai verdict record: unexpected arguments: %v\n", fs.Args())
+			return 2
+		}
+		g, cfg, _, err := loadRepoAndConfig(ctx, cwd)
+		if err != nil {
+			fmt.Fprintf(stderr, "quai verdict record: %v\n", err)
+			return 2
+		}
+		res, err := verdict.RecordVerdict(ctx, g, cfg, verdict.RecordOptions{
+			Status:     verdict.Status(*statusStr),
+			Tier:       config.Tier(*tierStr),
+			Reviewer:   *reviewer,
+			Note:       *note,
+			Since:      *since,
+			Sign:       *sign || *push,
+			SigningKey: *keyPath,
+			Push:       *push,
+			Remote:     *remote,
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "quai verdict record: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			writeJSON(stdout, res)
+		} else {
+			fmt.Fprintf(stdout, "recorded %s verdict (%s) for patch-id %s\n", res.Record.Status, res.Record.Tier, res.Record.PatchID[:min(12, len(res.Record.PatchID))])
+		}
+		return 0
+
+	case "check":
+		fs := flag.NewFlagSet("verdict check", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		since := fs.String("since", "", "base ref")
+		requireSigned := fs.Bool("require-signed", false, "require a cryptographically signed verdict ref")
+		allowedSigners := fs.String("allowed-signers", "", "path to OpenSSH allowed_signers file")
+		fetch := fs.Bool("fetch", false, "fetch refs/quai/verdicts/<patch-id> from remote first")
+		remote := fs.String("remote", "", "git remote for --fetch")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(rest); err != nil {
+			return 2
+		}
+		if fs.NArg() > 0 {
+			fmt.Fprintf(stderr, "quai verdict check: unexpected arguments: %v\n", fs.Args())
+			return 2
+		}
+		g, cfg, _, err := loadRepoAndConfig(ctx, cwd)
+		if err != nil {
+			fmt.Fprintf(stderr, "quai verdict check: %v\n", err)
+			return 2
+		}
+		res, err := verdict.Check(ctx, g, cfg, verdict.CheckOptions{
+			Since:          *since,
+			RequireSigned:  *requireSigned || cfg.Land.RequireSignedVerdict,
+			AllowedSigners: *allowedSigners,
+			Fetch:          *fetch,
+			Remote:         *remote,
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "quai verdict check: %v\n", err)
+			return 2
+		}
+		if *jsonOut {
+			writeJSON(stdout, res)
+		} else if res.OK {
+			fmt.Fprintf(stdout, "valid (%s, patch-id %s)\n", res.BranchTier, res.PatchID[:min(12, len(res.PatchID))])
+		} else {
+			fmt.Fprintf(stdout, "%s: %s\n", res.Status, res.Error)
+		}
+		if !res.OK {
+			return 1
+		}
+		return 0
+
+	default:
+		fmt.Fprintf(stderr, "quai verdict: unknown subcommand %q (expected record or check)\n", action)
+		return 2
+	}
 }
 
 func reorderFlags(args []string, valueFlags map[string]bool) []string {

@@ -217,14 +217,9 @@ func VerifyStatement(stmt Statement, expectedStep, expectedFingerprint string, m
 	return nil
 }
 
-// SignReceipt signs a passing receipt with an OpenSSH private key into a DSSE envelope.
-func SignReceipt(ctx context.Context, r receipt.Receipt, keyPath, principal string) (Envelope, error) {
-	if !r.Passed {
-		return Envelope{}, errors.New("refusing to sign a failing receipt")
-	}
-	if r.Step == "" || r.Fingerprint == "" {
-		return Envelope{}, errors.New("receipt requires step and fingerprint")
-	}
+// SignPayload wraps raw JSON payload bytes in a DSSE v1 envelope signed with an OpenSSH
+// private key under Namespace ("quai").
+func SignPayload(ctx context.Context, payload []byte, keyPath, principal string) (Envelope, error) {
 	if strings.TrimSpace(keyPath) == "" {
 		return Envelope{}, errors.New("no SSH signing key configured (pass --key, set QUAI_SIGNING_KEY, [attest].signing_key, or git user.signingkey)")
 	}
@@ -232,19 +227,11 @@ func SignReceipt(ctx context.Context, r receipt.Receipt, keyPath, principal stri
 	if _, err := os.Stat(resolvedKey); err != nil {
 		return Envelope{}, fmt.Errorf("signing key %s: %w", resolvedKey, err)
 	}
-
-	stmt := NewStatement(r)
-	payload, err := json.Marshal(stmt)
-	if err != nil {
-		return Envelope{}, fmt.Errorf("marshal statement: %w", err)
-	}
 	pae := PAE(PayloadType, payload)
-
 	sigArmor, err := sshSign(ctx, resolvedKey, Namespace, pae)
 	if err != nil {
 		return Envelope{}, err
 	}
-
 	return Envelope{
 		PayloadType: PayloadType,
 		Payload:     base64.StdEncoding.EncodeToString(payload),
@@ -255,6 +242,66 @@ func SignReceipt(ctx context.Context, r receipt.Receipt, keyPath, principal stri
 			},
 		},
 	}, nil
+}
+
+// VerifyPayload cryptographically verifies a DSSE v1 envelope against allowedSignersPath
+// under Namespace ("quai") and returns the verified signer principal and decoded payload bytes.
+func VerifyPayload(ctx context.Context, env Envelope, allowedSignersPath string, allowedPrincipals []string) (string, []byte, error) {
+	if env.PayloadType != PayloadType {
+		return "", nil, fmt.Errorf("unexpected DSSE payloadType %q", env.PayloadType)
+	}
+	payload, err := base64.StdEncoding.DecodeString(env.Payload)
+	if err != nil {
+		return "", nil, fmt.Errorf("decode DSSE payload: %w", err)
+	}
+	if len(env.Signatures) == 0 {
+		return "", nil, errors.New("DSSE envelope has no signatures")
+	}
+	if strings.TrimSpace(allowedSignersPath) == "" {
+		return "", nil, errors.New("[attest].allowed_signers is not configured")
+	}
+	if _, err := os.Stat(allowedSignersPath); err != nil {
+		return "", nil, fmt.Errorf("allowed_signers file %s: %w", allowedSignersPath, err)
+	}
+	pae := PAE(env.PayloadType, payload)
+	var lastErr error
+	for _, s := range env.Signatures {
+		sigBytes, err := base64.StdEncoding.DecodeString(s.Sig)
+		if err != nil {
+			lastErr = fmt.Errorf("decode signature: %w", err)
+			continue
+		}
+		principal, err := sshVerify(ctx, allowedSignersPath, Namespace, sigBytes, pae)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(allowedPrincipals) > 0 && !containsString(allowedPrincipals, principal) {
+			lastErr = fmt.Errorf("signer %q is not in allowed principals %v", principal, allowedPrincipals)
+			continue
+		}
+		return principal, payload, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no valid signature found")
+	}
+	return "", nil, lastErr
+}
+
+// SignReceipt signs a passing receipt with an OpenSSH private key into a DSSE envelope.
+func SignReceipt(ctx context.Context, r receipt.Receipt, keyPath, principal string) (Envelope, error) {
+	if !r.Passed {
+		return Envelope{}, errors.New("refusing to sign a failing receipt")
+	}
+	if r.Step == "" || r.Fingerprint == "" {
+		return Envelope{}, errors.New("receipt requires step and fingerprint")
+	}
+	stmt := NewStatement(r)
+	payload, err := json.Marshal(stmt)
+	if err != nil {
+		return Envelope{}, fmt.Errorf("marshal statement: %w", err)
+	}
+	return SignPayload(ctx, payload, keyPath, principal)
 }
 
 // VerifyEnvelope cryptographically verifies a DSSE envelope against allowedSignersPath

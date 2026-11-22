@@ -113,14 +113,16 @@ type TierPolicy struct {
 }
 
 type LandPolicy struct {
-	Method          MergeMethod   `toml:"method"`
-	OptimisticMerge *bool         `toml:"optimistic_merge"`
-	RequiredChecks  []string      `toml:"required_checks"`
-	LockWait        string        `toml:"lock_wait"`
-	ChecksWait      string        `toml:"checks_wait"`
-	GlobalPaths     []string      `toml:"global_paths"`
-	LockWaitDur     time.Duration `toml:"-"`
-	ChecksWaitDur   time.Duration `toml:"-"`
+	Method               MergeMethod   `toml:"method"`
+	OptimisticMerge      *bool         `toml:"optimistic_merge"`
+	RequiredChecks       []string      `toml:"required_checks"`
+	LockWait             string        `toml:"lock_wait"`
+	ChecksWait           string        `toml:"checks_wait"`
+	GlobalPaths          []string      `toml:"global_paths"`
+	RequireVerdictTiers  []Tier        `toml:"require_verdict_tiers"`
+	RequireSignedVerdict bool          `toml:"require_signed_verdict"`
+	LockWaitDur          time.Duration `toml:"-"`
+	ChecksWaitDur        time.Duration `toml:"-"`
 }
 
 var (
@@ -281,6 +283,11 @@ func (c *Config) normalizeAndValidate() error {
 			return fmt.Errorf("invalid land.checks_wait %q", c.Land.ChecksWait)
 		}
 		c.Land.ChecksWaitDur = d
+	}
+	for _, vt := range c.Land.RequireVerdictTiers {
+		if !ValidTier(vt) {
+			return fmt.Errorf("invalid tier %q in land.require_verdict_tiers", vt)
+		}
 	}
 
 	if c.Attest.Remote == "" {
