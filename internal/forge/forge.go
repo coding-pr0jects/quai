@@ -46,6 +46,8 @@ type Forge interface {
 	ViewPR(ctx context.Context, number int) (PullRequest, error)
 	Checks(ctx context.Context, number int) ([]Check, error)
 	MergePR(ctx context.Context, number int, method config.MergeMethod, expectedHeadSHA string) error
+	ListPRsByBase(ctx context.Context, baseBranch string) ([]PullRequest, error)
+	EditPRBase(ctx context.Context, number int, newBase string) error
 }
 
 // EvaluateChecks computes whether all required checks are green, still pending, or failing.
@@ -168,6 +170,36 @@ func (f *GHForge) MergePR(ctx context.Context, number int, method config.MergeMe
 			msg = strings.TrimSpace(string(out))
 		}
 		return fmt.Errorf("gh pr merge %d: %w (%s)", number, err, msg)
+	}
+	return nil
+}
+
+// ListPRsByBase returns open pull requests targeting baseBranch.
+func (f *GHForge) ListPRsByBase(ctx context.Context, baseBranch string) ([]PullRequest, error) {
+	fields := "number,state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid,mergeStateStatus,url"
+	out, errOut, err := f.run(ctx, "pr", "list", "--state", "open", "--base", baseBranch, "--json", fields)
+	if err != nil {
+		return nil, fmt.Errorf("gh pr list --base %s: %w (%s)", baseBranch, err, strings.TrimSpace(string(errOut)))
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return nil, nil
+	}
+	var prs []PullRequest
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return nil, fmt.Errorf("parse gh pr list --base %s: %w", baseBranch, err)
+	}
+	return prs, nil
+}
+
+// EditPRBase retargets a pull request to a new base branch.
+func (f *GHForge) EditPRBase(ctx context.Context, number int, newBase string) error {
+	out, errOut, err := f.run(ctx, "pr", "edit", strconv.Itoa(number), "--base", newBase)
+	if err != nil {
+		msg := strings.TrimSpace(string(errOut))
+		if msg == "" {
+			msg = strings.TrimSpace(string(out))
+		}
+		return fmt.Errorf("gh pr edit %d --base %s: %w (%s)", number, newBase, err, msg)
 	}
 	return nil
 }

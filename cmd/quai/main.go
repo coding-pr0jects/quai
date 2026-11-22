@@ -31,7 +31,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/verify"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 const rootUsage = `quai: local verification, signed attestations, receipts, risk tiering, and serialized PR landing
 
@@ -42,7 +42,8 @@ Usage:
   quai tier [--since <ref>] [--json]
   quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]
   quai verdict record|check [flags...]
-  quai land <pr> [--dry-run] [--method squash|merge|rebase] [--require-verdict] [--no-sign] [--no-push] [--json]
+  quai land <pr> [--dry-run] [--method squash|merge|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]
+  quai restack <old-parent-tip> [--base <ref>] [--push] [--remote <name>] [--json]
   quai hooks install|uninstall|pre-push [--json]
   quai status [--json]
   quai doctor [--json]
@@ -86,6 +87,8 @@ func run(ctx context.Context, args []string, cwd string, stdin io.Reader, stdout
 		return runVerdict(ctx, cwd, rest, stdout, stderr)
 	case "land":
 		return runLand(ctx, cwd, rest, stdout, stderr)
+	case "restack":
+		return runRestack(ctx, cwd, rest, stdout, stderr)
 	case "hooks":
 		return runHooks(ctx, cwd, rest, stdout, stderr)
 	case "status":
@@ -587,6 +590,7 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 	fs.SetOutput(stderr)
 	dryRun := fs.Bool("dry-run", false, "preview landing decision without mutating")
 	methodStr := fs.String("method", "", "merge method override (squash|merge|rebase)")
+	restack := fs.Bool("restack", false, "automatically rebase local stacked child worktrees onto the new base after merge")
 	requireVerdict := fs.Bool("require-verdict", false, "require an approved review verdict for this PR regardless of tier")
 	noSign := fs.Bool("no-sign", false, "disable automatic attestation signing during rebase verify")
 	noPush := fs.Bool("no-push", false, "disable automatic attestation push during rebase verify")
@@ -595,7 +599,7 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 		return 2
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "Usage: quai land <pr> [--dry-run] [--method squash|merge|rebase] [--require-verdict] [--no-sign] [--no-push] [--json]")
+		fmt.Fprintln(stderr, "Usage: quai land <pr> [--dry-run] [--method squash|merge|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]")
 		return 2
 	}
 	prNum, err := strconv.Atoi(strings.TrimPrefix(fs.Arg(0), "#"))
@@ -620,6 +624,7 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 		PRNumber:       prNum,
 		DryRun:         *dryRun,
 		Method:         method,
+		Restack:        *restack,
 		RequireVerdict: *requireVerdict,
 		NoSign:         *noSign,
 		NoPush:         *noPush,
@@ -974,6 +979,58 @@ func runVerdict(ctx context.Context, cwd string, args []string, stdout, stderr i
 		fmt.Fprintf(stderr, "quai verdict: unknown subcommand %q (expected record or check)\n", action)
 		return 2
 	}
+}
+
+func runRestack(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
+	reordered := reorderFlags(args, map[string]bool{"--base": true, "--remote": true})
+	fs := flag.NewFlagSet("restack", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	baseRef := fs.String("base", "", "target base ref (defaults to origin/<base> or <base>)")
+	push := fs.Bool("push", false, "push restacked branch with --force-with-lease")
+	remote := fs.String("remote", "origin", "git remote for --push")
+	jsonOut := fs.Bool("json", false, "output JSON")
+	if err := fs.Parse(reordered); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(stderr, "Usage: quai restack <old-parent-tip> [--base <ref>] [--push] [--remote <name>] [--json]")
+		return 2
+	}
+	g := repo.NewExecGit(cwd)
+	top, err := g.TopLevel(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "quai restack: not inside a git repository: %v\n", err)
+		return 2
+	}
+	g.Dir = top
+	cfg, _ := config.Load(top)
+	res, err := land.Restack(ctx, g, cfg, land.RestackOptions{
+		OldUpstream: fs.Arg(0),
+		BaseRef:     *baseRef,
+		Push:        *push,
+		Remote:      *remote,
+	})
+	if *jsonOut {
+		writeJSON(stdout, res)
+	} else if err == nil {
+		pidStatus := ""
+		if res.PatchID != nil {
+			pidStatus = fmt.Sprintf(", patch-id=%s", res.PatchID.Status)
+		}
+		fmt.Fprintf(stdout, "restacked %s onto %s (%s -> %s%s)\n", res.Branch, res.BaseRef, res.OldHeadSHA[:min(9, len(res.OldHeadSHA))], res.NewHeadSHA[:min(9, len(res.NewHeadSHA))], pidStatus)
+	}
+	if err != nil {
+		var rce *repo.RebaseConflictError
+		if errors.As(err, &rce) {
+			if !*jsonOut {
+				fmt.Fprintf(stderr, "quai restack: %v\n", err)
+			}
+			return 3
+		}
+		fmt.Fprintf(stderr, "quai restack: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func reorderFlags(args []string, valueFlags map[string]bool) []string {

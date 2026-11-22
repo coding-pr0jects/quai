@@ -121,6 +121,7 @@ type LandPolicy struct {
 	GlobalPaths          []string      `toml:"global_paths"`
 	RequireVerdictTiers  []Tier        `toml:"require_verdict_tiers"`
 	RequireSignedVerdict bool          `toml:"require_signed_verdict"`
+	AutoRestack          bool          `toml:"auto_restack"`
 	LockWaitDur          time.Duration `toml:"-"`
 	ChecksWaitDur        time.Duration `toml:"-"`
 }

@@ -50,6 +50,7 @@ type Options struct {
 	Method               config.MergeMethod // optional override
 	NoSign               bool
 	NoPush               bool
+	Restack              bool
 	RequireVerdict       bool
 	RequireSignedVerdict bool
 	AllowedSigners       string
@@ -61,19 +62,20 @@ type Options struct {
 }
 
 type Result struct {
-	OK            bool                 `json:"ok"`
-	DryRun        bool                 `json:"dry_run"`
-	Merged        bool                 `json:"merged"`
-	PR            int                  `json:"pr"`
-	Action        Action               `json:"action"`
-	Reason        string               `json:"reason"`
-	HeadSHA       string               `json:"head_sha,omitempty"`
-	MergeCommit   string               `json:"merge_commit,omitempty"`
-	URL           string               `json:"url,omitempty"`
-	PatchID       *patchid.Result      `json:"patch_id,omitempty"`
-	Checks        *forge.ChecksVerdict `json:"checks,omitempty"`
-	Verdict       *verdict.CheckResult `json:"verdict,omitempty"`
-	ConflictFiles []string             `json:"conflict_files,omitempty"`
+	OK              bool                 `json:"ok"`
+	DryRun          bool                 `json:"dry_run"`
+	Merged          bool                 `json:"merged"`
+	PR              int                  `json:"pr"`
+	Action          Action               `json:"action"`
+	Reason          string               `json:"reason"`
+	HeadSHA         string               `json:"head_sha,omitempty"`
+	MergeCommit     string               `json:"merge_commit,omitempty"`
+	URL             string               `json:"url,omitempty"`
+	PatchID         *patchid.Result      `json:"patch_id,omitempty"`
+	Checks          *forge.ChecksVerdict `json:"checks,omitempty"`
+	Verdict         *verdict.CheckResult `json:"verdict,omitempty"`
+	StackedChildren []StackedChild       `json:"stacked_children,omitempty"`
+	ConflictFiles   []string             `json:"conflict_files,omitempty"`
 }
 
 // Decide is the pure state machine that selects direct-merge, optimistic-merge,
@@ -357,6 +359,14 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 			continue
 		}
 
+		// Retarget stacked child PRs to pr.BaseRefName before merging so GitHub
+		// branch auto-deletion cannot auto-close child PRs.
+		childPRs := discoverChildPRs(ctx, f, pr.HeadRefName)
+		stackedChildren, err := retargetChildrenBeforeMerge(ctx, f, childPRs, pr.BaseRefName)
+		if err != nil {
+			return Result{}, err
+		}
+
 		if err := f.MergePR(ctx, pr.Number, method, headSHA); err != nil {
 			return Result{}, err
 		}
@@ -368,18 +378,25 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 		if mergedPR.MergeCommit != nil {
 			mergeCommit = mergedPR.MergeCommit.OID
 		}
+		if mergedPR.State == "MERGED" && len(stackedChildren) > 0 {
+			stackedChildren = restackChildrenAfterMerge(
+				ctx, g, cfg, stackedChildren, pr.BaseRefName, headSHA,
+				opts.Restack || cfg.Land.AutoRestack,
+			)
+		}
 		return Result{
-			OK:          mergedPR.State == "MERGED",
-			Merged:      mergedPR.State == "MERGED",
-			PR:          pr.Number,
-			Action:      dec.Action,
-			Reason:      dec.Reason,
-			HeadSHA:     headSHA,
-			MergeCommit: mergeCommit,
-			URL:         pr.URL,
-			PatchID:     patchRes,
-			Checks:      &verdictChecks,
-			Verdict:     verdictRes,
+			OK:              mergedPR.State == "MERGED",
+			Merged:          mergedPR.State == "MERGED",
+			PR:              pr.Number,
+			Action:          dec.Action,
+			Reason:          dec.Reason,
+			HeadSHA:         headSHA,
+			MergeCommit:     mergeCommit,
+			URL:             pr.URL,
+			PatchID:         patchRes,
+			Checks:          &verdictChecks,
+			Verdict:         verdictRes,
+			StackedChildren: stackedChildren,
 		}, nil
 	}
 
@@ -418,17 +435,27 @@ func runDry(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, 
 	if vRefuse != "" {
 		dec = Decision{Action: ActionRefuse, Reason: vRefuse}
 	}
+	var detectedChildren []StackedChild
+	for _, c := range discoverChildPRs(ctx, f, pr.HeadRefName) {
+		detectedChildren = append(detectedChildren, StackedChild{
+			PR:         c.Number,
+			Branch:     c.HeadRefName,
+			OldHeadSHA: c.HeadRefOid,
+			Status:     "detected",
+		})
+	}
 	ok := dec.Action != ActionRefuse && (verdictChecks.Kind == "green" || dec.Action == ActionRebaseAndMerge)
 	return Result{
-		OK:      ok,
-		DryRun:  true,
-		PR:      pr.Number,
-		Action:  dec.Action,
-		Reason:  dec.Reason,
-		HeadSHA: headSHA,
-		URL:     pr.URL,
-		Checks:  &verdictChecks,
-		Verdict: verdictRes,
+		OK:              ok,
+		DryRun:          true,
+		PR:              pr.Number,
+		Action:          dec.Action,
+		Reason:          dec.Reason,
+		HeadSHA:         headSHA,
+		URL:             pr.URL,
+		Checks:          &verdictChecks,
+		Verdict:         verdictRes,
+		StackedChildren: detectedChildren,
 	}, nil
 }
 

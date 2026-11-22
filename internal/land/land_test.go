@@ -161,6 +161,14 @@ func (f *fakeForge) MergePR(ctx context.Context, number int, method config.Merge
 	return nil
 }
 
+func (f *fakeForge) ListPRsByBase(ctx context.Context, baseBranch string) ([]forge.PullRequest, error) {
+	return nil, nil
+}
+
+func (f *fakeForge) EditPRBase(ctx context.Context, number int, newBase string) error {
+	return nil
+}
+
 func TestRunOptimisticMergeAndConflictAbort(t *testing.T) {
 	ctx := context.Background()
 	origin := t.TempDir()
@@ -302,6 +310,14 @@ func (f *originSyncForge) Checks(ctx context.Context, number int) ([]forge.Check
 func (f *originSyncForge) MergePR(ctx context.Context, number int, method config.MergeMethod, expectedHeadSHA string) error {
 	f.merged = true
 	f.mergedSHA = expectedHeadSHA
+	return nil
+}
+
+func (f *originSyncForge) ListPRsByBase(ctx context.Context, baseBranch string) ([]forge.PullRequest, error) {
+	return nil, nil
+}
+
+func (f *originSyncForge) EditPRBase(ctx context.Context, number int, newBase string) error {
 	return nil
 }
 
@@ -480,5 +496,182 @@ require_verdict_tiers = ["full-live"]
 	resOK, err := Run(ctx, g, ff, cfg, Options{PRNumber: 21, Stdout: &buf, Stderr: &buf, ChecksPoll: 10 * time.Millisecond})
 	if err != nil || !resOK.OK || !resOK.Merged || resOK.Verdict == nil || !resOK.Verdict.OK {
 		t.Fatalf("expected land to succeed with approved verdict, got res=%+v err=%v", resOK, err)
+	}
+}
+
+type stackForge struct {
+	pr              forge.PullRequest
+	children        []forge.PullRequest
+	checks          []forge.Check
+	merged          bool
+	events          []string
+	retargetedBases map[int]string
+	onMerge         func() error
+}
+
+func (f *stackForge) ViewPR(ctx context.Context, number int) (forge.PullRequest, error) {
+	pr := f.pr
+	if f.merged {
+		pr.State = "MERGED"
+	}
+	return pr, nil
+}
+
+func (f *stackForge) Checks(ctx context.Context, number int) ([]forge.Check, error) {
+	return f.checks, nil
+}
+
+func (f *stackForge) MergePR(ctx context.Context, number int, method config.MergeMethod, expectedHeadSHA string) error {
+	f.events = append(f.events, "merge")
+	f.merged = true
+	if f.onMerge != nil {
+		return f.onMerge()
+	}
+	return nil
+}
+
+func (f *stackForge) ListPRsByBase(ctx context.Context, baseBranch string) ([]forge.PullRequest, error) {
+	if baseBranch == f.pr.HeadRefName {
+		return f.children, nil
+	}
+	return nil, nil
+}
+
+func (f *stackForge) EditPRBase(ctx context.Context, number int, newBase string) error {
+	f.events = append(f.events, "retarget")
+	if f.retargetedBases == nil {
+		f.retargetedBases = make(map[int]string)
+	}
+	f.retargetedBases[number] = newBase
+	return nil
+}
+
+func TestStackedPRRetargetAndRestack(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	mainDir := filepath.Join(tmp, "main")
+	wtParent := filepath.Join(tmp, "wt-parent")
+	wtChild := filepath.Join(tmp, "wt-child")
+
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, string(out))
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(dir, rel, body string) {
+		t.Helper()
+		p := filepath.Join(dir, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run(tmp, "init", "--bare", "-q", "-b", "main", origin)
+	run(tmp, "init", "-q", "-b", "main", mainDir)
+	run(mainDir, "config", "user.name", "t")
+	run(mainDir, "config", "user.email", "t@example.com")
+	run(mainDir, "remote", "add", "origin", origin)
+	write(mainDir, "base.txt", "base\n")
+	run(mainDir, "add", "-A")
+	run(mainDir, "commit", "-qm", "init")
+	run(mainDir, "push", "-q", "-u", "origin", "main")
+
+	// Parent branch feat/proto in wt-parent with 2 commits (simulating squash-merge difference).
+	run(mainDir, "worktree", "add", "-q", "-b", "feat/proto", wtParent, "main")
+	write(wtParent, "proto.txt", "v1\n")
+	run(wtParent, "add", "-A")
+	run(wtParent, "commit", "-qm", "proto 1")
+	write(wtParent, "proto.txt", "v2\n")
+	run(wtParent, "commit", "-qam", "proto 2")
+	run(wtParent, "push", "-q", "-u", "origin", "feat/proto")
+	parentHead := run(wtParent, "rev-parse", "HEAD")
+
+	// Child branch feat/api stacked on top of feat/proto in wt-child.
+	run(mainDir, "worktree", "add", "-q", "-b", "feat/api", wtChild, "feat/proto")
+	write(wtChild, "api.txt", "api-1\n")
+	run(wtChild, "add", "-A")
+	run(wtChild, "commit", "-qm", "api work")
+	run(wtChild, "push", "-q", "-u", "origin", "feat/api")
+	childOldHead := run(wtChild, "rev-parse", "HEAD")
+
+	sf := &stackForge{
+		pr: forge.PullRequest{
+			Number:           30,
+			State:            "OPEN",
+			BaseRefName:      "main",
+			HeadRefName:      "feat/proto",
+			HeadRefOid:       parentHead,
+			MergeStateStatus: "CLEAN",
+		},
+		children: []forge.PullRequest{
+			{
+				Number:      31,
+				State:       "OPEN",
+				BaseRefName: "feat/proto",
+				HeadRefName: "feat/api",
+				HeadRefOid:  childOldHead,
+			},
+		},
+		checks: []forge.Check{{Name: "check", State: "SUCCESS", Bucket: "pass"}},
+		onMerge: func() error {
+			// Simulate GitHub squash-merging feat/proto into origin/main as one new commit!
+			write(mainDir, "proto.txt", "v2\n")
+			run(mainDir, "add", "-A")
+			run(mainDir, "commit", "-qm", "feat: proto (#30)")
+			run(mainDir, "push", "-q", "origin", "main")
+			return nil
+		},
+	}
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+[land]
+required_checks = ["check"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	res, err := Run(ctx, repo.NewExecGit(wtParent), sf, cfg, Options{
+		PRNumber:   30,
+		Restack:    true,
+		Stdout:     &buf,
+		Stderr:     &buf,
+		ChecksPoll: 10 * time.Millisecond,
+	})
+	if err != nil || !res.OK || !res.Merged {
+		t.Fatalf("expected stacked land to succeed, got res=%+v err=%v", res, err)
+	}
+	// Verify child PR was retargeted BEFORE parent merge!
+	if len(sf.events) < 2 || sf.events[0] != "retarget" || sf.events[1] != "merge" {
+		t.Fatalf("expected retarget before merge, got events=%v", sf.events)
+	}
+	if sf.retargetedBases[31] != "main" {
+		t.Fatalf("expected PR #31 retargeted to main, got %+v", sf.retargetedBases)
+	}
+	if len(res.StackedChildren) != 1 || res.StackedChildren[0].Status != "restacked" {
+		t.Fatalf("expected 1 restacked child, got %+v", res.StackedChildren)
+	}
+	child := res.StackedChildren[0]
+	if child.PatchID == nil || child.PatchID.Status != "SURVIVES" {
+		t.Fatalf("expected child patch-id SURVIVES after squash-merge restack, got %+v", child.PatchID)
+	}
+	// Child branch must now have exactly 1 commit ahead of origin/main (no duplicate proto commits!).
+	countAhead := run(wtChild, "rev-list", "--count", "origin/main..HEAD")
+	if countAhead != "1" {
+		t.Fatalf("expected child branch to have 1 commit ahead of origin/main, got %s", countAhead)
+	}
+	// Remote feat/api must match the new restacked head.
+	remoteChildHead := run(origin, "rev-parse", "refs/heads/feat/api")
+	if remoteChildHead != child.NewHeadSHA {
+		t.Fatalf("remote feat/api = %s, want %s", remoteChildHead, child.NewHeadSHA)
 	}
 }

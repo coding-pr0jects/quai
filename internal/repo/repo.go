@@ -69,6 +69,7 @@ type Git interface {
 	MergeTree(ctx context.Context, baseRev, headRev string) (MergeTreeResult, error)
 	Fetch(ctx context.Context, remote, ref string) error
 	Rebase(ctx context.Context, onto string) error
+	RebaseOnto(ctx context.Context, newBase, oldUpstream string) error
 	PushForceWithLease(ctx context.Context, remote, branch, expectedSHA string) error
 	GitPath(ctx context.Context, rel string) (string, error)
 	ConfigGet(ctx context.Context, key string) (string, error)
@@ -375,6 +376,20 @@ func (g *ExecGit) Fetch(ctx context.Context, remote, ref string) error {
 
 func (g *ExecGit) Rebase(ctx context.Context, onto string) error {
 	out, errOut, err := g.run(ctx, nil, "rebase", onto)
+	if err == nil {
+		return nil
+	}
+	conflicts, _ := g.unmergedFiles(ctx)
+	_, _, _ = g.run(ctx, nil, "rebase", "--abort")
+	return &RebaseConflictError{
+		ConflictFiles: conflicts,
+		Output:        strings.TrimSpace(string(out) + "\n" + string(errOut)),
+	}
+}
+
+// RebaseOnto replays commits after oldUpstream onto newBase, aborting cleanly on conflict.
+func (g *ExecGit) RebaseOnto(ctx context.Context, newBase, oldUpstream string) error {
+	out, errOut, err := g.run(ctx, nil, "rebase", "--onto", newBase, oldUpstream)
 	if err == nil {
 		return nil
 	}
