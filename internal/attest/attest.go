@@ -478,7 +478,8 @@ func FetchTargeted(ctx context.Context, g repo.Git, remote string, refs []string
 }
 
 // Prune deletes expired or unreadable attestation refs under refs/quai/records/* locally
-// and, unless LocalOnly is set, on remote as well.
+// and, unless LocalOnly is set, on remote as well. A dry run never fetches, so it reports
+// the expired refs already known locally without mutating any ref.
 func Prune(ctx context.Context, g repo.Git, cfg *config.Config, opts PruneOptions) (PruneResult, error) {
 	maxAge := opts.MaxAge
 	if maxAge <= 0 {
@@ -486,6 +487,9 @@ func Prune(ctx context.Context, g repo.Git, cfg *config.Config, opts PruneOption
 	}
 	if maxAge <= 0 {
 		maxAge = 14 * 24 * time.Hour
+	}
+	if maxAge < config.MinAttestMaxAge {
+		return PruneResult{}, fmt.Errorf("attest max_age %s is below the minimum %s", maxAge, config.MinAttestMaxAge)
 	}
 	remote := opts.Remote
 	if remote == "" {
@@ -500,25 +504,6 @@ func Prune(ctx context.Context, g repo.Git, cfg *config.Config, opts PruneOption
 	}
 	now := nowFn().UTC()
 
-	remoteSet := make(map[string]struct{})
-	if !opts.LocalOnly {
-		if err := Fetch(ctx, g, remote); err != nil {
-			return PruneResult{}, err
-		}
-		remoteRefs, err := g.ListRemoteRefs(ctx, remote, []string{RefPrefix + "*"})
-		if err != nil {
-			return PruneResult{}, err
-		}
-		for _, r := range remoteRefs {
-			remoteSet[r] = struct{}{}
-		}
-	}
-
-	localRefs, err := g.ListRefs(ctx, RefPrefix)
-	if err != nil {
-		return PruneResult{}, err
-	}
-
 	res := PruneResult{
 		OK:     true,
 		DryRun: opts.DryRun,
@@ -528,11 +513,33 @@ func Prune(ctx context.Context, g repo.Git, cfg *config.Config, opts PruneOption
 		res.Remote = remote
 	}
 
+	remoteSet := make(map[string]struct{})
+	var remoteErr error
+	if !opts.LocalOnly {
+		if !opts.DryRun {
+			remoteErr = Fetch(ctx, g, remote)
+		}
+		if remoteErr == nil {
+			remoteRefs, err := g.ListRemoteRefs(ctx, remote, []string{RefPrefix + "*"})
+			if err != nil {
+				remoteErr = err
+			} else {
+				for _, r := range remoteRefs {
+					remoteSet[r] = struct{}{}
+				}
+			}
+		}
+	}
+
+	localRefs, err := g.ListRefs(ctx, RefPrefix)
+	if err != nil {
+		return res, err
+	}
+
 	var expiredLocal []string
 	var expiredRemote []string
 	for _, ref := range localRefs {
-		expired := isRefExpired(ctx, g, ref, maxAge, now)
-		if !expired {
+		if !isRefExpired(ctx, g, ref, maxAge, now) {
 			res.Kept++
 			continue
 		}
@@ -542,21 +549,25 @@ func Prune(ctx context.Context, g repo.Git, cfg *config.Config, opts PruneOption
 		}
 	}
 
-	if !opts.DryRun {
-		for _, ref := range expiredLocal {
-			if err := g.DeleteLocalRef(ctx, ref); err != nil {
-				return res, err
-			}
-		}
-		if !opts.LocalOnly && len(expiredRemote) > 0 {
-			if err := g.DeleteRemoteRefs(ctx, remote, expiredRemote); err != nil {
-				return res, err
-			}
-		}
+	if opts.DryRun {
+		res.PrunedLocal = expiredLocal
+		res.PrunedRemote = expiredRemote
+		return res, remoteErr
 	}
-	res.PrunedLocal = expiredLocal
-	res.PrunedRemote = expiredRemote
-	return res, nil
+
+	for _, ref := range expiredLocal {
+		if err := g.DeleteLocalRef(ctx, ref); err != nil {
+			return res, err
+		}
+		res.PrunedLocal = append(res.PrunedLocal, ref)
+	}
+	if !opts.LocalOnly && len(expiredRemote) > 0 && remoteErr == nil {
+		if err := g.DeleteRemoteRefs(ctx, remote, expiredRemote); err != nil {
+			return res, err
+		}
+		res.PrunedRemote = expiredRemote
+	}
+	return res, remoteErr
 }
 
 func isRefExpired(ctx context.Context, g repo.Git, ref string, maxAge time.Duration, now time.Time) bool {

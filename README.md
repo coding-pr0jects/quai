@@ -165,6 +165,7 @@ quai land 42
 | `quai land <pr> [--dry-run] [--method squash\|merge\|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]` | Land a GitHub PR with `git merge-tree` optimistic merge, stacked child retargeting/restacking, or locked rebase |
 | `quai restack <old-parent-tip> [--base <ref>] [--push] [--json]` | Replay a stacked child branch onto the updated base via `git rebase --onto` with `patch-id` survival check |
 | `quai hooks install\|uninstall\|pre-push [--json]` | Manage the non-destructive `pre-push` receipt hook (with optional auto-sign/push) |
+| `quai gc [--dry-run] [--json]` | Prune expired receipts, attestation and verdict refs, and stale lock directories (also run automatically by `verify`/`land` when `[attest].auto_prune` is set on the remote default branch) |
 | `quai status [--json]` | Inspect active `land.lock`, slot pools, free RAM, holders and waiters with their role and priority, in-flight steps, detached runs, and cached counts |
 | `quai doctor [--json]` | Validate git >= 2.38, `.quai.toml`, hooks, `gh`, `ssh-keygen`, signing keys, and stale locks |
 | `quai conflicts [--base <ref>] [--conflicts-only] [--json]` | Run read-only virtual `git merge-tree` and overlap checks across active linked worktrees |

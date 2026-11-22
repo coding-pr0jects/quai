@@ -21,6 +21,7 @@ import (
 const (
 	DefaultHeartbeatInterval = 5 * time.Second
 	DefaultStaleAfter        = 30 * time.Second
+	DefaultMissingOwnerWarn  = 10 * time.Second
 
 	// AgingInterval is the wait that earns a queued waiter one point of aging boost.
 	AgingInterval = 30 * time.Second
@@ -508,6 +509,57 @@ func InspectWaiters(queueDir string, staleAfter time.Duration) []Owner {
 	return readLiveWaiters(queueDir, LocalHost(), LocalPIDNS(), staleAfter, time.Now().UTC())
 }
 
+// RemoveStaleDir removes a directory lock whose lease is dead, or whose owner file has
+// been absent longer than MissingOwnerWarn. Removal happens under the lock's takeover
+// directory and re-reads the lease first, so a live holder is never deleted.
+func RemoveStaleDir(lockDir string, opts Options) (bool, error) {
+	if opts.StaleAfter <= 0 {
+		opts.StaleAfter = DefaultStaleAfter
+	}
+	if opts.MissingOwnerWarn <= 0 {
+		opts.MissingOwnerWarn = DefaultMissingOwnerWarn
+	}
+	info, err := os.Stat(lockDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
+	takeover := lockDir + ".takeover"
+	if err := os.Mkdir(takeover, 0o755); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer os.Remove(takeover)
+
+	info, err = os.Stat(lockDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	now := time.Now().UTC()
+	owner, readErr := readOwner(lockDir)
+	if readErr == nil {
+		if OwnerAlive(owner, LocalHost(), LocalPIDNS(), opts.StaleAfter, now, processAlive) {
+			return false, nil
+		}
+	} else if now.Sub(info.ModTime()) < opts.MissingOwnerWarn {
+		return false, nil
+	}
+	if err := os.RemoveAll(lockDir); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // OwnerAlive decides whether a lock owner is still live, using kill(pid, 0) only within
 // the same host and PID namespace and falling back to heartbeat freshness across namespaces.
 func OwnerAlive(cur Owner, localHost, localPIDNS string, staleAfter time.Duration, now time.Time, pidAlive func(int) bool) bool {
@@ -566,7 +618,7 @@ func normalizeOptions(opts Options, defaultPoll time.Duration) Options {
 		opts.ReportEvery = 30 * time.Second
 	}
 	if opts.MissingOwnerWarn <= 0 {
-		opts.MissingOwnerWarn = 10 * time.Second
+		opts.MissingOwnerWarn = DefaultMissingOwnerWarn
 	}
 	if opts.HeartbeatInterval <= 0 {
 		opts.HeartbeatInterval = DefaultHeartbeatInterval

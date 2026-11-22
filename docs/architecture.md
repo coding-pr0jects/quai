@@ -14,6 +14,7 @@ quai/
 │   ├── config/        # .quai.toml decoding, defaults, validation, SHA placeholder expansion
 │   ├── conflicts/     # read-only merge-tree and file-overlap checks across linked worktrees
 │   ├── glob/          # double-star (**) path glob matcher shared by config, receipt, tier, land
+│   ├── gc/            # unified maintenance: expired receipts/attestation/verdict refs, stale locks, last-prune stamp
 │   ├── repo/          # Git interface and ExecGit adapter (diff, ls-tree, merge-tree, patch-id, rebase)
 │   ├── lock/          # mkdir locks, leases with heartbeats, priority queues, slot pools, min_free_mem
 │   ├── execrun/       # process-group command runner (Setpgid) with signal cleanup and slot binding
@@ -75,6 +76,7 @@ All mutable state lives inside `<git-common-dir>/quai/` (resolved via `git rev-p
 ├── locks/
 │   ├── land.lock/
 │   │   └── owner
+│   ├── prune.lock/               # serializes manual and automatic maintenance passes
 │   ├── land.lock.queue/          # waiter tickets: <enqueue-unix-nanos>-<token>.ticket
 │   ├── slot-<pool>-<index>.lock/
 │   │   └── owner
@@ -82,6 +84,8 @@ All mutable state lives inside `<git-common-dir>/quai/` (resolved via `git rev-p
 │   └── inflight-<step>-<fingerprint>.lock/   # dedupes concurrent identical verify runs
 ├── receipts/
 │   └── <step>-<fingerprint>.json
+├── verdicts/
+│   └── <patch-id>.json
 ├── runs/
 │   └── <run-id>/                 # one detached run; the 20 latest finished runs are kept
 │       ├── meta.json             # args, worktree, pid + kernel start time, host, pid_ns
@@ -89,8 +93,18 @@ All mutable state lives inside `<git-common-dir>/quai/` (resolved via `git rev-p
 │       ├── cursor                # byte offset read by the previous quai verify --wait
 │       ├── groups                # pid + start time of each step's process group
 │       └── exit.json             # exit code, stopped flag, verify result; absent while running or dead
-└── land-worktree-<pr>-<pid>/     # temporary detached worktree of a quai land run off the PR branch
+├── land-worktree-<pr>-<pid>/     # temporary detached worktree of a quai land run off the PR branch
+└── last-prune                    # RFC3339 stamp that rate-limits automatic pruning
 ```
+
+### Maintenance pass (`internal/gc`)
+
+`quai gc` and the automatic pass after `quai verify` / `quai land` share one engine:
+
+1. Expired receipts, attestation refs, verdicts, and verdict refs are selected from `[attest].max_age`. A dry run lists them and never fetches or deletes.
+2. Record refs are pruned locally and on `[attest].remote`; a fetch or push failure is a warning, not an error.
+3. A lock directory is removed only when its lease is dead or its owner file has been absent past the grace period, under the lock's `.takeover` guard, so a live holder is never deleted.
+4. Automatic pruning is best effort and rate-limited: after a pass, `last-prune` is written atomically, and a fresh stamp skips the next pass until `prune_interval` elapses. `prune.lock` serializes concurrent passes across worktrees, and the automatic policy is read only from `refs/remotes/origin/HEAD`; when that ref is unset the pass is skipped and the warning names `git remote set-head origin --auto`.
 
 ### Atomic lock and dead-PID recovery (`internal/lock`)
 

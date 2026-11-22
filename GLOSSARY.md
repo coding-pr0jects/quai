@@ -48,6 +48,13 @@ The `match_mode` of a step that `quai attest check --head` accepted through the 
 **Sampled**
 The `status` that `quai attest check --sample` gives every step on a sampled run, telling CI to rerun the steps itself as an audit.
 
+**Garbage collection (`gc`)**
+The maintenance pass that removes expired receipts, expired attestation and verdict refs, and stale lock directories. `quai gc` runs it on demand; `[attest].auto_prune` runs it after `quai verify` or `quai land` at most once per `prune_interval`, using the policy on the remote default branch.
+_Avoid_: cleanup, vacuum.
+
+**Last prune stamp**
+The `<git-common-dir>/quai/last-prune` timestamp written atomically after a maintenance pass. A fresh stamp skips automatic pruning until `prune_interval` elapses.
+
 ## Concurrency
 
 **Pool**

@@ -77,6 +77,7 @@ func TestParseRejectsInvalidConfigs(t *testing.T) {
 		{"pool_when with zero slots", "version = 1\n[slots]\nheavy = 2\n[[steps]]\nname = 'a'\nrun = 'true'\npool = 'heavy'\npool_when = ['ui/**']\n", "slots = 0"},
 		{"empty pool_when glob", "version = 1\n[slots]\nheavy = 2\n[[steps]]\nname = 'a'\nrun = 'true'\npool = 'heavy'\nslots = 1\npool_when = ['']\n", "empty pool_when"},
 		{"bad pool_tiers tier", "version = 1\n[slots]\nheavy = 2\n[[steps]]\nname = 'a'\nrun = 'true'\npool = 'heavy'\nslots = 1\npool_tiers = ['extreme']\n", "invalid tier"},
+		{"tiny attest max_age", "version = 1\n[attest]\nmax_age = '59s'\n", "at least 1m0s"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -289,5 +290,49 @@ func TestStepRoutePool(t *testing.T) {
 				t.Fatalf("Matched = %d, want %d", got.MatchedPaths, tc.matched)
 			}
 		})
+	}
+}
+
+func TestParseAttestAutoPrune(t *testing.T) {
+	cfg, err := Parse([]byte("version = 1\n[attest]\nauto_prune = true\n"))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if !cfg.Attest.AutoPrune {
+		t.Fatal("expected auto_prune to be enabled")
+	}
+	if cfg.Attest.PruneIntervalDur != 24*time.Hour {
+		t.Fatalf("default prune interval = %s, want 24h", cfg.Attest.PruneIntervalDur)
+	}
+	if cfg.Attest.MaxAgeDur != 14*24*time.Hour {
+		t.Fatalf("default max age = %s, want 14d", cfg.Attest.MaxAgeDur)
+	}
+
+	cfg, err = Parse([]byte("version = 1\n[attest]\nprune_interval = \"6h\"\n"))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if cfg.Attest.PruneIntervalDur != 6*time.Hour {
+		t.Fatalf("prune interval = %s, want 6h", cfg.Attest.PruneIntervalDur)
+	}
+	if cfg.Attest.AutoPrune {
+		t.Fatal("auto_prune must default to false")
+	}
+
+	cfg, err = Parse([]byte("version = 1\n[attest]\nmax_age = \"1m\"\n"))
+	if err != nil {
+		t.Fatalf("Parse 1m max_age failed: %v", err)
+	}
+	if cfg.Attest.MaxAgeDur != time.Minute {
+		t.Fatalf("max age = %s, want 1m", cfg.Attest.MaxAgeDur)
+	}
+
+	for _, raw := range []string{
+		"version = 1\n[attest]\nprune_interval = \"0s\"\n",
+		"version = 1\n[attest]\nprune_interval = \"nope\"\n",
+	} {
+		if _, err := Parse([]byte(raw)); err == nil {
+			t.Fatalf("expected invalid prune_interval error for %q", raw)
+		}
 	}
 }

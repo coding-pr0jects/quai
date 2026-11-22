@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -160,4 +161,66 @@ func hasCheck(rep DoctorReport, name string) bool {
 		}
 	}
 	return false
+}
+
+func TestDoctorWarnsWhenOriginHeadUnsetWithBaseAutoPrune(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	dir := filepath.Join(tmp, "repo")
+	run := func(workdir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = workdir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	run(tmp, "init", "--bare", "-q", "-b", "main", origin)
+	run(tmp, "init", "-q", "-b", "main", dir)
+	run(dir, "config", "user.name", "t")
+	run(dir, "config", "user.email", "t@example.com")
+	run(dir, "remote", "add", "origin", origin)
+	cfgText := `
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+
+[attest]
+auto_prune = true
+`
+	if err := os.WriteFile(filepath.Join(dir, ".quai.toml"), []byte(cfgText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(dir, "add", "-A")
+	run(dir, "commit", "-qm", "init")
+	run(dir, "push", "-q", "-u", "origin", "main")
+
+	g := repo.NewExecGit(dir)
+	check := func(rep DoctorReport) CheckItem {
+		t.Helper()
+		for _, c := range rep.Checks {
+			if c.Name == "auto-prune" {
+				return c
+			}
+		}
+		t.Fatalf("doctor has no auto-prune check: %+v", rep.Checks)
+		return CheckItem{}
+	}
+
+	got := check(Doctor(ctx, g))
+	if got.Status != "warn" || !strings.Contains(got.Message, "refs/remotes/origin/HEAD is unset") || !strings.Contains(got.Fix, "git remote set-head origin --auto") {
+		t.Fatalf("unset origin/HEAD check = %+v, want warn with fix", got)
+	}
+
+	run(dir, "remote", "set-head", "origin", "main")
+	if got := check(Doctor(ctx, g)); got.Status != "ok" {
+		t.Fatalf("set origin/HEAD check = %+v, want ok", got)
+	}
 }

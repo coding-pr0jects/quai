@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 const defaultCLITestConfig = `
@@ -282,5 +283,175 @@ max_age = "14d"
 	code = run(ctx, []string{"attest", "check", "--onto", "origin/main", "--sample", "100", "--json"}, ciDir, bytes.NewReader(nil), &out, &errBuf)
 	if code != 1 || !bytes.Contains(out.Bytes(), []byte(`"sampled"`)) {
 		t.Fatalf("expected exit 1 sampled, got code=%d out=%s err=%s", code, out.String(), errBuf.String())
+	}
+}
+
+func TestCLIGCAndAutoPrune(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	dir := filepath.Join(tmp, "dev")
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	write := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(dir, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitIn := func(workdir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = workdir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	runGitIn(tmp, "init", "--bare", "-q", "-b", "main", origin)
+	runGitIn(tmp, "init", "-q", "-b", "main", dir)
+	runGit("config", "user.name", "t")
+	runGit("config", "user.email", "t@example.com")
+	runGit("remote", "add", "origin", origin)
+	write(".quai.toml", `
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+inputs = ["app/**"]
+
+[attest]
+max_age = "1h"
+auto_prune = true
+prune_interval = "1h"
+`)
+	write("app/main.txt", "v1\n")
+	runGit("add", "-A")
+	runGit("commit", "-qm", "init")
+	runGit("push", "-q", "-u", "origin", "main")
+	runGit("remote", "set-head", "origin", "main")
+
+	commonOut, err := exec.Command("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonDir := string(bytes.TrimSpace(commonOut))
+	receiptsDir := filepath.Join(commonDir, "quai", "receipts")
+	if err := os.MkdirAll(receiptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeReceipt := func(fingerprint string) string {
+		t.Helper()
+		raw, _ := json.Marshal(map[string]any{
+			"version":     1,
+			"fingerprint": fingerprint,
+			"step":        "fast",
+			"passed":      true,
+			"created_at":  time.Now().Add(-2 * time.Hour).UTC(),
+		})
+		path := filepath.Join(receiptsDir, "fast-"+fingerprint+".json")
+		if err := os.WriteFile(path, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	expired := writeReceipt("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	locksRoot := filepath.Join(commonDir, "quai", "locks")
+	staleLock := filepath.Join(locksRoot, "land.lock")
+	if err := os.MkdirAll(staleLock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleLock, "owner"), []byte(`{"pid":0,"command":"dead"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errBuf bytes.Buffer
+	code := run(ctx, []string{"gc", "--dry-run", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("gc --dry-run exited %d: %s %s", code, out.String(), errBuf.String())
+	}
+	var dry struct {
+		DryRun  bool `json:"dry_run"`
+		Removed []struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"removed"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &dry); err != nil {
+		t.Fatalf("gc --dry-run json: %v: %s", err, out.String())
+	}
+	if !dry.DryRun || len(dry.Removed) < 2 {
+		t.Fatalf("expected dry-run removals, got %s", out.String())
+	}
+	if _, err := os.Stat(expired); err != nil {
+		t.Fatalf("dry run removed %s: %v", expired, err)
+	}
+	if _, err := os.Stat(staleLock); err != nil {
+		t.Fatalf("dry run removed lock %s: %v", staleLock, err)
+	}
+	if _, err := os.Stat(filepath.Join(commonDir, "quai", "last-prune")); !os.IsNotExist(err) {
+		t.Fatal("dry run wrote last-prune stamp")
+	}
+
+	out.Reset()
+	errBuf.Reset()
+	if code := run(ctx, []string{"gc", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
+		t.Fatalf("gc exited %d: %s %s", code, out.String(), errBuf.String())
+	}
+	if _, err := os.Stat(expired); !os.IsNotExist(err) {
+		t.Fatalf("gc did not remove %s", expired)
+	}
+	if _, err := os.Stat(staleLock); !os.IsNotExist(err) {
+		t.Fatalf("gc did not remove %s", staleLock)
+	}
+	if _, err := os.Stat(filepath.Join(commonDir, "quai", "last-prune")); err != nil {
+		t.Fatalf("gc did not write last-prune stamp: %v", err)
+	}
+
+	out.Reset()
+	errBuf.Reset()
+	if code := run(ctx, []string{"status", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
+		t.Fatalf("status exited %d: %s %s", code, out.String(), errBuf.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"auto_prune": true`)) || !bytes.Contains(out.Bytes(), []byte(`"last_prune"`)) {
+		t.Fatalf("status missing prune state: %s", out.String())
+	}
+
+	// A remote failure during automatic pruning warns but never fails verify.
+	runGit("remote", "set-url", "origin", filepath.Join(tmp, "missing.git"))
+	if err := os.WriteFile(filepath.Join(commonDir, "quai", "last-prune"), []byte(time.Now().Add(-2*time.Hour).UTC().Format(time.RFC3339Nano)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second := writeReceipt("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	out.Reset()
+	errBuf.Reset()
+	if code := run(ctx, []string{"verify", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
+		t.Fatalf("verify with failing remote prune exited %d: %s %s", code, out.String(), errBuf.String())
+	}
+	if _, err := os.Stat(second); !os.IsNotExist(err) {
+		t.Fatalf("auto prune did not remove local receipt %s", second)
+	}
+	if !bytes.Contains(errBuf.Bytes(), []byte("auto-prune")) {
+		t.Fatalf("expected auto-prune warning on stderr, got %q", errBuf.String())
+	}
+
+	// A fresh stamp rate-limits the next command.
+	third := writeReceipt("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+	out.Reset()
+	errBuf.Reset()
+	if code := run(ctx, []string{"verify", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
+		t.Fatalf("second verify exited %d: %s %s", code, out.String(), errBuf.String())
+	}
+	if _, err := os.Stat(third); err != nil {
+		t.Fatalf("rate-limited auto prune removed %s: %v", third, err)
 	}
 }

@@ -87,6 +87,8 @@ type Git interface {
 	AddDetachedWorktree(ctx context.Context, path, rev string) error
 	RemoveWorktree(ctx context.Context, path string) error
 	ResetHard(ctx context.Context, rev string) error
+	CheckRefFormatBranch(ctx context.Context, name string) error
+	SymbolicRef(ctx context.Context, name string) (string, error)
 }
 
 type ExecGit struct {
@@ -615,6 +617,23 @@ func (g *ExecGit) RemoveWorktree(ctx context.Context, path string) error {
 func (g *ExecGit) ResetHard(ctx context.Context, rev string) error {
 	_, err := g.output(ctx, "reset", "--quiet", "--hard", rev)
 	return err
+}
+
+// CheckRefFormatBranch reports whether name is a valid branch name.
+func (g *ExecGit) CheckRefFormatBranch(ctx context.Context, name string) error {
+	if _, errOut, err := g.run(ctx, nil, "check-ref-format", "--branch", name); err != nil {
+		return fmt.Errorf("git check-ref-format --branch %q: %w (%s)", name, err, strings.TrimSpace(string(errOut)))
+	}
+	return nil
+}
+
+// SymbolicRef resolves a symbolic ref such as refs/remotes/origin/HEAD to its target.
+func (g *ExecGit) SymbolicRef(ctx context.Context, name string) (string, error) {
+	out, errOut, err := g.run(ctx, nil, "symbolic-ref", "--quiet", name)
+	if err != nil {
+		return "", fmt.Errorf("git symbolic-ref %s: %w (%s)", name, err, strings.TrimSpace(string(errOut)))
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // ParseWorktreeList parses `git worktree list --porcelain` output into Worktree structs.

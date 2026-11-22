@@ -95,6 +95,17 @@ quai land 42 --json
 - Overlapping PRs wait politely on `land.lock`, rebase one at a time, reuse receipts for unaffected steps, push with `--force-with-lease`, wait for `required_checks`, and merge with `--match-head-commit`.
 - If a rebase conflicts, `quai` aborts cleanly, releases `land.lock`, and exits `3` with the conflicting paths so the agent can resolve them explicitly.
 
+### 5. Housekeeping without a daemon
+
+Expired receipts and `refs/quai/records/*` accumulate as parallel agents verify and sign. Enable `[attest].auto_prune = true` on the base branch so `quai verify` and `quai land` run one best-effort prune at most once per `prune_interval`, or call it explicitly:
+
+```bash
+quai gc --dry-run --json
+quai gc --json
+```
+
+A prune failure (for example an unreachable remote) is a warning on stderr and never changes the primary command's exit code.
+
 ## Pairing `quai` with `Ataraxy-Labs/weave`
 
 Parallel agents frequently edit different functions in the same file, which causes false line-level rebase conflicts. Configure [Ataraxy-Labs/weave](https://github.com/Ataraxy-Labs/weave) as a git merge driver in `.gitattributes` and `.git/config`. Because `quai land` delegates rebases to standard `git rebase`, entity-level merging activates automatically with zero extra configuration in `.quai.toml`.
