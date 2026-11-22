@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 )
@@ -283,6 +284,13 @@ max_age = "14d"
 	}
 	if !bytes.Contains(out.Bytes(), []byte(`"verified"`)) || !bytes.Contains(out.Bytes(), []byte(`alice@example.com`)) {
 		t.Fatalf("unexpected attest check output: %s", out.String())
+	}
+
+	out.Reset()
+	errBuf.Reset()
+	code = run(ctx, []string{"attest", "check", "--onto", "origin/main"}, ciDir, bytes.NewReader(nil), &out, &errBuf)
+	if line := out.String(); code != 0 || !regexp.MustCompile(`^verified fast \([0-9a-f]{12} by alice@example\.com, `).MatchString(line) {
+		t.Fatalf("human attest check: code=%d out=%q err=%s", code, line, errBuf.String())
 	}
 
 	// Probabilistic audit --sample 100 exits 1 with status "sampled".

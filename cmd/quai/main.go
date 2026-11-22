@@ -1360,5 +1360,5 @@ func writeJSON(w io.Writer, v any) {
 }
 
 func shortID(s string) string {
-	return shortID(s)
+	return s[:min(12, len(s))]
 }
