@@ -179,11 +179,11 @@ Exit codes are uniform across commands:
 
 - [Configuration guide](docs/configuration.md) — full `.quai.toml` schema, input fingerprinting, and language presets
 - [Command reference](docs/commands.md) — flags, behaviors, and `--json` output schemas
-- [Coding agent integration](docs/agents.md) — wiring `quai` into Claude Code, Codex, OpenCode, Cursor, and custom harnesses
+- [Coding agent integration](docs/agent-integration.md) — wiring `quai` into Claude Code, Codex, OpenCode, Cursor, and custom harnesses
 - [Architecture](docs/architecture.md) — one-feature-per-folder layout, pure engines vs adapters, lock protocol, and testing
-- [Specification](SPEC.md) — complete v0.1 contract and post-v0.1 roadmap
-- [Research](RESEARCH.md) — problem sizing and comparison with existing open-source tools
-- [Contributing](CONTRIBUTING.md) — setup, coding standards, and pull request workflow
+- [Contributing](CONTRIBUTING.md) — setup and pull request workflow
+- [Agent guide](AGENTS.md) — values, non-goals, architecture rules, and taste for anyone changing `quai`
+- [Glossary](GLOSSARY.md) — the domain words `quai` uses
 - [Security policy](SECURITY.md) — security invariants and vulnerability reporting
 - [Changelog](CHANGELOG.md) — release history
 

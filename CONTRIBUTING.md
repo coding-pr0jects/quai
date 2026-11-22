@@ -34,14 +34,7 @@ Without `mise`, run `go vet ./...` and `go test -race ./...` directly.
 
 ## Architecture rules
 
-Before making structural changes, read [docs/architecture.md](docs/architecture.md) and [SPEC.md](SPEC.md).
-
-1. **One feature per folder.** Every capability lives in its own package under `internal/<feature>/` (`config`, `execrun`, `forge`, `glob`, `hooks`, `land`, `lock`, `patchid`, `receipt`, `repo`, `tier`, `verify`), wired together only in `cmd/quai/`. Do not create catch-all `utils` or `common` packages.
-2. **Pure decision engines, thin side-effect adapters.** Decision logic in `internal/tier`, `internal/patchid`, and `internal/land` (`DecideLand`) stays pure so every state transition is tested without spawning `gh` or touching a network. Side effects live in `internal/repo`, `internal/forge`, `internal/lock`, `internal/receipt`, `internal/execrun`, and `internal/verify`.
-3. **Minimal dependencies.** `quai` ships as a single static binary with only one external dependency (`github.com/BurntSushi/toml`). Do not add third-party packages without discussing it in an issue first.
-4. **No shell interpolation from untrusted inputs.** Every `git` and `gh` invocation must pass explicit argv slices through `exec.CommandContext`. Never concatenate PR titles, branch names, or paths into `sh -c`.
-5. **Process cleanup and lock hygiene.** Every child process runs in its own process group (`Setpgid: true`) so `SIGINT`, `SIGTERM`, `SIGHUP`, and timeouts terminate the entire process tree and release locks cleanly.
-6. **Consistent exit codes and `--json` output.** Preserve the exit-code contract (`0`..`4`) and machine-readable `--json` schemas documented in [docs/commands.md](docs/commands.md).
+[AGENTS.md](AGENTS.md) holds the architecture rules, the taste, and the security invariants for every contributor, human or agent. Read it, then [docs/architecture.md](docs/architecture.md), before making structural changes. [GLOSSARY.md](GLOSSARY.md) defines the domain words.
 
 ## Testing and verification
 
@@ -66,7 +59,7 @@ Never test `quai land` without `--dry-run` against a live repository unless you 
 1. **Open an issue first for large changes.** Small bug fixes, test improvements, and documentation updates can go straight to a pull request. For new commands, config fields, or scope additions, open a feature request first so we align on design.
 2. **Branch from `main`.** Keep pull requests focused on one logical change.
 3. **Commit messages.** Use Conventional Commits (`feat(verify): ...`, `fix(lock): ...`, `docs: ...`, `test(land): ...`, `chore: ...`). Keep headers at or under 72 characters.
-4. **Update documentation.** If you add or change a flag, config field, exit code, or behavior, update the relevant guide in `docs/`, `README.md`, `SPEC.md`, and `CHANGELOG.md` (under `[Unreleased]`).
+4. **Update documentation.** If you add or change a flag, config field, exit code, or behavior, update the relevant guide in `docs/`, `README.md`, `GLOSSARY.md`, and `CHANGELOG.md` (under `[Unreleased]`).
 5. **Fill out the pull request template.** Include the exact commands you ran and their outcomes.
 
 ## Reporting issues
