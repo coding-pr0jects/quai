@@ -28,6 +28,8 @@ lockfiles = []                  # Optional extra files always hashed into the re
 hook = "pre-push"               # Optional: "pre-push" or empty.
 pool = ""                       # Optional: pool name from [slots].
 slots = 0                       # Optional: number of slots to hold (>= 0). 0 means unlocked.
+pool_when = []                  # Optional globs on changed paths that require pool + slots.
+pool_tiers = []                 # Optional tier threshold that also requires pool + slots.
 timeout = "30m"                 # Optional Go duration string. Default: "30m".
 
 [tiers]
@@ -70,6 +72,27 @@ Each step computes a SHA-256 fingerprint before running on a clean tree:
 - When narrower `inputs` or `lockfiles` are declared, `quai` lists all tracked files in the git tree matching those globs (`git ls-tree -r`), sorts them by path, and hashes `step.run` plus every `<path>:<blob_sha>`.
 
 Narrowing `inputs` lets unrelated edits (such as editing `README.md` or another package) reuse existing receipts automatically across commits, rebases, and linked worktrees. Always list build manifests and lockfiles in `lockfiles` so dependency or toolchain updates invalidate cached receipts.
+
+## Conditional pool routing
+
+A step can reserve its heavy pool for the diffs that need it and skip the queue for the rest:
+
+```toml
+[[steps]]
+name = "e2e"
+run = "pnpm test:e2e"
+pool = "heavy"
+slots = 1
+pool_when = ["apps/**", "packages/**"]
+pool_tiers = ["full-live"]
+```
+
+- `pool_when` acquires the configured `pool` and `slots` when any changed path since the merge-base with the base ref matches one of its globs. Changed paths come from `git diff --name-status` between the merge-base and `HEAD` (both sides of a rename count), plus untracked files on a dirty tree.
+- `pool_tiers` acquires them when the branch tier reported by `quai tier` is at least the lowest listed tier.
+- Setting both is an OR: a matching path or a high enough tier acquires the pool.
+- Otherwise `quai verify` runs the step immediately with `slots = 0`. It takes no slot and skips `min_free_mem`, but still writes a receipt on a clean passing tree and still signs attestations.
+- `quai verify` prints `pool    <step>: acquired <pool> (...)` or `pool    <step>: bypassed <pool> (...)`, and `--json` adds `pool` and `pool_acquired` to that step. Unconditional and cached steps report neither field.
+- `pool_when` and `pool_tiers` require `pool` and `slots > 0`. Configs without them behave exactly as before.
 
 ## Template placeholders in `steps[].run`
 

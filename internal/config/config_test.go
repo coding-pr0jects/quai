@@ -73,6 +73,10 @@ func TestParseRejectsInvalidConfigs(t *testing.T) {
 		{"bad tier", "version = 1\n[tiers]\ndefault = 'extreme'\n", "invalid tiers.default"},
 		{"bad merge method", "version = 1\n[land]\nmethod = 'fast-forward'\n", "invalid land.method"},
 		{"bad attest max_age", "version = 1\n[attest]\nmax_age = '0d'\n", "invalid attest.max_age"},
+		{"pool_when without pool", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\npool_when = ['ui/**']\nslots = 1\n", "without pool"},
+		{"pool_when with zero slots", "version = 1\n[slots]\nheavy = 2\n[[steps]]\nname = 'a'\nrun = 'true'\npool = 'heavy'\npool_when = ['ui/**']\n", "slots = 0"},
+		{"empty pool_when glob", "version = 1\n[slots]\nheavy = 2\n[[steps]]\nname = 'a'\nrun = 'true'\npool = 'heavy'\nslots = 1\npool_when = ['']\n", "empty pool_when"},
+		{"bad pool_tiers tier", "version = 1\n[slots]\nheavy = 2\n[[steps]]\nname = 'a'\nrun = 'true'\npool = 'heavy'\nslots = 1\npool_tiers = ['extreme']\n", "invalid tier"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,5 +178,121 @@ slots = 1
 	}
 	if _, err := Parse([]byte("version = 1\n[slots.heavy]\ncapacity = 2\nextra = 1\n")); err == nil {
 		t.Fatal("expected error for unknown key in slot pool")
+	}
+}
+
+func TestParseConditionalPoolRouting(t *testing.T) {
+	raw := `
+version = 1
+
+[slots]
+heavy = 2
+
+[[steps]]
+name = "e2e"
+run = "make e2e"
+pool = "heavy"
+slots = 1
+pool_when = ["ui/**", "app/**"]
+pool_tiers = ["full-live"]
+
+[[steps]]
+name = "lint"
+run = "make lint"
+`
+	cfg, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	e2e := cfg.Steps[0]
+	if !e2e.HasConditionalPool() {
+		t.Fatalf("e2e should have a conditional pool: %+v", e2e)
+	}
+	if len(e2e.PoolWhen) != 2 || e2e.PoolWhen[0] != "ui/**" || e2e.PoolWhen[1] != "app/**" {
+		t.Fatalf("e2e PoolWhen = %v", e2e.PoolWhen)
+	}
+	if len(e2e.PoolTiers) != 1 || e2e.PoolTiers[0] != TierFullLive {
+		t.Fatalf("e2e PoolTiers = %v", e2e.PoolTiers)
+	}
+	if cfg.Steps[1].HasConditionalPool() || cfg.Steps[1].PoolWhen != nil {
+		t.Fatalf("lint should stay unconditional: %+v", cfg.Steps[1])
+	}
+}
+
+func TestStepRoutePool(t *testing.T) {
+	cases := []struct {
+		name    string
+		step    Step
+		changed []string
+		tier    Tier
+		want    bool
+		matched []string
+	}{
+		{
+			name:    "no condition always acquires",
+			step:    Step{Pool: "heavy", Slots: 1},
+			changed: []string{"docs/guide.md"},
+			tier:    TierGateOnly,
+			want:    true,
+		},
+		{
+			name:    "pool_when match acquires",
+			step:    Step{Pool: "heavy", Slots: 1, PoolWhen: []string{"ui/**"}},
+			changed: []string{"README.md", "ui/view.txt"},
+			tier:    TierDiffAudit,
+			want:    true,
+			matched: []string{"ui/view.txt"},
+		},
+		{
+			name:    "pool_when miss bypasses",
+			step:    Step{Pool: "heavy", Slots: 1, PoolWhen: []string{"ui/**"}},
+			changed: []string{"README.md", "docs/guide.md"},
+			tier:    TierFullLive,
+			want:    false,
+		},
+		{
+			name:    "pool_tiers at threshold acquires",
+			step:    Step{Pool: "heavy", Slots: 1, PoolTiers: []Tier{TierFullLive}},
+			changed: []string{"README.md"},
+			tier:    TierFullLive,
+			want:    true,
+		},
+		{
+			name:    "pool_tiers below threshold bypasses",
+			step:    Step{Pool: "heavy", Slots: 1, PoolTiers: []Tier{TierFullLive}},
+			changed: []string{"README.md"},
+			tier:    TierDiffAudit,
+			want:    false,
+		},
+		{
+			name:    "pool_tiers uses the lowest listed tier",
+			step:    Step{Pool: "heavy", Slots: 1, PoolTiers: []Tier{TierFullLive, TierDiffAudit}},
+			changed: []string{"internal/config/config.go"},
+			tier:    TierDiffAudit,
+			want:    true,
+		},
+		{
+			name:    "pool_when and pool_tiers both miss bypasses",
+			step:    Step{Pool: "heavy", Slots: 1, PoolWhen: []string{"ui/**"}, PoolTiers: []Tier{TierFullLive}},
+			changed: []string{"docs/guide.md"},
+			tier:    TierGateOnly,
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.step.RoutePool(tc.changed, tc.tier)
+			if got.Acquire != tc.want {
+				t.Fatalf("Acquire = %v, want %v", got.Acquire, tc.want)
+			}
+			if len(got.Matched) != len(tc.matched) {
+				t.Fatalf("Matched = %v, want %v", got.Matched, tc.matched)
+			}
+			for i := range tc.matched {
+				if got.Matched[i] != tc.matched[i] {
+					t.Fatalf("Matched = %v, want %v", got.Matched, tc.matched)
+				}
+			}
+		})
 	}
 }

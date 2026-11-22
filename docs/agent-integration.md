@@ -33,7 +33,7 @@ quai exec --pool heavy -- npm run test:e2e
 
 Benefits:
 
-- At most `slots.heavy` suites execute concurrently across all worktrees.
+- At most `slots.heavy` suites execute concurrently across all worktrees. Steps with `pool_when` or `pool_tiers` skip that queue when the diff does not match, so docs-only branches do not wait behind e2e runs.
 - When `quai hooks install` is enabled, the subsequent `git push` hits the receipt cache in under 50 ms instead of rerunning checks.
 - If a check secretly runs a formatter or code generator that dirties the tree, the mutation guard catches it and exits `1` instead of recording a false pass.
 

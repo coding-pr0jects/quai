@@ -46,6 +46,7 @@ quai verify --stop [<run-id>] [--json]
 - Concurrent calls on the same `(step, fingerprint)` share one execution via an in-flight lock; waiting callers immediately receive `status: "cached"` once the first run succeeds.
 - On a dirty working tree, steps still execute, but no receipts are read or written (`clean: false`, `receipt_written: false`).
 - **Mutation guard:** if a passing step edits tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai` refuses to write a receipt, reports `status: "mutated"` with `mutated_paths`, and exits `1`.
+- **Conditional pools:** a step with `pool_when` or `pool_tiers` acquires its `pool` only for matching diffs and otherwise runs with `slots = 0`, still writing receipts and signing attestations. Human output prints `pool <step>: acquired|bypassed <pool> ...`; JSON adds `pool` and `pool_acquired` for that step (see [configuration](configuration.md#conditional-pool-routing)).
 - Stops at the first failing or mutating step.
 
 ### JSON output
@@ -69,7 +70,9 @@ quai verify --stop [<run-id>] [--json]
 			"name": "test",
 			"status": "passed",
 			"fingerprint": "9c0d...",
-			"duration_ms": 1694
+			"duration_ms": 1694,
+			"pool": "heavy",
+			"pool_acquired": false
 		}
 	]
 }

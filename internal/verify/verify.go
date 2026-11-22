@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/receipt"
 	"github.com/coding-pr0jects/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/tier"
 )
 
 type Options struct {
@@ -77,6 +79,8 @@ type StepResult struct {
 	DurationMS     int64    `json:"duration_ms"`
 	AttestationRef string   `json:"attestation_ref,omitempty"`
 	MutatedPaths   []string `json:"mutated_paths,omitempty"`
+	Pool           string   `json:"pool,omitempty"`
+	PoolAcquired   *bool    `json:"pool_acquired,omitempty"`
 	Error          string   `json:"error,omitempty"`
 }
 
@@ -135,6 +139,11 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 		return Result{}, err
 	}
 
+	routing, err := collectRouting(ctx, g, cfg, selected, clean, baseSHA, opts.Since)
+	if err != nil {
+		return Result{}, err
+	}
+
 	var signingKey, principal string
 	if opts.Sign && clean {
 		signingKey, err = attest.ResolveSigningKey(ctx, g, cfg, opts.SigningKey)
@@ -165,9 +174,10 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 	}
 
 	for _, step := range selected {
+		route := routeForStep(step, routing)
 		stepRes, receiptWritten, attRef, stepErr := runOneStep(
 			ctx, g, cfg, store, locksRoot, topLevel,
-			step, clean, headSHA, treeSHA, baseSHA,
+			step, route, clean, headSHA, treeSHA, baseSHA,
 			signingKey, principal, opts,
 		)
 		if receiptWritten {
@@ -204,6 +214,126 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 	return res, nil
 }
 
+// routingInput is the diff state conditional pool routing needs.
+type routingInput struct {
+	changed []string
+	tier    config.Tier
+}
+
+func collectRouting(ctx context.Context, g repo.Git, cfg *config.Config, selected []config.Step, clean bool, baseSHA, since string) (routingInput, error) {
+	var rc routingInput
+	needPaths, needTier := false, false
+	for _, s := range selected {
+		if s.HasConditionalPool() {
+			needPaths = true
+		}
+		if len(s.PoolTiers) > 0 {
+			needTier = true
+		}
+	}
+	if !needPaths {
+		return rc, nil
+	}
+
+	to := "HEAD"
+	var untracked []string
+	if !clean {
+		to = ""
+		var err error
+		untracked, err = g.UntrackedFiles(ctx)
+		if err != nil {
+			return routingInput{}, err
+		}
+	}
+	changes, err := g.DiffNameStatus(ctx, baseSHA, to, true)
+	if err != nil {
+		return routingInput{}, err
+	}
+	rc.changed = changedPaths(changes, untracked)
+
+	if needTier {
+		bc, err := tier.ClassifyBranch(ctx, g, cfg, since)
+		if err != nil {
+			return routingInput{}, err
+		}
+		rc.tier = bc.Decision.Tier
+	}
+	return rc, nil
+}
+
+func changedPaths(changes []repo.FileChange, untracked []string) []string {
+	seen := make(map[string]struct{}, len(changes)+len(untracked))
+	out := make([]string, 0, len(changes)+len(untracked))
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	for _, ch := range changes {
+		add(ch.Path)
+		add(ch.OldPath)
+	}
+	for _, p := range untracked {
+		add(p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+type poolRoute struct {
+	conditional bool
+	acquired    bool
+	pool        string
+	slots       int
+	matched     []string
+	tier        config.Tier
+}
+
+func routeForStep(step config.Step, rc routingInput) poolRoute {
+	route := poolRoute{
+		conditional: step.HasConditionalPool(),
+		acquired:    true,
+		pool:        step.Pool,
+		slots:       step.Slots,
+		tier:        rc.tier,
+	}
+	if !route.conditional {
+		return route
+	}
+	decision := step.RoutePool(rc.changed, rc.tier)
+	route.acquired = decision.Acquire
+	route.matched = decision.Matched
+	if !decision.Acquire {
+		route.slots = 0
+	}
+	return route
+}
+
+func (r poolRoute) annotate(sr *StepResult) {
+	if !r.conditional {
+		return
+	}
+	sr.Pool = r.pool
+	acquired := r.acquired
+	sr.PoolAcquired = &acquired
+}
+
+func (r poolRoute) describe() string {
+	if r.acquired {
+		detail := "branch tier " + string(r.tier)
+		if len(r.matched) > 0 {
+			detail = fmt.Sprintf("%d changed path(s) matched", len(r.matched))
+		}
+		return fmt.Sprintf("acquired %s (%s)", r.pool, detail)
+	}
+	return fmt.Sprintf("bypassed %s (diff did not match pool_when or pool_tiers)", r.pool)
+}
+
 func runOneStep(
 	ctx context.Context,
 	g repo.Git,
@@ -211,6 +341,7 @@ func runOneStep(
 	store *receipt.Store,
 	locksRoot, topLevel string,
 	step config.Step,
+	route poolRoute,
 	clean bool,
 	headSHA, treeSHA, baseSHA string,
 	signingKey, principal string,
@@ -279,12 +410,15 @@ func runOneStep(
 		stdout, stderr = &capBuf, &capBuf
 	} else if opts.Stdout != nil {
 		fmt.Fprintf(opts.Stdout, "run     %s\n", step.Name)
+		if route.conditional {
+			fmt.Fprintf(opts.Stdout, "pool    %s: %s\n", step.Name, route.describe())
+		}
 	}
 
 	capacity := 0
 	var minFreeMem uint64
-	if step.Pool != "" {
-		sp := cfg.Slots[step.Pool]
+	if route.pool != "" {
+		sp := cfg.Slots[route.pool]
 		capacity = sp.Capacity
 		minFreeMem = sp.MinFreeMemBytes
 	}
@@ -295,8 +429,8 @@ func runOneStep(
 		Stdout:          stdout,
 		Stderr:          stderr,
 		LocksRoot:       locksRoot,
-		Pool:            step.Pool,
-		Slots:           step.Slots,
+		Pool:            route.pool,
+		Slots:           route.slots,
 		Capacity:        capacity,
 		MinFreeMemBytes: minFreeMem,
 		LockWait:        cfg.Land.LockWaitDur,
@@ -311,13 +445,15 @@ func runOneStep(
 		} else {
 			errMsg = fmt.Sprintf("exit code %d", code)
 		}
-		return StepResult{
+		sr := StepResult{
 			Name:        step.Name,
 			Status:      "failed",
 			Fingerprint: fp,
 			DurationMS:  dur,
 			Error:       errMsg,
-		}, false, "", runErr
+		}
+		route.annotate(&sr)
+		return sr, false, "", runErr
 	}
 
 	var attRef string
@@ -336,14 +472,16 @@ func runOneStep(
 			if afterHead != headSHA {
 				mutated = append(mutated, fmt.Sprintf("HEAD moved (%s -> %s)", shortSHA(headSHA), shortSHA(afterHead)))
 			}
-			return StepResult{
+			sr := StepResult{
 				Name:         step.Name,
 				Status:       "mutated",
 				Fingerprint:  fp,
 				DurationMS:   dur,
 				MutatedPaths: mutated,
 				Error:        "step mutated the working tree or HEAD; refusing to record receipt",
-			}, false, "", nil
+			}
+			route.annotate(&sr)
+			return sr, false, "", nil
 		}
 
 		r := receipt.Receipt{
@@ -378,6 +516,7 @@ func runOneStep(
 		DurationMS:     dur,
 		AttestationRef: attRef,
 	}
+	route.annotate(&sr)
 	if !opts.JSON && opts.Stdout != nil {
 		fmt.Fprintf(opts.Stdout, "pass    %s (%dms)\n", step.Name, dur)
 	}

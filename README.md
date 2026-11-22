@@ -130,6 +130,8 @@ quai verify --wait --max 8m   # exits 4 while it still runs; rerun to stream the
 
 Re-running `quai verify` on a clean tree with unchanged inputs (or after editing a file outside `inputs`, such as `README.md`) reuses the stored receipt immediately across all linked worktrees. If a step modifies tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai verify` refuses to write a receipt and exits `1`.
 
+Steps with `pool_when` globs or a `pool_tiers` threshold acquire their slot pool only when the diff needs it; otherwise they run unlocked and still write receipts and sign attestations.
+
 ### 3. Classify risk, check rebase survival, and land PRs
 
 ```bash
@@ -153,7 +155,7 @@ quai land 42
 
 | Command | Purpose |
 |---|---|
-| `quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign\|--no-sign] [--key <path>] [--push\|--no-push] [--priority <int>] [--detach] [--json]` | Run steps with slot locks, in-flight deduplication, mutation guard, receipts, and optional SSH-signed attestations, in the foreground or as a detached run |
+| `quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign\|--no-sign] [--key <path>] [--push\|--no-push] [--priority <int>] [--detach] [--json]` | Run steps with slot locks, conditional pool routing, in-flight deduplication, mutation guard, receipts, and optional SSH-signed attestations, in the foreground or as a detached run |
 | `quai verify --wait [<run-id>] [--max <duration>] [--json]`, `quai verify --stop [<run-id>] [--json]` | Stream a detached run's new output until it ends or `--max` passes, or stop it and its steps |
 | `quai attest check\|push\|fetch\|prune [flags...]` | Verify SSH-signed in-toto/DSSE attestations in CI (`--onto`, `--head`, `--config-ref`, `--sample`), sync, and prune expired `refs/quai/records/*` |
 | `quai exec --pool <name> [--slots <n>] [--wait <duration>] [--priority <int>] [--detach] -- <cmd...>` | Serialize any command behind a slot pool, served by priority then arrival, in its own process group |

@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/coding-pr0jects/quai/internal/glob"
 )
 
 const FileName = ".quai.toml"
@@ -86,9 +88,54 @@ type Step struct {
 	Hook      string        `toml:"hook"`
 	Pool      string        `toml:"pool"`
 	Slots     int           `toml:"slots"`
+	PoolWhen  []string      `toml:"pool_when"`
+	PoolTiers []Tier        `toml:"pool_tiers"`
 	Timeout   string        `toml:"timeout"`
 	Signers   []string      `toml:"signers"`
 	Duration  time.Duration `toml:"-"`
+}
+
+// PoolRouting is the decision to acquire a step's pool or run it unlocked.
+type PoolRouting struct {
+	Acquire bool
+	Matched []string
+}
+
+// HasConditionalPool reports whether a step decides its pool from the diff.
+func (s Step) HasConditionalPool() bool {
+	return len(s.PoolWhen) > 0 || len(s.PoolTiers) > 0
+}
+
+// RoutePool decides whether the step acquires its pool for this diff.
+// Steps without pool_when or pool_tiers always acquire.
+func (s Step) RoutePool(changedPaths []string, branchTier Tier) PoolRouting {
+	if !s.HasConditionalPool() {
+		return PoolRouting{Acquire: true}
+	}
+	var matched []string
+	for _, p := range changedPaths {
+		if glob.MatchAny(s.PoolWhen, p) {
+			matched = append(matched, p)
+		}
+	}
+	if len(matched) > 0 {
+		sort.Strings(matched)
+		return PoolRouting{Acquire: true, Matched: matched}
+	}
+	if len(s.PoolTiers) > 0 && branchTier.Rank() >= s.lowestPoolTier() {
+		return PoolRouting{Acquire: true}
+	}
+	return PoolRouting{Acquire: false}
+}
+
+func (s Step) lowestPoolTier() int {
+	lowest := s.PoolTiers[0].Rank()
+	for _, t := range s.PoolTiers[1:] {
+		if t.Rank() < lowest {
+			lowest = t.Rank()
+		}
+	}
+	return lowest
 }
 
 type AttestPolicy struct {
@@ -214,6 +261,24 @@ func (c *Config) normalizeAndValidate() error {
 		}
 		if s.Hook != "" && s.Hook != "pre-push" {
 			return fmt.Errorf("step %q has unsupported hook %q: expected \"pre-push\" or empty", s.Name, s.Hook)
+		}
+		if s.HasConditionalPool() {
+			if s.Pool == "" {
+				return fmt.Errorf("step %q sets pool_when or pool_tiers without pool: set pool to a name from [slots]", s.Name)
+			}
+			if s.Slots == 0 {
+				return fmt.Errorf("step %q sets pool_when or pool_tiers with slots = 0: conditional routing needs slots > 0", s.Name)
+			}
+		}
+		for _, pattern := range s.PoolWhen {
+			if strings.TrimSpace(pattern) == "" {
+				return fmt.Errorf("step %q has an empty pool_when glob", s.Name)
+			}
+		}
+		for _, t := range s.PoolTiers {
+			if !ValidTier(t) {
+				return fmt.Errorf("invalid tier %q in step %q pool_tiers", t, s.Name)
+			}
 		}
 		if s.Slots < 0 {
 			return fmt.Errorf("step %q slots must be >= 0, got %d", s.Name, s.Slots)
@@ -371,6 +436,18 @@ func (c *Config) AllowedPrincipalsFor(step Step) []string {
 
 func ValidTier(t Tier) bool {
 	return t == TierGateOnly || t == TierDiffAudit || t == TierFullLive
+}
+
+// Rank orders tiers from gate-only (1) to full-live (3).
+func (t Tier) Rank() int {
+	switch t {
+	case TierFullLive:
+		return 3
+	case TierDiffAudit:
+		return 2
+	default:
+		return 1
+	}
 }
 
 func ValidMergeMethod(m MergeMethod) bool {

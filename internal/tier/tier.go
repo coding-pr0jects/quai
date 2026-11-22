@@ -62,17 +62,6 @@ type Result struct {
 	Receipts      map[string]ReceiptStatus `json:"receipts"`
 }
 
-func tierRank(t config.Tier) int {
-	switch t {
-	case config.TierFullLive:
-		return 3
-	case config.TierDiffAudit:
-		return 2
-	default:
-		return 1
-	}
-}
-
 func effectiveTestGlobs(policy config.TierPolicy) []string {
 	if len(policy.TestGlobs) > 0 {
 		return policy.TestGlobs
@@ -150,7 +139,7 @@ func Classify(changes []repo.FileChange, untracked []string, tampered []TamperFi
 				assigned = config.TierDiffAudit
 			}
 		}
-		if tierRank(assigned) > tierRank(best) {
+		if assigned.Rank() > best.Rank() {
 			best = assigned
 		}
 		byTier[assigned] = append(byTier[assigned], path)
@@ -210,15 +199,19 @@ func ScanDiff(ctx context.Context, g repo.Git, policy config.TierPolicy, from, t
 	return changes, DetectTestTamper(changes, patches, policy), nil
 }
 
-// Evaluate computes the branch tier, test-tamper findings, and receipt statuses from git.
-func Evaluate(ctx context.Context, g repo.Git, cfg *config.Config, since string) (Result, error) {
-	commonDir, err := g.CommonDir(ctx)
-	if err != nil {
-		return Result{}, err
-	}
+// BranchClassification is the diff-derived state behind a branch tier decision.
+type BranchClassification struct {
+	Decision Decision
+	BaseSHA  string
+	TreeSHA  string
+	Clean    bool
+}
+
+// ClassifyBranch computes the branch tier and test-tamper findings from git.
+func ClassifyBranch(ctx context.Context, g repo.Git, cfg *config.Config, since string) (BranchClassification, error) {
 	treeSHA, err := g.TreeSHA(ctx, "HEAD")
 	if err != nil {
-		return Result{}, err
+		return BranchClassification{}, err
 	}
 	baseRef := since
 	if baseRef == "" {
@@ -229,11 +222,11 @@ func Evaluate(ctx context.Context, g repo.Git, cfg *config.Config, since string)
 	}
 	baseSHA, err := g.MergeBase(ctx, baseRef, "HEAD")
 	if err != nil {
-		return Result{}, fmt.Errorf("merge-base with %s: %w", baseRef, err)
+		return BranchClassification{}, fmt.Errorf("merge-base with %s: %w", baseRef, err)
 	}
 	clean, _, err := g.IsClean(ctx)
 	if err != nil {
-		return Result{}, err
+		return BranchClassification{}, err
 	}
 
 	to := "HEAD"
@@ -242,23 +235,40 @@ func Evaluate(ctx context.Context, g repo.Git, cfg *config.Config, since string)
 		to = ""
 		untracked, err = g.UntrackedFiles(ctx)
 		if err != nil {
-			return Result{}, err
+			return BranchClassification{}, err
 		}
 	}
 	changes, tampered, err := ScanDiff(ctx, g, cfg.Tiers, baseSHA, to)
 	if err != nil {
+		return BranchClassification{}, err
+	}
+	return BranchClassification{
+		Decision: Classify(changes, untracked, tampered, cfg.Tiers),
+		BaseSHA:  baseSHA,
+		TreeSHA:  treeSHA,
+		Clean:    clean,
+	}, nil
+}
+
+// Evaluate computes the branch tier, test-tamper findings, and receipt statuses from git.
+func Evaluate(ctx context.Context, g repo.Git, cfg *config.Config, since string) (Result, error) {
+	bc, err := ClassifyBranch(ctx, g, cfg, since)
+	if err != nil {
 		return Result{}, err
 	}
-	dec := Classify(changes, untracked, tampered, cfg.Tiers)
+	commonDir, err := g.CommonDir(ctx)
+	if err != nil {
+		return Result{}, err
+	}
 
 	store := receipt.NewStore(commonDir)
 	receipts := make(map[string]ReceiptStatus, len(cfg.Steps))
 	for _, step := range cfg.Steps {
-		if !clean {
+		if !bc.Clean {
 			receipts[step.Name] = ReceiptStatus{Valid: false}
 			continue
 		}
-		fp, err := receipt.Fingerprint(ctx, g, step, treeSHA, baseSHA)
+		fp, err := receipt.Fingerprint(ctx, g, step, bc.TreeSHA, bc.BaseSHA)
 		if err != nil {
 			return Result{}, err
 		}
@@ -275,13 +285,13 @@ func Evaluate(ctx context.Context, g repo.Git, cfg *config.Config, since string)
 	}
 
 	return Result{
-		Tier:          dec.Tier,
-		BaseSHA:       baseSHA,
-		TreeSHA:       treeSHA,
-		Clean:         clean,
-		Triggers:      dec.Triggers,
-		PureRenames:   dec.PureRenames,
-		TestsTampered: dec.TestsTampered,
+		Tier:          bc.Decision.Tier,
+		BaseSHA:       bc.BaseSHA,
+		TreeSHA:       bc.TreeSHA,
+		Clean:         bc.Clean,
+		Triggers:      bc.Decision.Triggers,
+		PureRenames:   bc.Decision.PureRenames,
+		TestsTampered: bc.Decision.TestsTampered,
 		Receipts:      receipts,
 	}, nil
 }

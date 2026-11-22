@@ -54,6 +54,10 @@ The `status` that `quai attest check --sample` gives every step on a sampled run
 A named capacity under `[slots]`, shared by every worktree of the repository. A pool may set `min_free_mem`.
 _Avoid_: queue, semaphore (in user-facing text).
 
+**Conditional pool**
+A step whose `pool_when` globs or `pool_tiers` threshold decide from the branch diff whether it acquires its configured pool, or bypasses it and runs with `slots = 0`.
+_Avoid_: smart pool, adaptive pool.
+
 **Slot**
 One unit of a pool, held as a `slot-<pool>-<index>.lock` directory. A step with `slots = 0` takes none.
 
