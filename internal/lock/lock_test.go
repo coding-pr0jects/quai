@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -224,6 +225,15 @@ func TestAcquireSlotsBoundsConcurrency(t *testing.T) {
 	}
 }
 
+func TestReadAvailableDisk(t *testing.T) {
+	if got, ok := ReadAvailableDisk(t.TempDir()); !ok || got == 0 {
+		t.Fatalf("ReadAvailableDisk = (%d, %v), want a positive byte count", got, ok)
+	}
+	if _, ok := ReadAvailableDisk(filepath.Join(t.TempDir(), "missing")); ok {
+		t.Fatal("expected ReadAvailableDisk to fail on a missing path")
+	}
+}
+
 func TestParseMeminfoAvailableAndMemoryGuard(t *testing.T) {
 	sample := "MemTotal:       16384000 kB\nMemFree:         2048000 kB\nMemAvailable:    6144000 kB\n"
 	got, ok := ParseMeminfoAvailable(sample)
@@ -315,4 +325,37 @@ func TestReleaseDeadRemovesOnlyTheDeadPIDsLeasesAndTickets(t *testing.T) {
 			t.Errorf("%s exists = %v, want %v", path, err == nil, want)
 		}
 	}
+}
+func TestAcquireSlotsDiskGuard(t *testing.T) {
+	locksRoot := t.TempDir()
+	ctx := context.Background()
+	var freeDisk atomic.Uint64
+	freeDisk.Store(500 * 1024 * 1024)
+
+	const threshold = uint64(2 * 1024 * 1024 * 1024)
+	opts := Options{
+		Wait:             60 * time.Millisecond,
+		PollInterval:     10 * time.Millisecond,
+		MinFreeDiskBytes: threshold,
+		AvailableDisk:    func(string) (uint64, bool) { return freeDisk.Load(), true },
+	}
+	_, err := AcquireSlots(ctx, locksRoot, "heavy", 1, 2, Owner{Command: "blocked"}, opts)
+	var te *TimeoutError
+	if !errors.As(err, &te) {
+		t.Fatalf("expected TimeoutError under low disk, got %v", err)
+	}
+	if !strings.Contains(te.Error(), "min_free_disk") || !strings.Contains(te.Error(), "500.0 MiB") {
+		t.Fatalf("expected clear low-disk message, got %q", te.Error())
+	}
+
+	go func() {
+		time.Sleep(45 * time.Millisecond)
+		freeDisk.Store(3 * 1024 * 1024 * 1024)
+	}()
+	opts.Wait = time.Second
+	sl, err := AcquireSlots(ctx, locksRoot, "heavy", 1, 2, Owner{Command: "recovered"}, opts)
+	if err != nil {
+		t.Fatalf("expected slot acquisition after disk recovery, got %v", err)
+	}
+	sl.Release()
 }

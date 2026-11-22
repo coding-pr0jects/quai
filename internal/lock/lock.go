@@ -61,6 +61,9 @@ type Options struct {
 	StaleAfter        time.Duration
 	MinFreeMemBytes   uint64
 	AvailableMem      func() (uint64, bool)
+	MinFreeDiskBytes  uint64
+	AvailableDisk     func(path string) (uint64, bool)
+	DiskPath          string
 	StatusWriter      io.Writer
 }
 
@@ -74,16 +77,23 @@ type InspectState struct {
 }
 
 type TimeoutError struct {
-	Path  string
-	Wait  time.Duration
-	Owner *Owner
+	Path   string
+	Wait   time.Duration
+	Owner  *Owner
+	Reason string
 }
 
 func (e *TimeoutError) Error() string {
+	var msg string
 	if e.Owner != nil {
-		return fmt.Sprintf("timed out after %s waiting for lock %s (held by pid %d: %s)", e.Wait, e.Path, e.Owner.PID, e.Owner.Command)
+		msg = fmt.Sprintf("timed out after %s waiting for lock %s (held by pid %d: %s)", e.Wait, e.Path, e.Owner.PID, e.Owner.Command)
+	} else {
+		msg = fmt.Sprintf("timed out after %s waiting for lock %s", e.Wait, e.Path)
 	}
-	return fmt.Sprintf("timed out after %s waiting for lock %s", e.Wait, e.Path)
+	if e.Reason != "" {
+		msg += ": " + e.Reason
+	}
+	return msg
 }
 
 type Lease struct {
@@ -303,9 +313,38 @@ func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity i
 		}
 		return avail >= opts.MinFreeMemBytes, avail
 	}
+	diskFn := opts.AvailableDisk
+	if diskFn == nil {
+		diskFn = ReadAvailableDisk
+	}
+	diskPaths := []string{locksRoot}
+	if opts.DiskPath != "" {
+		diskPaths[0] = opts.DiskPath
+	}
+	if tmp := os.TempDir(); tmp != "" && tmp != diskPaths[0] {
+		diskPaths = append(diskPaths, tmp)
+	}
+	diskSatisfied := func() (bool, uint64, string) {
+		if opts.MinFreeDiskBytes == 0 {
+			return true, 0, ""
+		}
+		for _, path := range diskPaths {
+			avail, ok := diskFn(path)
+			if !ok {
+				continue
+			}
+			if avail < opts.MinFreeDiskBytes {
+				return false, avail, path
+			}
+		}
+		return true, 0, ""
+	}
 
 	tryAll := func() (*SlotLease, bool, error) {
 		if okMem, _ := memSatisfied(); !okMem {
+			return nil, false, nil
+		}
+		if okDisk, _, _ := diskSatisfied(); !okDisk {
 			return nil, false, nil
 		}
 		var held []*Lease
@@ -374,9 +413,16 @@ func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity i
 		}
 
 		if !deadline.IsZero() && time.Now().After(deadline) {
+			reason := ""
+			if okMem, avail := memSatisfied(); !okMem {
+				reason = fmt.Sprintf("free memory %s is below min_free_mem %s", FormatBytes(avail), FormatBytes(opts.MinFreeMemBytes))
+			} else if okDisk, avail, path := diskSatisfied(); !okDisk {
+				reason = fmt.Sprintf("free disk %s at %s is below min_free_disk %s", FormatBytes(avail), path, FormatBytes(opts.MinFreeDiskBytes))
+			}
 			return nil, &TimeoutError{
-				Path: filepath.Join(locksRoot, fmt.Sprintf("slot-%s-*", pool)),
-				Wait: opts.Wait,
+				Path:   filepath.Join(locksRoot, fmt.Sprintf("slot-%s-*", pool)),
+				Wait:   opts.Wait,
+				Reason: reason,
 			}
 		}
 
@@ -385,6 +431,9 @@ func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity i
 			if okMem, avail := memSatisfied(); !okMem {
 				fmt.Fprintf(opts.StatusWriter, "quai lock: waiting for >= %s free memory for pool %q (currently %s, %s elapsed)\n",
 					FormatBytes(opts.MinFreeMemBytes), pool, FormatBytes(avail), time.Since(start).Round(time.Second))
+			} else if okDisk, avail, path := diskSatisfied(); !okDisk {
+				fmt.Fprintf(opts.StatusWriter, "quai lock: waiting for >= %s free disk at %s for pool %q (currently %s, %s elapsed)\n",
+					FormatBytes(opts.MinFreeDiskBytes), path, pool, FormatBytes(avail), time.Since(start).Round(time.Second))
 			} else {
 				fmt.Fprintf(opts.StatusWriter, "quai lock: waiting for %d slot(s) in pool %q (%s elapsed)\n", count, pool, time.Since(start).Round(time.Second))
 			}

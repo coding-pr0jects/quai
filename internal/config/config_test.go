@@ -153,7 +153,7 @@ remote = "upstream"
 	}
 }
 
-func TestParseSlotPoolMemoryLimitAndByteSize(t *testing.T) {
+func TestParseSlotPoolMemoryAndDiskLimitsAndByteSize(t *testing.T) {
 	raw := `
 version = 1
 
@@ -163,6 +163,11 @@ light = 4
 [slots.heavy]
 capacity = 2
 min_free_mem = "4G"
+min_free_disk = "20G"
+
+[slots.disk-only]
+capacity = 1
+min_free_disk = "2G"
 
 [[steps]]
 name = "e2e"
@@ -174,16 +179,23 @@ slots = 1
 	if err != nil {
 		t.Fatalf("Parse failed: %v", err)
 	}
-	if cfg.Slots["light"].Capacity != 4 || cfg.Slots["light"].MinFreeMemBytes != 0 {
+	if cfg.Slots["light"].Capacity != 4 || cfg.Slots["light"].MinFreeMemBytes != 0 || cfg.Slots["light"].MinFreeDiskBytes != 0 {
 		t.Fatalf("light pool = %+v", cfg.Slots["light"])
 	}
-	wantBytes := uint64(4 * 1024 * 1024 * 1024)
-	if cfg.Slots["heavy"].Capacity != 2 || cfg.Slots["heavy"].MinFreeMemBytes != wantBytes {
-		t.Fatalf("heavy pool = %+v, want cap=2 bytes=%d", cfg.Slots["heavy"], wantBytes)
+	wantMem := uint64(4 * 1024 * 1024 * 1024)
+	wantDisk := uint64(20 * 1024 * 1024 * 1024)
+	if got := cfg.Slots["heavy"]; got.Capacity != 2 || got.MinFreeMemBytes != wantMem || got.MinFreeDiskBytes != wantDisk {
+		t.Fatalf("heavy pool = %+v, want cap=2 mem=%d disk=%d", got, wantMem, wantDisk)
+	}
+	if got := cfg.Slots["disk-only"].MinFreeDiskBytes; got != 2*1024*1024*1024 {
+		t.Fatalf("disk-only min_free_disk bytes = %d", got)
 	}
 
 	if _, err := Parse([]byte("version = 1\n[slots.heavy]\ncapacity = 2\nmin_free_mem = '0G'\n")); err == nil {
 		t.Fatal("expected error for zero min_free_mem")
+	}
+	if _, err := Parse([]byte("version = 1\n[slots.heavy]\ncapacity = 2\nmin_free_disk = 'nope'\n")); err == nil {
+		t.Fatal("expected error for invalid min_free_disk")
 	}
 	if _, err := Parse([]byte("version = 1\n[slots.heavy]\ncapacity = 2\nextra = 1\n")); err == nil {
 		t.Fatal("expected error for unknown key in slot pool")

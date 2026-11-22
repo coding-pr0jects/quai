@@ -260,6 +260,9 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 			}
 		}
 	}
+	if !*jsonOut {
+		fmt.Fprintf(stdout, "exit_kind: %s\n", res.ExitKind)
+	}
 	if err != nil {
 		var te *lock.TimeoutError
 		if errors.As(err, &te) {
@@ -563,18 +566,19 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 	if err != nil {
 		absCwd = top
 	}
-	code, err := execrun.Run(ctx, execrun.Request{
-		Dir:             absCwd,
-		Argv:            cmdArgs,
-		Stdin:           stdin,
-		Stdout:          stdout,
-		Stderr:          stderr,
-		LocksRoot:       filepath.Join(commonDir, "quai", "locks"),
-		Pool:            *pool,
-		Slots:           *slots,
-		Capacity:        sp.Capacity,
-		MinFreeMemBytes: sp.MinFreeMemBytes,
-		LockWait:        waitDur,
+	res, err := execrun.Run(ctx, execrun.Request{
+		Dir:              absCwd,
+		Argv:             cmdArgs,
+		Stdin:            stdin,
+		Stdout:           stdout,
+		Stderr:           stderr,
+		LocksRoot:        filepath.Join(commonDir, "quai", "locks"),
+		Pool:             *pool,
+		Slots:            *slots,
+		Capacity:         sp.Capacity,
+		MinFreeMemBytes:  sp.MinFreeMemBytes,
+		MinFreeDiskBytes: sp.MinFreeDiskBytes,
+		LockWait:         waitDur,
 		Owner: lock.Owner{
 			Role:     lock.RoleExec,
 			Priority: *priority,
@@ -590,7 +594,7 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 			return 4
 		}
 	}
-	return code
+	return res.ExitCode
 }
 
 const (
@@ -797,6 +801,7 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 		writeJSON(stdout, res)
 	} else if res.Action != "" {
 		fmt.Fprintf(stdout, "#%d: %s (%s)\n", res.PR, res.Action, res.Reason)
+		fmt.Fprintf(stdout, "exit_kind: %s\n", res.ExitKind)
 	}
 	if err != nil {
 		var rce *repo.RebaseConflictError
@@ -1044,6 +1049,12 @@ func runStatus(ctx context.Context, cwd string, args []string, stdout, stderr io
 	}
 	for _, wt := range rep.LandWorktrees {
 		fmt.Fprintf(stdout, "land worktree: %s\n", wt)
+	}
+	if rep.AvailableMemBytes > 0 {
+		fmt.Fprintf(stdout, "memory: %s available\n", lock.FormatBytes(rep.AvailableMemBytes))
+	}
+	if rep.AvailableDiskBytes > 0 {
+		fmt.Fprintf(stdout, "disk: %s free\n", lock.FormatBytes(rep.AvailableDiskBytes))
 	}
 	fmt.Fprintf(stdout, "receipts: %d cached, attestations: %d local\n", rep.ReceiptCount, rep.AttestCount)
 	for _, r := range rep.Runs {

@@ -170,8 +170,8 @@ quai land 41 42 43
 | `quai restack <old-parent-tip> [--base <ref>] [--push] [--json]` | Replay a stacked child branch onto the updated base via `git rebase --onto` with `patch-id` survival check |
 | `quai hooks install\|uninstall\|pre-push [--json]` | Manage the non-destructive `pre-push` receipt hook (with optional auto-sign/push) |
 | `quai gc [--dry-run] [--json]` | Prune expired receipts, attestation and verdict refs, and stale lock directories (also run automatically by `verify`/`land` when `[attest].auto_prune` is set on the remote default branch) |
-| `quai status [--json]` | Inspect active `land.lock`, slot pools, free RAM, holders and waiters with their role and priority, in-flight steps, detached runs, and cached counts |
-| `quai doctor [--json]` | Validate git >= 2.38, `.quai.toml`, hooks, `gh`, `ssh-keygen`, attestation signing key, `ssh-agent` identity, `[attest]` config, remote reachability, and stale locks |
+| `quai status [--json]` | Inspect active `land.lock`, slot pools, free RAM and disk, holders and waiters with their role and priority, in-flight steps, detached runs, and cached counts |
+| `quai doctor [--json]` | Validate git >= 2.38, `.quai.toml`, free disk, hooks, `gh`, `ssh-keygen`, attestation signing key, `ssh-agent` identity, `[attest]` config, remote reachability, and stale locks |
 | `quai conflicts [--base <ref>] [--conflicts-only] [--json]` | Run read-only virtual `git merge-tree` and overlap checks across active linked worktrees |
 | `quai version` | Print the installed version |
 
@@ -184,6 +184,8 @@ Exit codes are uniform across commands:
 | `2` | Invalid arguments, missing or invalid `.quai.toml`, or not a git repository |
 | `3` | Git rebase conflict encountered and cleanly aborted |
 | `4` | Lock or slot acquisition timed out, or `quai verify --wait` reached `--max` while the run still runs |
+
+`quai verify --json` and `quai land --json` also include a normalized `exit_kind` (`pass`, `step_failed`, `step_timeout`, `lock_timeout`, `oom_killed`, `dirty_tree`, `infra_error`) so automation can retry an environment failure instead of treating it as a code failure.
 
 ## Composing with `weave`
 

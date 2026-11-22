@@ -25,6 +25,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Step chaining: `depends_on = ["fast"]` on `[[steps]]` runs each prerequisite once and first, for `quai verify`, `quai verify --step`, `quai hooks pre-push`, and `quai attest check|push --step`; each step reads `QUAI_PASSED_STEPS`, the steps that already passed or were cached in the same run (#16).
 - Negated `inputs` globs: `inputs = ["**", "!docs/evidence/**"]` leaves the step's fingerprint, receipt, and attestation unchanged when only excluded paths change (#16).
 - Review verdicts record a `code_patch_id`, the patch-id without gate-only paths, under a second ref when it differs; `quai verdict check --config-ref <trusted-ref>` and `quai land` (which reads `origin/<base>`'s `.quai.toml`) keep an approved verdict when later commits change only `[tiers].gate_only` paths. A diff that changes `.quai.toml` or the `allowed_signers` file has no code patch-id (#16).
+- Free-disk admission guard (`internal/lock/disk.go`): `[slots.<pool>]` accepts `min_free_disk` (e.g. `"2G"`) and grants slots only while the repository filesystem and system temp directory stay above it, with `available_disk_bytes` and `min_free_disk_bytes` in `quai status` and free disk in `quai doctor`.
+- Normalized `exit_kind` (`internal/exitkind`) on `quai verify --json` and `quai land --json`, distinguishing `pass`, `step_failed`, `step_timeout`, `lock_timeout`, `oom_killed`, `dirty_tree`, and `infra_error` without changing exit codes.
 
 ### Security
 - Every git call that takes a remote, ref, base, or refspec now passes `--end-of-options` (and `git reset --hard`, which has none, accepts only a validated 40-character SHA), and `.quai.toml` rejects a `base` or `[attest].remote` that starts with `-`, closing a git option-injection path through `quai doctor`, `quai attest fetch/push`, `quai verify --fetch-base`, and land's temporary worktrees (#15).
@@ -34,6 +36,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `[attest].max_age` and `quai attest prune --max-age` now reject values below `1m`, so a mistyped policy cannot expire the whole attestation history in one pass.
 - `docs/agents.md` is now `docs/agent-integration.md`; the `verify-quai` harness moved to `.agents/skills/verify-quai/`, linked from `.claude/skills/` and `.cursor/skills/`.
 - `internal/attest` and `internal/verdict` are classified `full-live` in this repository's `.quai.toml`.
+- `quai exec` reports `128 + signal` when the wrapped command is terminated by a signal.
 
 ### Removed
 - `SPEC.md` (v0.1 contract, superseded by `docs/`) and `RESEARCH.md`; their non-goals now live in `AGENTS.md`.

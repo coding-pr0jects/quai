@@ -83,10 +83,11 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 		t.Fatalf("verify exited %d: %s %s", code, out.String(), errBuf.String())
 	}
 	var v struct {
-		OK             bool `json:"ok"`
-		ReceiptWritten bool `json:"receipt_written"`
+		OK             bool   `json:"ok"`
+		ExitKind       string `json:"exit_kind"`
+		ReceiptWritten bool   `json:"receipt_written"`
 	}
-	if err := json.Unmarshal(out.Bytes(), &v); err != nil || !v.OK || !v.ReceiptWritten {
+	if err := json.Unmarshal(out.Bytes(), &v); err != nil || !v.OK || !v.ReceiptWritten || v.ExitKind != "pass" {
 		t.Fatalf("unexpected verify json: %s (err=%v)", out.String(), err)
 	}
 
@@ -154,16 +155,26 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 	if code := run(ctx, []string{"status", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
 		t.Fatalf("status failed: %d %s %s", code, out.String(), errBuf.String())
 	}
-	if !bytes.Contains(out.Bytes(), []byte(`"receipt_count": 2`)) {
-		t.Fatalf("expected 2 cached receipts in status json, got: %s", out.String())
+	if !bytes.Contains(out.Bytes(), []byte(`"receipt_count": 2`)) || !bytes.Contains(out.Bytes(), []byte(`"available_disk_bytes"`)) {
+		t.Fatalf("expected 2 cached receipts and free disk in status json, got: %s", out.String())
 	}
 	out.Reset()
 	errBuf.Reset()
 	if code := run(ctx, []string{"doctor", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
 		t.Fatalf("doctor failed: %d %s %s", code, out.String(), errBuf.String())
 	}
-	if !bytes.Contains(out.Bytes(), []byte(`"ok": true`)) {
-		t.Fatalf("expected ok doctor json, got: %s", out.String())
+	if !bytes.Contains(out.Bytes(), []byte(`"ok": true`)) || !bytes.Contains(out.Bytes(), []byte(`"available_disk_bytes"`)) || !bytes.Contains(out.Bytes(), []byte(`"available_mem_bytes"`)) {
+		t.Fatalf("expected ok doctor json with free memory and disk, got: %s", out.String())
+	}
+
+	// 6b. Human verify output names the exit kind.
+	out.Reset()
+	errBuf.Reset()
+	if code := run(ctx, []string{"verify", "--step", "fast"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
+		t.Fatalf("verify human run failed: %d %s %s", code, out.String(), errBuf.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte("exit_kind: pass")) {
+		t.Fatalf("expected exit_kind in human output, got: %s", out.String())
 	}
 
 	// 7. Unknown command -> exit 2.

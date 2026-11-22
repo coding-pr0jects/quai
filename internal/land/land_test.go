@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/exitkind"
 	"github.com/coding-pr0jects/quai/internal/forge"
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
@@ -278,7 +279,7 @@ required_checks = ["check"]
 		Stderr:     &buf,
 		ChecksPoll: 10 * time.Millisecond,
 	})
-	if err != nil || !res.OK || !res.Merged || res.Action != ActionOptimisticMerge {
+	if err != nil || !res.OK || !res.Merged || res.Action != ActionOptimisticMerge || res.ExitKind != exitkind.Pass {
 		t.Fatalf("expected optimistic merge, got res=%+v err=%v", res, err)
 	}
 	if ff.mergedSHA != featSHA {
@@ -310,8 +311,8 @@ required_checks = ["check"]
 		ChecksPoll: 10 * time.Millisecond,
 	})
 	var rce *repo.RebaseConflictError
-	if !errors.As(err2, &rce) || res2.Merged {
-		t.Fatalf("expected RebaseConflictError and no merge, got res=%+v err=%v", res2, err2)
+	if !errors.As(err2, &rce) || res2.Merged || res2.ExitKind != exitkind.StepFailed {
+		t.Fatalf("expected RebaseConflictError, step_failed, and no merge, got res=%+v err=%v", res2, err2)
 	}
 	clean, _, _ := g.IsClean(ctx)
 	if !clean {
@@ -631,6 +632,49 @@ func (f *stackForge) EditPRBase(ctx context.Context, number int, newBase string)
 	}
 	f.retargetedBases[number] = newBase
 	return nil
+}
+
+func TestRunClassifiesDirtyTreeRefusal(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "user.name", "t")
+	runGit("config", "user.email", "t@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-qm", "init")
+	runGit("checkout", "-q", "-b", "feat/dirty")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g := repo.NewExecGit(dir)
+	head, err := g.HeadSHA(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ff := &fakeForge{pr: forge.PullRequest{
+		Number: 1, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/dirty", HeadRefOid: head,
+	}}
+	cfg, err := config.Parse([]byte("version = 1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, ff, cfg, Options{PRNumber: 1, Stdout: &buf, Stderr: &buf})
+	if err != nil || res.OK || res.Action != ActionRefuse || res.ExitKind != exitkind.DirtyTree {
+		t.Fatalf("expected dirty_tree refusal, got res=%+v err=%v", res, err)
+	}
 }
 
 func TestStackedPRRetargetAndRestack(t *testing.T) {

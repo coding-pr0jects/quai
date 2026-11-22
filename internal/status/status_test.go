@@ -133,6 +133,9 @@ slots = 1
 	if w := rep.Pools[0].Waiters; len(w) != 2 || w[0].Role != lock.RoleLand || w[0].Priority != 10 || w[1].Role != lock.RoleVerify || w[1].Priority != 0 {
 		t.Fatalf("expected waiters [land/10 verify/0] in service order, got %+v", w)
 	}
+	if rep.AvailableMemBytes == 0 || rep.AvailableDiskBytes == 0 {
+		t.Fatalf("expected free memory and disk in status, got mem=%d disk=%d", rep.AvailableMemBytes, rep.AvailableDiskBytes)
+	}
 
 	leftover := filepath.Join(commonDir, "quai", land.TempWorktreePrefix+"7-4242")
 	if err := os.MkdirAll(leftover, 0o755); err != nil {
@@ -151,6 +154,18 @@ slots = 1
 	doc = Doctor(ctx, g)
 	if !doc.OK || !hasCheck(doc, "land-worktrees") {
 		t.Fatalf("expected a land-worktrees warning once land.lock is free, got %+v", doc)
+	}
+	if doc.AvailableMemBytes == 0 || doc.AvailableDiskBytes == 0 {
+		t.Fatalf("expected free memory and disk in doctor, got mem=%d disk=%d", doc.AvailableMemBytes, doc.AvailableDiskBytes)
+	}
+	var diskCheck bool
+	for _, c := range doc.Checks {
+		if c.Name == "disk" && c.Status == "ok" {
+			diskCheck = true
+		}
+	}
+	if !diskCheck {
+		t.Fatalf("expected a passing disk check in doctor, got %+v", doc.Checks)
 	}
 }
 
