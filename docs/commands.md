@@ -228,14 +228,16 @@ Computes `git diff --binary <merge_base>..<sha> | git patch-id --stable` for bot
 Land a GitHub pull request with virtual `git merge-tree` optimistic merge or serialized locked rebase.
 
 ```bash
-quai land <pr> [--dry-run] [--method squash|merge|rebase] [--no-sign] [--no-push] [--json]
+quai land <pr> [--dry-run] [--method squash|merge|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]
 ```
 
 ### Arguments and flags
 
 - `<pr>`: Pull request number (accepts `42` or `#42`).
-- `--dry-run`: Evaluate and print the landing plan without acquiring `land.lock`, rebasing, pushing, or merging. Exits `0` if mergeable, `1` if refused.
+- `--dry-run`: Evaluate and print the landing plan (including any detected stacked child PRs) without acquiring `land.lock`, rebasing, pushing, or merging. Exits `0` if mergeable, `1` if refused.
 - `--method`: Override `land.method` (`squash`, `merge`, or `rebase`).
+- `--restack`: After merging, automatically rebase clean local stacked child worktrees onto the updated base via `git rebase --onto` and push with `--force-with-lease`. Open child PRs targeting the landed branch are always retargeted before merge.
+- `--require-verdict`: Require an approved review verdict for this PR's `patch-id` regardless of tier.
 - `--no-sign` / `--no-push`: Disable automatic attestation signing or pushing during `rebase-and-merge` verification.
 - `--json`: Print structured JSON.
 
@@ -288,6 +290,37 @@ quai doctor [--json]
 
 ---
 
+## `quai verdict`
+
+Record and check review verdicts keyed by the branch's stable `git patch-id` and risk tier. Valid verdicts survive clean rebases automatically and invalidate whenever the diff changes.
+
+```bash
+quai verdict record [--status approved|rejected] [--tier <tier>] [--reviewer <id>] [--note <text>] [--since <ref>] [--sign] [--key <path>] [--push] [--remote <name>] [--json]
+quai verdict check [--since <ref>] [--require-signed] [--allowed-signers <path>] [--fetch] [--remote <name>] [--json]
+```
+
+---
+
+## `quai restack`
+
+Replay commits after `<old-parent-tip>` onto the updated base branch via `git rebase --onto`, report `patch-id` survival, and optionally push with `--force-with-lease`. Exits `3` on rebase conflict after cleanly aborting.
+
+```bash
+quai restack <old-parent-tip> [--base <ref>] [--push] [--remote <name>] [--json]
+```
+
+---
+
+## `quai conflicts`
+
+Enumerate active linked worktrees and run read-only virtual `git merge-tree` and file-overlap checks against the base branch and pairwise across worktrees without mutating any checkout. Exits `0` when clean, `1` when conflicts or overlaps are found.
+
+```bash
+quai conflicts [--base <ref>] [--conflicts-only] [--json]
+```
+
+---
+
 ## `quai version`
 
-Print the binary version (`quai 0.2.0`).
+Print the binary version (`quai 0.3.0`).

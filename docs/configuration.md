@@ -10,8 +10,13 @@ base = "main"                   # Default base branch. Defaults to "main".
 
 [slots]
 # Named concurrency pools shared across all linked worktrees of the repo.
-# Pool names must match ^[a-z0-9-]+$ and values must be positive integers.
-heavy = 2
+# Pool names must match ^[a-z0-9-]+$ and values must be positive integers
+# or tables with capacity and optional min_free_mem.
+light = 4
+
+[slots.heavy]
+capacity = 2
+min_free_mem = "4G"             # Optional RAM admission guard (Linux /proc/meminfo MemAvailable).
 
 [[steps]]
 name = "fast"                   # Required, unique, matches ^[a-z0-9-]+$.
@@ -39,6 +44,9 @@ required_checks = []            # GitHub check or commit status names that must 
 lock_wait = "30m"               # Max wait for land.lock. Default: "30m".
 checks_wait = "15m"             # Max wait for required GitHub checks. Default: "15m".
 global_paths = []               # Globs that disable optimistic merge when changed on base.
+require_verdict_tiers = []      # Optional risk tiers (e.g. ["full-live"]) requiring an approved verdict before merge.
+require_signed_verdict = false  # When true, require SSH-signed verdicts under refs/quai/verdicts/<patch-id>.
+auto_restack = false            # When true, automatically restack clean local child worktrees after landing a parent PR.
 
 [attest]
 allowed_signers = ".quai/allowed_signers" # OpenSSH allowed_signers file for verifying CI attestations.

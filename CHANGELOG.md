@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-22
+
+### Added
+- Stacked PR landing (`internal/land/stack.go`): `quai land` discovers open child PRs targeting the landing branch, retargets them to the parent's base before merge, and optionally restacks clean local child worktrees with `--restack` / `[land].auto_restack` (`git rebase --onto` + `patch-id` survival + `--force-with-lease`). Added standalone `quai restack <old-parent-tip>` (#7).
+- Early cross-worktree conflict detection (`internal/conflicts`): `quai conflicts [--base <ref>] [--conflicts-only] [--json]` enumerates active linked worktrees and runs read-only virtual `git merge-tree` and file-overlap checks against base and pairwise across worktrees (#8).
+- Review verdicts tied to `patch-id` (`internal/verdict`): `quai verdict record|check` storing local and optionally SSH-signed DSSE verdicts under `refs/quai/verdicts/<patch-id>` that survive clean rebases, enforced optionally by `quai land` via `[land].require_verdict_tiers`, `require_signed_verdict`, and `--require-verdict` (#9).
+- Memory-aware slot admission guard (`internal/lock/mem.go`): `[slots.<pool>]` supports `capacity` and `min_free_mem` (e.g. `"4G"`), reading Linux `/proc/meminfo` `MemAvailable` before granting slots and exposing `available_mem_bytes` in `quai status` (#10).
+
 ## [0.2.0] - 2026-11-22
 
 ### Added
