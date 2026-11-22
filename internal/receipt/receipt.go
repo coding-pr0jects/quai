@@ -122,6 +122,45 @@ func (s *Store) Write(r Receipt) error {
 
 // Prune removes receipts older than MaxAge and trims to at most MaxFiles newest entries.
 func (s *Store) Prune() error {
+	expired, _, err := s.Plan()
+	if err != nil {
+		return err
+	}
+	for _, path := range expired {
+		_ = os.Remove(path)
+	}
+	return s.trim()
+}
+
+// Plan returns receipt paths older than MaxAge and the number of receipts that stay.
+func (s *Store) Plan() (expired []string, kept int, err error) {
+	entries, err := os.ReadDir(s.Dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	cutoff := s.now().Add(-s.maxAge())
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		ts := s.entryTime(entry)
+		if ts.IsZero() {
+			kept++
+			continue
+		}
+		if ts.Before(cutoff) {
+			expired = append(expired, filepath.Join(s.Dir, entry.Name()))
+		} else {
+			kept++
+		}
+	}
+	return expired, kept, nil
+}
+
+func (s *Store) trim() error {
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -129,16 +168,10 @@ func (s *Store) Prune() error {
 		}
 		return err
 	}
-	maxAge := s.MaxAge
-	if maxAge <= 0 {
-		maxAge = DefaultMaxAge
-	}
 	maxFiles := s.MaxFiles
 	if maxFiles <= 0 {
 		maxFiles = DefaultMaxFiles
 	}
-	cutoff := s.now().Add(-maxAge)
-
 	type fileAge struct {
 		path string
 		ts   time.Time
@@ -148,23 +181,11 @@ func (s *Store) Prune() error {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		full := filepath.Join(s.Dir, entry.Name())
-		info, err := entry.Info()
-		if err != nil {
+		ts := s.entryTime(entry)
+		if ts.IsZero() {
 			continue
 		}
-		ts := info.ModTime()
-		if raw, err := os.ReadFile(full); err == nil {
-			var r Receipt
-			if json.Unmarshal(raw, &r) == nil && !r.CreatedAt.IsZero() {
-				ts = r.CreatedAt
-			}
-		}
-		if ts.Before(cutoff) {
-			_ = os.Remove(full)
-			continue
-		}
-		kept = append(kept, fileAge{path: full, ts: ts})
+		kept = append(kept, fileAge{path: filepath.Join(s.Dir, entry.Name()), ts: ts})
 	}
 	if len(kept) <= maxFiles {
 		return nil
@@ -176,6 +197,28 @@ func (s *Store) Prune() error {
 		_ = os.Remove(old.path)
 	}
 	return nil
+}
+
+func (s *Store) entryTime(entry os.DirEntry) time.Time {
+	info, err := entry.Info()
+	if err != nil {
+		return time.Time{}
+	}
+	ts := info.ModTime()
+	if raw, err := os.ReadFile(filepath.Join(s.Dir, entry.Name())); err == nil {
+		var r Receipt
+		if json.Unmarshal(raw, &r) == nil && !r.CreatedAt.IsZero() {
+			ts = r.CreatedAt
+		}
+	}
+	return ts
+}
+
+func (s *Store) maxAge() time.Duration {
+	if s.MaxAge > 0 {
+		return s.MaxAge
+	}
+	return DefaultMaxAge
 }
 
 func (s *Store) now() time.Time {

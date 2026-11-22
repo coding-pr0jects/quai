@@ -56,11 +56,17 @@ auto_restack = false            # When true, automatically restack clean local c
 allowed_signers = ".quai/allowed_signers" # OpenSSH allowed_signers file for verifying CI attestations.
 signing_key = ""                          # Optional default SSH private key path (or QUAI_SIGNING_KEY / git user.signingkey).
 signers = []                              # Optional principal allowlist (empty = any key in allowed_signers).
-max_age = "14d"                           # Max attestation age (supports d/h/m/s). Default: "14d".
+max_age = "14d"                           # Max attestation age (supports d/h/m/s; minimum 1m). Default: "14d".
 remote = "origin"                         # Default remote for refs/quai/records/* push and fetch.
 auto_sign = false                         # Best-effort sign passing receipts in verify, pre-push, and land.
 auto_push = false                         # Implies auto_sign; push signed attestation refs automatically.
+auto_prune = false                        # Best-effort prune of expired state after verify or land. Default: false.
+prune_interval = "24h"                    # Minimum time between automatic prunes. Supports d/h/m/s. Default: "24h".
 ```
+
+Automatic pruning reads these fields from the remote default branch (`refs/remotes/origin/HEAD`, resolved from `base` only when `base` is a plain branch name) rather than the working tree, so a pull request branch cannot widen a destructive maintenance pass. The manual `quai gc` command uses the working tree's configuration because the operator invoked it explicitly. `max_age` must be at least `1m`.
+
+If `refs/remotes/origin/HEAD` is unset, which `git init` + `git remote add` + `git fetch` leaves unset, automatic pruning is skipped with a warning and `quai doctor` warns. Run `git remote set-head origin --auto` to resolve it.
 
 Steps also accept an optional `signers = ["alice@example.com"]` array to restrict which principals may attest a specific step.
 

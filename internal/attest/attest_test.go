@@ -536,3 +536,67 @@ max_age = "14d"
 		t.Fatalf("expected real attestation to pass under --config-ref origin/main, got res=%+v err=%v", accepted, err)
 	}
 }
+
+func TestPruneDryRunDoesNotFetch(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	keyPath, _ := genSSHKey(t, tmp, "dryrun_signer")
+	origin := filepath.Join(tmp, "origin.git")
+	devRepo := filepath.Join(tmp, "dev")
+	ciRepo := filepath.Join(tmp, "ci")
+	gitRun(t, tmp, "init", "--bare", "-q", "-b", "main", origin)
+	gitRun(t, tmp, "init", "-q", "-b", "main", devRepo)
+	gitRun(t, devRepo, "config", "user.name", "dev")
+	gitRun(t, devRepo, "config", "user.email", "dev@example.com")
+	gitRun(t, devRepo, "remote", "add", "origin", origin)
+	writeFile(t, filepath.Join(devRepo, "app.go"), "package app\n")
+	gitRun(t, devRepo, "add", "-A")
+	gitRun(t, devRepo, "commit", "-q", "-m", "init")
+	gitRun(t, devRepo, "push", "-q", "-u", "origin", "main")
+
+	cfg, err := config.Parse([]byte("version = 1\n[attest]\nmax_age = \"1h\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	devGit := repo.NewExecGit(devRepo)
+	ref, _, err := WriteRecord(ctx, devGit, receipt.Receipt{
+		Version:     receipt.CurrentVersion,
+		Fingerprint: strings.Repeat("a", 64),
+		Step:        "fast",
+		Passed:      true,
+		CreatedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}, keyPath, "dev@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := devGit.PushRefs(ctx, "origin", []string{ref}); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, tmp, "clone", "-q", "-b", "main", origin, ciRepo)
+	ciGit := repo.NewExecGit(ciRepo)
+
+	res, err := Prune(ctx, ciGit, cfg, PruneOptions{
+		DryRun: true,
+		Now:    func() time.Time { return time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("Prune dry-run: %v", err)
+	}
+	if len(res.PrunedLocal) != 0 || len(res.PrunedRemote) != 0 {
+		t.Fatalf("remote-only refs are not fetchable in a dry run: %+v", res)
+	}
+	local, err := ciGit.ListRefs(ctx, RefPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(local) != 0 {
+		t.Fatalf("dry run fetched refs into the clone: %v", local)
+	}
+}
+
+func TestPruneRejectsMaxAgeBelowMinimum(t *testing.T) {
+	_, err := Prune(context.Background(), nil, &config.Config{}, PruneOptions{MaxAge: 30 * time.Second})
+	if err == nil || !strings.Contains(err.Error(), "minimum") {
+		t.Fatalf("Prune error = %v, want a minimum max_age error", err)
+	}
+}

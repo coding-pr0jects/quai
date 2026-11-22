@@ -39,3 +39,4 @@ Each feature file starts with an H1 title and one summary paragraph, followed by
 - [Patch-id and hooks](./patch-id-and-hooks.md) covers `quai patch-id` verdict survival after rebase, drift detection, and `quai hooks` installation, non-destructive refusal, and fast `pre-push` receipt hits.
 - [Detached runs](./detached-runs.md) covers `quai verify --detach`, `--wait`, and `--stop`, `quai exec --detach`, dead-run cleanup after `SIGKILL`, and per-worktree isolation.
 - [Land pull requests](./land-pr.md) covers `quai land` dry-run planning, direct merge, `git merge-tree` optimistic merge, rebase-and-merge with conflict abort, and draft or fork refusal.
+- [Garbage collection](./gc.md) covers `quai gc`, dry-run non-mutation, automatic pruning after `verify`/`land`, rate limiting, and warnings on remote failure.

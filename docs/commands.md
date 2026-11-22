@@ -48,6 +48,7 @@ quai verify --stop [<run-id>] [--json]
 - **Mutation guard:** if a passing step edits tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai` refuses to write a receipt, reports `status: "mutated"` with `mutated_paths`, and exits `1`.
 - **Conditional pools:** a step with `pool_when` or `pool_tiers` acquires its `pool` only for matching diffs and otherwise runs with `slots = 0`, still writing receipts and signing attestations. Human output prints `pool <step>: routed to|bypassed <pool> ...`, then `pool <step>: acquired <pool>` only once the slot lock is held; JSON adds `pool` and `pool_acquired`, with `pool_acquired: false` on a slot timeout (see [configuration](configuration.md#conditional-pool-routing)).
 - Stops at the first failing or mutating step.
+- When `[attest].auto_prune = true` on the remote default branch, runs one best-effort maintenance pass after the steps complete, at most once per `[attest].prune_interval`. The policy is read only from `refs/remotes/origin/<base>` when `<base>` is a plain branch name equal to `origin/HEAD`; any other value skips automatic pruning with a warning. If `refs/remotes/origin/HEAD` is unset, run `git remote set-head origin --auto`. Prune failures are warnings on stderr and never change the verify outcome.
 
 ### JSON output
 
@@ -166,8 +167,9 @@ quai attest prune [--max-age <duration>] [--remote <name>] [--local-only] [--dry
 
 ### `quai attest prune`
 
-- Deletes attestation refs under `refs/quai/records/*` whose signed `created_at` timestamp exceeds `--max-age` (default `[attest].max_age`) or whose payload is unreadable.
+- Deletes attestation refs under `refs/quai/records/*` whose signed `created_at` timestamp exceeds `--max-age` (default `[attest].max_age`, minimum `1m`) or whose payload is unreadable.
 - Prunes both local and remote refs unless `--local-only` is passed; pass `--dry-run` to preview without deleting.
+- A dry run never fetches, so it previews record refs already known locally plus their remote counterparts. A remote error still reports local progress and exits `1`.
 
 ### GitHub Actions usage
 
@@ -363,6 +365,8 @@ When verification fails after the rebase (or the lease-pinned push is refused), 
 
 Every `gh` call retries up to 3 times, waiting 2 s, 5 s, then 10 s, when it fails on a transient network error: `TLS handshake timeout`, `EOF`, `connection reset`, `i/o timeout`, or HTTP 5xx. Each retry is reported on stderr. Semantic refusals (HTTP 4xx such as 403 and 422, `CONFLICTING`, failing checks) are never retried. When a `gh pr merge` response is lost, `quai` checks that the PR is merged at the expected head before retrying, so a merge that already happened is reported as merged.
 
+When `[attest].auto_prune = true` on the remote default branch, a non-dry-run landing runs the same best-effort maintenance pass as `quai verify`, at most once per `[attest].prune_interval`. If `refs/remotes/origin/HEAD` is unset, run `git remote set-head origin --auto`. `quai land --dry-run` never prunes.
+
 ### JSON output
 
 ```json
@@ -379,6 +383,58 @@ Every `gh` call retries up to 3 times, waiting 2 s, 5 s, then 10 s, when it fail
 ```
 
 `failure` is absent unless a landing failed for a reason with a stable code; today the only code is `post-rebase-verify-failed`.
+
+---
+
+## `quai gc`
+
+Run the unified maintenance pass on demand: expired receipts, expired `refs/quai/records/*` (local and remote), expired verdicts, and stale lock directories. Detached run directories under `runs/` self-prune to the 20 newest and are not part of this pass.
+
+```bash
+quai gc [--dry-run] [--json]
+```
+
+### Flags
+
+- `--dry-run`: List what would be removed without mutating any git ref, file, or lock directory. A dry run never fetches, so it reports record refs already known locally plus their remote counterparts.
+- `--json`: Print the structured result.
+
+### Behavior
+
+- Uses `[attest].max_age` for receipts, attestation refs, and verdicts, and `[attest].remote` for remote record refs. The manual command uses the working tree's `.quai.toml`; the automatic pass reads `[attest]` only from the remote default branch (`refs/remotes/origin/HEAD`), so a PR branch cannot widen it.
+- Automatic pruning rejects a `base` that is not a plain branch name, or whose `refs/remotes/origin/<base>` is not the remote default branch (`@`, `HEAD`, `main@{upstream}`, a PR's own branch), and skips with a warning.
+- Automatic pruning also skips when `refs/remotes/origin/HEAD` is unset, which happens in repositories made with `git init`, `git remote add`, and `git fetch`. The warning names the fix; run `git remote set-head origin --auto`, and `quai doctor` reports the same warning.
+- Removes a lock directory only when its lease is dead or its owner file has been absent longer than 10 seconds, guarded by the lock's takeover directory. A live holder is never deleted.
+- Every category is best effort: a transient remote or filesystem error becomes a warning and the rest of the pass still completes.
+- A non-dry run serializes through `prune.lock` and writes the `<git-common-dir>/quai/last-prune` stamp atomically, which also rate-limits automatic pruning.
+
+### JSON output
+
+```json
+{
+	"ok": true,
+	"dry_run": true,
+	"max_age": "336h0m0s",
+	"remote": "origin",
+	"removed": [
+		{
+			"kind": "receipt",
+			"name": ".git/quai/receipts/fast-7a8b.json",
+			"location": "local",
+			"reason": "expired"
+		},
+		{
+			"kind": "attestation_ref",
+			"name": "refs/quai/records/fast-7a8b",
+			"location": "remote",
+			"reason": "expired"
+		}
+	],
+	"kept": 12
+}
+```
+
+When `dry_run` is `true`, `removed` lists what would be removed. Warnings appear both in `warnings` and on stderr.
 
 ---
 

@@ -15,6 +15,9 @@ import (
 
 const FileName = ".quai.toml"
 
+// MinAttestMaxAge is the shortest accepted [attest].max_age or --max-age.
+const MinAttestMaxAge = time.Minute
+
 type Tier string
 
 const (
@@ -137,14 +140,17 @@ func (s Step) lowestPoolTier() int {
 }
 
 type AttestPolicy struct {
-	AllowedSigners string        `toml:"allowed_signers"`
-	SigningKey     string        `toml:"signing_key"`
-	Signers        []string      `toml:"signers"`
-	MaxAge         string        `toml:"max_age"`
-	Remote         string        `toml:"remote"`
-	AutoSign       bool          `toml:"auto_sign"`
-	AutoPush       bool          `toml:"auto_push"`
-	MaxAgeDur      time.Duration `toml:"-"`
+	AllowedSigners   string        `toml:"allowed_signers"`
+	SigningKey       string        `toml:"signing_key"`
+	Signers          []string      `toml:"signers"`
+	MaxAge           string        `toml:"max_age"`
+	Remote           string        `toml:"remote"`
+	AutoSign         bool          `toml:"auto_sign"`
+	AutoPush         bool          `toml:"auto_push"`
+	AutoPrune        bool          `toml:"auto_prune"`
+	PruneInterval    string        `toml:"prune_interval"`
+	MaxAgeDur        time.Duration `toml:"-"`
+	PruneIntervalDur time.Duration `toml:"-"`
 }
 
 type TierPolicy struct {
@@ -367,7 +373,19 @@ func (c *Config) normalizeAndValidate() error {
 		if err != nil || d <= 0 {
 			return fmt.Errorf("invalid attest.max_age %q", c.Attest.MaxAge)
 		}
+		if d < MinAttestMaxAge {
+			return fmt.Errorf("invalid attest.max_age %q: must be at least %s", c.Attest.MaxAge, MinAttestMaxAge)
+		}
 		c.Attest.MaxAgeDur = d
+	}
+	if c.Attest.PruneInterval == "" {
+		c.Attest.PruneIntervalDur = 24 * time.Hour
+	} else {
+		d, err := ParseDuration(c.Attest.PruneInterval)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("invalid attest.prune_interval %q", c.Attest.PruneInterval)
+		}
+		c.Attest.PruneIntervalDur = d
 	}
 	return nil
 }

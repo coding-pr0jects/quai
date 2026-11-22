@@ -21,6 +21,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/detach"
 	"github.com/coding-pr0jects/quai/internal/execrun"
 	"github.com/coding-pr0jects/quai/internal/forge"
+	"github.com/coding-pr0jects/quai/internal/gc"
 	"github.com/coding-pr0jects/quai/internal/hooks"
 	"github.com/coding-pr0jects/quai/internal/land"
 	"github.com/coding-pr0jects/quai/internal/lock"
@@ -48,6 +49,7 @@ Usage:
   quai land <pr> [--dry-run] [--method squash|merge|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]
   quai restack <old-parent-tip> [--base <ref>] [--push] [--remote <name>] [--json]
   quai hooks install|uninstall|pre-push [--json]
+  quai gc [--dry-run] [--json]
   quai status [--json]
   quai doctor [--json]
   quai conflicts [--base <ref>] [--conflicts-only] [--json]
@@ -126,6 +128,8 @@ func run(ctx context.Context, args []string, cwd string, stdin io.Reader, stdout
 		return runRestack(ctx, cwd, rest, stdout, stderr)
 	case "hooks":
 		return runHooks(ctx, cwd, rest, stdout, stderr)
+	case "gc":
+		return runGC(ctx, cwd, rest, stdout, stderr)
 	case "status":
 		return runStatus(ctx, cwd, rest, stdout, stderr)
 	case "doctor":
@@ -216,6 +220,7 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 	if *detachRun {
 		return startDetached(ctx, g, top, cwd, append([]string{"verify"}, forwardFlags(fs, "detach", "json")...), *jsonOut, stdout, stderr)
 	}
+	defer gc.MaybeAuto(ctx, g, cfg, stderr)
 	doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, *sign, *noSign, *push, *noPush)
 	var onStepStart func(execrun.Process)
 	if rec != nil {
@@ -462,6 +467,10 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 				fmt.Fprintf(stderr, "quai attest prune: invalid --max-age %q\n", *maxAgeStr)
 				return 2
 			}
+			if maxAge < config.MinAttestMaxAge {
+				fmt.Fprintf(stderr, "quai attest prune: --max-age must be at least %s\n", config.MinAttestMaxAge)
+				return 2
+			}
 		}
 		res, err := attest.Prune(ctx, g, cfg, attest.PruneOptions{
 			MaxAge:    maxAge,
@@ -469,10 +478,6 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 			LocalOnly: *localOnly,
 			DryRun:    *dryRun,
 		})
-		if err != nil {
-			fmt.Fprintf(stderr, "quai attest prune: %v\n", err)
-			return 1
-		}
 		if *jsonOut {
 			writeJSON(stdout, res)
 		} else {
@@ -481,6 +486,10 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 				prefix = "would prune"
 			}
 			fmt.Fprintf(stdout, "%s %d local and %d remote attestation(s) (kept %d)\n", prefix, len(res.PrunedLocal), len(res.PrunedRemote), res.Kept)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "quai attest prune: %v\n", err)
+			return 1
 		}
 		return 0
 
@@ -741,6 +750,9 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 		fmt.Fprintf(stderr, "quai land: %v\n", err)
 		return 2
 	}
+	if !*dryRun {
+		defer gc.MaybeAuto(ctx, g, cfg, stderr)
+	}
 	res, err := land.Run(ctx, g, f, cfg, land.Options{
 		PRNumber:       prNum,
 		DryRun:         *dryRun,
@@ -855,6 +867,70 @@ func runHooks(ctx context.Context, cwd string, args []string, stdout, stderr io.
 	}
 }
 
+func runGC(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dryRun := fs.Bool("dry-run", false, "list what would be removed without mutating refs, files, or locks")
+	jsonOut := fs.Bool("json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "quai gc: unexpected arguments: %v\n", fs.Args())
+		return 2
+	}
+	g, cfg, _, err := loadRepoAndConfig(ctx, cwd)
+	if err != nil {
+		fmt.Fprintf(stderr, "quai gc: %v\n", err)
+		return 2
+	}
+	if !*dryRun {
+		lease, err := gc.Acquire(ctx, g, "quai gc", 30*time.Second)
+		if err != nil {
+			var te *lock.TimeoutError
+			if errors.As(err, &te) {
+				fmt.Fprintf(stderr, "quai gc: %v\n", err)
+				return 4
+			}
+			fmt.Fprintf(stderr, "quai gc: acquire prune lock: %v\n", err)
+			return 1
+		}
+		defer lease.Release()
+	}
+	res, err := gc.Run(ctx, g, cfg, gc.Options{DryRun: *dryRun})
+	if err != nil {
+		fmt.Fprintf(stderr, "quai gc: %v\n", err)
+		return 1
+	}
+	if !*dryRun {
+		if commonDir, err := g.CommonDir(ctx); err == nil && ctx.Err() == nil {
+			if err := gc.WriteStamp(commonDir, time.Now().UTC()); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("last-prune stamp: %v", err))
+			}
+		}
+	}
+	for _, w := range res.Warnings {
+		fmt.Fprintf(stderr, "quai gc: warning: %s\n", w)
+	}
+	if *jsonOut {
+		writeJSON(stdout, res)
+		return 0
+	}
+	verb := "removed"
+	if res.DryRun {
+		verb = "would remove"
+	}
+	fmt.Fprintf(stdout, "%s %d item(s), kept %d\n", verb, len(res.Removed), res.Kept)
+	for _, item := range res.Removed {
+		location := ""
+		if item.Location != "" {
+			location = " [" + item.Location + "]"
+		}
+		fmt.Fprintf(stdout, "  %s%s %s (%s)\n", item.Kind, location, item.Name, item.Reason)
+	}
+	return 0
+}
+
 func runStatus(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -915,6 +991,15 @@ func runStatus(ctx context.Context, cwd string, args []string, stdout, stderr io
 	fmt.Fprintf(stdout, "receipts: %d cached, attestations: %d local\n", rep.ReceiptCount, rep.AttestCount)
 	for _, r := range rep.Runs {
 		fmt.Fprintf(stdout, "run %s: %s (pid %d, quai %s, %s)\n", r.ID, r.State, r.PID, strings.Join(r.Args, " "), r.Worktree)
+	}
+	if rep.AutoPrune {
+		last := "never"
+		if rep.LastPrune != nil {
+			last = rep.LastPrune.UTC().Format(time.RFC3339)
+		}
+		fmt.Fprintf(stdout, "prune: automatic every %s (last %s)\n", rep.PruneInterval, last)
+	} else {
+		fmt.Fprintln(stdout, "prune: manual (quai gc)")
 	}
 	return 0
 }

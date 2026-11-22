@@ -10,10 +10,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coding-pr0jects/quai/internal/attest"
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/detach"
+	"github.com/coding-pr0jects/quai/internal/gc"
 	"github.com/coding-pr0jects/quai/internal/hooks"
 	"github.com/coding-pr0jects/quai/internal/land"
 	"github.com/coding-pr0jects/quai/internal/lock"
@@ -47,6 +49,9 @@ type Report struct {
 	ReceiptCount      int               `json:"receipt_count"`
 	AttestCount       int               `json:"attestation_count"`
 	Runs              []detach.Status   `json:"runs,omitempty"`
+	AutoPrune         bool              `json:"auto_prune"`
+	PruneInterval     string            `json:"prune_interval,omitempty"`
+	LastPrune         *time.Time        `json:"last_prune,omitempty"`
 }
 
 type CheckItem struct {
@@ -168,6 +173,16 @@ func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error
 	}
 	rep.Runs = detach.NewStore(commonDir).Active()
 
+	if cfg != nil {
+		rep.AutoPrune = cfg.Attest.AutoPrune
+		if cfg.Attest.PruneIntervalDur > 0 {
+			rep.PruneInterval = cfg.Attest.PruneIntervalDur.String()
+		}
+	}
+	if last, ok := gc.ReadStamp(commonDir); ok {
+		rep.LastPrune = &last
+	}
+
 	return rep, nil
 }
 
@@ -205,6 +220,8 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 		return rep
 	}
 	add(CheckItem{Name: "config", Status: "ok", Message: fmt.Sprintf(".quai.toml valid (%d step(s), %d slot pool(s))", len(cfg.Steps), len(cfg.Slots))})
+
+	add(checkAutoPrune(ctx, g, cfg))
 
 	// 3. pre-push hook wiring
 	if len(cfg.PrePushSteps()) > 0 {
@@ -290,6 +307,26 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 	}
 
 	return rep
+}
+
+func checkAutoPrune(ctx context.Context, g repo.Git, cfg *config.Config) CheckItem {
+	const name = "auto-prune"
+	if head, err := g.SymbolicRef(ctx, "refs/remotes/origin/HEAD"); err == nil {
+		return CheckItem{Name: name, Status: "ok", Message: "remote default branch " + head}
+	}
+	enabled, err := gc.BaseAutoPrune(ctx, g, cfg)
+	if err != nil {
+		return CheckItem{Name: name, Status: "ok", Message: "no trusted base policy to check"}
+	}
+	if enabled {
+		return CheckItem{
+			Name:    name,
+			Status:  "warn",
+			Message: "automatic pruning is skipped because refs/remotes/origin/HEAD is unset",
+			Fix:     "Run git remote set-head origin --auto",
+		}
+	}
+	return CheckItem{Name: name, Status: "ok", Message: "automatic pruning is not enabled on the base branch"}
 }
 
 func checkPrePushHook(ctx context.Context, g repo.Git, topLevel string) CheckItem {
