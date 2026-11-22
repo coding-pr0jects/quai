@@ -30,5 +30,5 @@ body:
     attributes:
       label: Scope check
       options:
-        - label: I checked SPEC.md and RESEARCH.md to verify this does not duplicate an existing feature or explicit non-goal
+        - label: I checked docs/commands.md and the "What quai is not" section of AGENTS.md to verify this does not duplicate an existing feature or explicit non-goal
           required: true

@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- `AGENTS.md` (imported by `CLAUDE.md`) and `GLOSSARY.md` for contributors and coding agents.
+
+### Changed
+- `docs/agents.md` is now `docs/agent-integration.md`; the `verify-quai` harness moved to `.agents/skills/verify-quai/`, linked from `.claude/skills/` and `.cursor/skills/`.
+- `internal/attest` and `internal/verdict` are classified `full-live` in this repository's `.quai.toml`.
+
+### Removed
+- `SPEC.md` (v0.1 contract, superseded by `docs/`) and `RESEARCH.md`; their non-goals now live in `AGENTS.md`.
+
 ## [0.3.0] - 2026-11-22
 
 ### Added

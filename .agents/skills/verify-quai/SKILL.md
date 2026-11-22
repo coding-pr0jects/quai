@@ -15,7 +15,7 @@ Pick a unique `QUAI_VERIFY_RUN_ID` so concurrent runs never collide, then launch
 
 ```bash
 export QUAI_VERIFY_RUN_ID="run-$(date +%s)-$$"
-.cursor/skills/verify-quai/quai-verify launch
+.agents/skills/verify-quai/quai-verify launch
 ```
 
 `launch` compiles `./cmd/quai` into `/tmp/quai-verify-$QUAI_VERIFY_RUN_ID/bin/quai`, initializes a bare remote `origin.git`, creates a clean git repository with `.quai.toml` and baseline files, pushes `main`, and attaches a linked worktree on `feat/wt`.
@@ -27,7 +27,7 @@ Ready means `launch` exits `0` and prints `LAUNCHED`, `SCRATCH`, `EVIDENCE`, and
 Run this read-only check before driving or whenever a run behaves unexpectedly:
 
 ```bash
-.cursor/skills/verify-quai/quai-verify doctor
+.agents/skills/verify-quai/quai-verify doctor
 ```
 
 It verifies that the freshly built `quai` binary executes `quai version`, that both the scratch repo and its linked worktree exist, prints the system `git` version (must be 2.38+ for `git merge-tree`), and confirms the evidence directory exists.
@@ -37,8 +37,8 @@ It verifies that the freshly built `quai` binary executes `quai version`, that b
 Run commands in the main scratch checkout with `run` or in the linked worktree with `run-wt`:
 
 ```bash
-.cursor/skills/verify-quai/quai-verify run <label> -- quai verify --json
-.cursor/skills/verify-quai/quai-verify run-wt <label> -- quai tier --json
+.agents/skills/verify-quai/quai-verify run <label> -- quai verify --json
+.agents/skills/verify-quai/quai-verify run-wt <label> -- quai tier --json
 ```
 
 Each invocation puts `/tmp/quai-verify-$QUAI_VERIFY_RUN_ID/bin` first on `PATH`, runs the exact command, prints the full transcript, and saves `<label>.txt` under `/tmp/quai-verify-evidence-$QUAI_VERIFY_RUN_ID/` with command, working directory, exit code, stdout, and stderr.
@@ -59,7 +59,7 @@ Standards:
 List all captured artifacts with:
 
 ```bash
-.cursor/skills/verify-quai/quai-verify evidence
+.agents/skills/verify-quai/quai-verify evidence
 ```
 
 ## Cleanup
@@ -67,11 +67,11 @@ List all captured artifacts with:
 Always run cleanup after a run, including after failed attempts:
 
 ```bash
-.cursor/skills/verify-quai/quai-verify cleanup
+.agents/skills/verify-quai/quai-verify cleanup
 ```
 
 `cleanup` deletes `/tmp/quai-verify-$QUAI_VERIFY_RUN_ID` and never deletes `/tmp/quai-verify-evidence-$QUAI_VERIFY_RUN_ID`. Confirm after cleanup that the evidence files remain readable. Never kill processes by name; kill only PIDs spawned by the verification script.
 
 ## Helpers
 
-- `.cursor/skills/verify-quai/quai-verify`: executable bash harness providing `launch`, `doctor`, `run`, `run-wt`, `evidence`, and `cleanup`.
+- `.agents/skills/verify-quai/quai-verify`: executable bash harness providing `launch`, `doctor`, `run`, `run-wt`, `evidence`, and `cleanup`.

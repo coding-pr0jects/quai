@@ -12,17 +12,20 @@ quai/
 ├── internal/
 │   ├── attest/        # in-toto v1 / DSSE v1 envelopes, ssh-keygen -Y (namespace quai), refs/quai/records/*, --onto check
 │   ├── config/        # .quai.toml decoding, defaults, validation, SHA placeholder expansion
+│   ├── conflicts/     # read-only merge-tree and file-overlap checks across linked worktrees
 │   ├── glob/          # double-star (**) path glob matcher shared by config, receipt, tier, land
 │   ├── repo/          # Git interface and ExecGit adapter (diff, ls-tree, merge-tree, patch-id, rebase)
-│   ├── lock/          # atomic POSIX mkdir locks, dead-PID .takeover, named slot semaphores
+│   ├── lock/          # mkdir locks, leases with heartbeats, FIFO queues, slot pools, min_free_mem
 │   ├── execrun/       # process-group command runner (Setpgid) with signal cleanup and slot binding
 │   ├── receipt/       # input fingerprinting, atomic JSON writes, lookup, retention pruning
 │   ├── verify/        # step orchestration, cache lookup, mutation guard
 │   ├── tier/          # pure diff risk classifier, R100 rename handling, test-tamper scanner
 │   ├── patchid/       # pure patch-id survival comparator and per-file drift detector
 │   ├── hooks/         # non-destructive pre-push installer and receipt fast path
+│   ├── status/        # read-only quai status inspection and quai doctor readiness checks
+│   ├── verdict/       # review verdicts keyed by patch-id under refs/quai/verdicts/<patch-id>
 │   ├── forge/         # Forge interface and gh CLI implementation
-│   └── land/          # pure DecideLand state machine and locked landing executor
+│   └── land/          # pure DecideLand state machine, locked landing executor, stacked PR restack
 ```
 
 ## Pure engines vs side-effect adapters
@@ -31,6 +34,36 @@ quai/
 
 - **Pure decision engines:** `internal/tier` (classification + tamper detection), `internal/patchid` (diff survival), and `internal/land` (`DecideLand`) take plain structs and return plain decisions. Unit tests cover every branch and edge case in milliseconds without spawning `gh` or touching a network.
 - **Side-effect adapters:** `internal/repo` (`repo.Git` interface + `ExecGit`) and `internal/forge` (`forge.Forge` interface + `GHForge`) isolate external binaries behind narrow interfaces so integration tests can use either real temporary git repositories or in-memory fakes.
+
+## Core data shapes
+
+The JSON field names below are part of the `--json` and on-disk contract. Renaming one is a breaking change.
+
+```go
+// internal/config
+type Tier string // "gate-only" | "diff-audit" | "full-live"
+
+// internal/receipt: <git-common-dir>/quai/receipts/<step>-<fingerprint>.json
+type Receipt struct {
+	Version     int       `json:"version"`
+	Fingerprint string    `json:"fingerprint"` // sha256(step.run, sorted input paths + blob hashes, lockfiles)
+	TreeSHA     string    `json:"tree_sha"`
+	HeadSHA     string    `json:"head_sha"`
+	BaseSHA     string    `json:"base_sha"`
+	Step        string    `json:"step"`
+	Passed      bool      `json:"passed"`
+	DurationMS  int64     `json:"duration_ms"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// internal/land
+type Action string // "refuse" | "direct-merge" | "optimistic-merge" | "rebase-and-merge"
+
+// internal/verdict: refs/quai/verdicts/<patch-id>
+type Status string // "approved" | "rejected"
+```
+
+Attestations wrap a `Receipt` in an in-toto v1 statement inside a DSSE v1 envelope, signed with `ssh-keygen -Y sign` (namespace `quai`) and stored under `refs/quai/records/<step>-<fingerprint>`.
 
 ## Shared state on disk
 
@@ -41,19 +74,24 @@ All mutable state lives inside `<git-common-dir>/quai/` (resolved via `git rev-p
 ├── locks/
 │   ├── land.lock/
 │   │   └── owner
-│   └── slot-<pool>-<index>.lock/
-│       └── owner
+│   ├── land.lock.queue/          # FIFO waiter tickets
+│   ├── slot-<pool>-<index>.lock/
+│   │   └── owner
+│   ├── slot-<pool>.queue/
+│   └── inflight-<step>-<fingerprint>.lock/   # dedupes concurrent identical verify runs
 └── receipts/
     └── <step>-<fingerprint>.json
 ```
 
 ### Atomic lock and dead-PID recovery (`internal/lock`)
 
-1. Acquisition creates `<lock-dir>` with `os.Mkdir`, which is atomic on POSIX filesystems.
-2. The holder writes `<lock-dir>/owner` atomically via temp file + rename containing `{pid, command, worktree, acquired_at}`.
-3. If `os.Mkdir` returns `EEXIST`, a waiter reads `owner` and probes `kill(pid, 0)`.
-4. If the holder PID is dead (`ESRCH`), the waiter acquires `<lock-dir>.takeover`, re-reads `owner` to confirm the same dead PID, atomically replaces `owner` with its own metadata, and removes `.takeover`.
-5. If `owner` is absent for over 10 seconds, the waiter emits a warning naming the lock directory without breaking it.
+1. When the lock is held or others already wait, a waiter writes a ticket into the lock's queue directory (`land.lock.queue/`, `slot-<pool>.queue/`), and only the oldest live ticket may try to acquire, so waiters never starve.
+2. Acquisition creates `<lock-dir>` with `os.Mkdir`, which is atomic on POSIX filesystems.
+3. The holder writes `<lock-dir>/owner` atomically via temp file + rename. The owner is a lease: `{pid, host, pid_ns, token, command, worktree, acquired_at, heartbeat_at}`, with `heartbeat_at` refreshed every 5 seconds.
+4. A holder is dead when its heartbeat is older than 30 seconds, or, on the same host and Linux PID namespace, when `kill(pid, 0)` returns `ESRCH`. A PID from another host or namespace is never probed, so a container never steals a live lock.
+5. To take over a dead holder, the waiter acquires `<lock-dir>.takeover`, re-reads `owner` to confirm the same dead lease, atomically replaces `owner` with its own, and removes `.takeover`.
+6. If `owner` is absent for over 10 seconds, the waiter emits a warning naming the lock directory without breaking it.
+7. A slot pool with `min_free_mem` grants a slot only while Linux `MemAvailable` stays above that threshold.
 
 ### Process-group isolation (`internal/execrun`)
 
@@ -69,4 +107,4 @@ Every child command runs in its own process group (`SysProcAttr{Setpgid: true}`)
 ## Testing layers
 
 - **Package unit tests (`go test -race ./...`):** Pure table-driven tests for config, glob, tier, patchid, and `DecideLand`; concurrency and `SIGKILL` takeover tests for `lock`; real temporary git repo integration tests for `repo`, `receipt`, `verify`, `hooks`, and `land`.
-- **Isolated CLI harness (`.cursor/skills/verify-quai/`):** Builds the real `quai` binary into `/tmp/quai-verify-<run-id>/bin/quai`, initializes a bare remote plus repo and linked worktree, drives every CLI subcommand end-to-end, and persists full transcripts as evidence.
+- **Isolated CLI harness (`.agents/skills/verify-quai/`):** Builds the real `quai` binary into `/tmp/quai-verify-<run-id>/bin/quai`, initializes a bare remote plus repo and linked worktree, drives every CLI subcommand end-to-end, and persists full transcripts as evidence.

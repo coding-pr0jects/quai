@@ -22,7 +22,5 @@
 
 ## Checklist
 
-- [ ] Changes follow the one-feature-per-folder layout under `internal/<feature>/`
-- [ ] Decision logic stays pure and unit-tested without network or `gh` calls
-- [ ] No untrusted forge metadata is passed to `sh -c`
-- [ ] Documentation (`README.md`, `docs/`, `SPEC.md`, `CHANGELOG.md`) updated where behavior changed
+- [ ] Changes follow the rules of [AGENTS.md](../AGENTS.md)
+- [ ] Documentation (`README.md`, `docs/`, `GLOSSARY.md`, `CHANGELOG.md`) updated where behavior changed
