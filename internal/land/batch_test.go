@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -260,46 +261,53 @@ func summarize(res BatchResult) []entrySummary {
 }
 
 func TestRunBatchLandsDisjointPRsBeforeRebasingOverlap(t *testing.T) {
-	ctx := context.Background()
-	fx := newBatchFixture(t, []batchPR{
-		{number: 101, branch: "feat/a", file: "a.txt", body: "a\n"},
-		{number: 102, branch: "feat/shared", file: "shared.txt", body: "1\n2\n3\n4\nfive\n"},
-		{number: 103, branch: "feat/c", file: "c.txt", body: "c\n"},
-	}, map[string]string{"shared.txt": "one\n2\n3\n4\n5\n"})
+	for _, overlapHasWorktree := range []bool{true, false} {
+		t.Run(fmt.Sprintf("overlap worktree=%v", overlapHasWorktree), func(t *testing.T) {
+			ctx := context.Background()
+			fx := newBatchFixture(t, []batchPR{
+				{number: 101, branch: "feat/a", file: "a.txt", body: "a\n"},
+				{number: 102, branch: "feat/shared", file: "shared.txt", body: "1\n2\n3\n4\nfive\n"},
+				{number: 103, branch: "feat/c", file: "c.txt", body: "c\n"},
+			}, map[string]string{"shared.txt": "one\n2\n3\n4\n5\n"})
+			if !overlapHasWorktree {
+				gitRun(t, fx.mainDir, "worktree", "remove", fx.wt[102])
+			}
 
-	dry, err := fx.run(t, ctx, BatchOptions{PRNumbers: []int{101, 102, 103}, Options: Options{DryRun: true}})
-	if err != nil || !dry.OK || !dry.DryRun {
-		t.Fatalf("dry run: res=%+v err=%v", dry, err)
-	}
-	wantPlan := []entrySummary{
-		{101, BatchPlanned, ActionOptimisticMerge},
-		{103, BatchPlanned, ActionOptimisticMerge},
-		{102, BatchPlanned, ActionRebaseAndMerge},
-	}
-	if got := summarize(dry); !reflect.DeepEqual(got, wantPlan) {
-		t.Fatalf("dry-run plan = %+v, want %+v", got, wantPlan)
-	}
-	if len(fx.forge.merged) != 0 {
-		t.Fatalf("dry run merged %v", fx.forge.merged)
-	}
+			dry, err := fx.run(t, ctx, BatchOptions{PRNumbers: []int{101, 102, 103}, Options: Options{DryRun: true}})
+			if err != nil || !dry.OK || !dry.DryRun {
+				t.Fatalf("dry run: res=%+v err=%v", dry, err)
+			}
+			wantPlan := []entrySummary{
+				{101, BatchPlanned, ActionOptimisticMerge},
+				{103, BatchPlanned, ActionOptimisticMerge},
+				{102, BatchPlanned, ActionRebaseAndMerge},
+			}
+			if got := summarize(dry); !reflect.DeepEqual(got, wantPlan) {
+				t.Fatalf("dry-run plan = %+v, want %+v", got, wantPlan)
+			}
+			if len(fx.forge.merged) != 0 {
+				t.Fatalf("dry run merged %v", fx.forge.merged)
+			}
 
-	res, err := fx.run(t, ctx, BatchOptions{PRNumbers: []int{101, 102, 103}, ContinueOnError: true})
-	if err != nil || !res.OK {
-		t.Fatalf("batch: res=%+v err=%v", res, err)
-	}
-	want := []entrySummary{
-		{101, BatchLanded, ActionOptimisticMerge},
-		{103, BatchLanded, ActionOptimisticMerge},
-		{102, BatchLanded, ActionRebaseAndMerge},
-	}
-	if got := summarize(res); !reflect.DeepEqual(got, want) {
-		t.Fatalf("batch = %+v, want %+v", got, want)
-	}
-	if !reflect.DeepEqual(fx.forge.merged, []int{101, 103, 102}) {
-		t.Fatalf("merge order = %v, want [101 103 102]", fx.forge.merged)
-	}
-	if got := gitRun(t, fx.mainDir, "show", "origin/main:shared.txt"); got != "one\n2\n3\n4\nfive" {
-		t.Fatalf("shared.txt on main = %q", got)
+			res, err := fx.run(t, ctx, BatchOptions{PRNumbers: []int{101, 102, 103}, ContinueOnError: true})
+			if err != nil || !res.OK {
+				t.Fatalf("batch: res=%+v err=%v", res, err)
+			}
+			want := []entrySummary{
+				{101, BatchLanded, ActionOptimisticMerge},
+				{103, BatchLanded, ActionOptimisticMerge},
+				{102, BatchLanded, ActionRebaseAndMerge},
+			}
+			if got := summarize(res); !reflect.DeepEqual(got, want) {
+				t.Fatalf("batch = %+v, want %+v", got, want)
+			}
+			if !reflect.DeepEqual(fx.forge.merged, []int{101, 103, 102}) {
+				t.Fatalf("merge order = %v, want [101 103 102]", fx.forge.merged)
+			}
+			if got := gitRun(t, fx.mainDir, "show", "origin/main:shared.txt"); got != "one\n2\n3\n4\nfive" {
+				t.Fatalf("shared.txt on main = %q", got)
+			}
+		})
 	}
 }
 
