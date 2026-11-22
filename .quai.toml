@@ -26,6 +26,8 @@ default = "diff-audit"
 full_live = [
 	"internal/lock/**",
 	"internal/land/**",
+	"internal/attest/**",
+	"internal/verdict/**",
 	"cmd/quai/**"
 ]
 gate_only = [
