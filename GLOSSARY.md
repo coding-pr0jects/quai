@@ -70,7 +70,7 @@ The normalized `reason` that `quai attest check` gives every step: `verified`, `
 _Avoid_: error, failure code.
 
 **Exit kind**
-The normalized `exit_kind` on `quai verify --json` and `quai land --json`: `pass`, `step_failed`, `step_timeout`, `lock_timeout`, `oom_killed`, `dirty_tree`, or `infra_error`. It separates environment pressure from a failing step, while exit codes keep their meaning.
+The normalized `exit_kind` on `quai verify --json` and `quai land --json`: `pass`, `step_failed`, `step_timeout`, `lock_timeout`, `oom_killed`, `dirty_tree`, `refused`, or `infra_error`. It separates environment pressure from a failing step, while exit codes keep their meaning. `refused` means `quai land` deliberately declined the request (draft, fork, wrong branch, stale head, or missing verdict); an agent should not retry it as an infrastructure failure. A dirty checkout stays `dirty_tree`. A batch `quai land` reports the worst member kind, or `pass` when every PR landed.
 _Avoid_: failure type, exit status (that is the numeric code).
 
 ## Concurrency

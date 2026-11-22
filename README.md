@@ -185,7 +185,7 @@ Exit codes are uniform across commands:
 | `3` | Git rebase conflict encountered and cleanly aborted |
 | `4` | Lock or slot acquisition timed out, or `quai verify --wait` reached `--max` while the run still runs |
 
-`quai verify --json` and `quai land --json` also include a normalized `exit_kind` (`pass`, `step_failed`, `step_timeout`, `lock_timeout`, `oom_killed`, `dirty_tree`, `infra_error`) so automation can retry an environment failure instead of treating it as a code failure.
+`quai verify --json` and `quai land --json` also include a normalized `exit_kind` (`pass`, `step_failed`, `step_timeout`, `lock_timeout`, `oom_killed`, `dirty_tree`, `refused`, `infra_error`) so automation can retry an environment failure instead of treating it as a code failure, and can tell a deliberate refusal from an infra error.
 
 ## Composing with `weave`
 

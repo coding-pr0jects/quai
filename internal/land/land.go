@@ -182,7 +182,14 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 		return Result{}, err
 	}
 	if d, ok := admit(pr); !ok {
-		return Result{DryRun: opts.DryRun, PR: opts.PRNumber, Action: ActionRefuse, Reason: d.Reason, URL: pr.URL}, nil
+		return Result{
+			ExitKind: exitkind.Refused,
+			DryRun:   opts.DryRun,
+			PR:       opts.PRNumber,
+			Action:   ActionRefuse,
+			Reason:   d.Reason,
+			URL:      pr.URL,
+		}, nil
 	}
 	branch, err := g.CurrentBranch(ctx)
 	if err != nil {
@@ -238,7 +245,9 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 	return landLocked(ctx, g, ws, branch, f, cfg, opts, method)
 }
 
-func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f forge.Forge, cfg *config.Config, opts Options, method config.MergeMethod) (Result, error) {
+func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f forge.Forge, cfg *config.Config, opts Options, method config.MergeMethod) (res Result, runErr error) {
+	defer func() { res.ExitKind = landExitKind(res, runErr) }()
+
 	var (
 		pr      forge.PullRequest
 		headSHA string
@@ -328,14 +337,15 @@ func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f
 		}
 		if vRefuse != "" {
 			return Result{
-				OK:      false,
-				PR:      opts.PRNumber,
-				Action:  ActionRefuse,
-				Reason:  vRefuse,
-				HeadSHA: headSHA,
-				URL:     pr.URL,
-				PatchID: patchRes,
-				Verdict: verdictRes,
+				OK:       false,
+				ExitKind: exitkind.Refused,
+				PR:       opts.PRNumber,
+				Action:   ActionRefuse,
+				Reason:   vRefuse,
+				HeadSHA:  headSHA,
+				URL:      pr.URL,
+				PatchID:  patchRes,
+				Verdict:  verdictRes,
 			}, nil
 		}
 
@@ -660,7 +670,7 @@ func refusalExitKind(clean bool) exitkind.Kind {
 	if !clean {
 		return exitkind.Classify(false, exitkind.Facts{DirtyTree: true})
 	}
-	return exitkind.Classify(false, exitkind.Facts{})
+	return exitkind.Classify(false, exitkind.Facts{Refused: true})
 }
 
 func landExitKind(res Result, err error) exitkind.Kind {
@@ -670,7 +680,7 @@ func landExitKind(res Result, err error) exitkind.Kind {
 		return exitkind.Classify(false, exitkind.Facts{LockTimedOut: true})
 	case res.ExitKind != "":
 		return res.ExitKind
-	case res.OK:
+	case res.OK && err == nil:
 		return exitkind.Pass
 	default:
 		return exitkind.Classify(false, exitkind.Facts{})

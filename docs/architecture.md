@@ -66,7 +66,7 @@ type Action string // "refuse" | "direct-merge" | "optimistic-merge" | "rebase-a
 type Status string // "approved" | "rejected"
 
 // internal/exitkind
-type Kind string // "pass" | "step_failed" | "step_timeout" | "lock_timeout" | "oom_killed" | "dirty_tree" | "infra_error"
+type Kind string // "pass" | "step_failed" | "step_timeout" | "lock_timeout" | "oom_killed" | "dirty_tree" | "refused" | "infra_error"
 ```
 
 Attestations wrap a `Receipt` in an in-toto v1 statement inside a DSSE v1 envelope, signed with `ssh-keygen -Y sign` (namespace `quai`) and stored under `refs/quai/records/<step>-<fingerprint>`.

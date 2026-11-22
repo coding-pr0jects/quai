@@ -11,6 +11,9 @@ import (
 	"regexp"
 	"testing"
 	"time"
+
+	"github.com/coding-pr0jects/quai/internal/exitkind"
+	"github.com/coding-pr0jects/quai/internal/land"
 )
 
 const defaultCLITestConfig = `
@@ -189,6 +192,39 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 		if code := run(ctx, args, dir, bytes.NewReader(nil), &out, &errBuf); code != 2 {
 			t.Fatalf("%v: expected exit 2, got %d (%s)", args, code, errBuf.String())
 		}
+	}
+}
+
+func TestPrintBatchHumanIncludesExitKindPerPR(t *testing.T) {
+	res := land.BatchResult{ExitKind: exitkind.StepFailed, PRs: []land.BatchEntry{
+		{Result: land.Result{ExitKind: exitkind.StepFailed, PR: 102, Action: land.ActionOptimisticMerge, Reason: "boom"}, Status: land.BatchFailed},
+		{Result: land.Result{ExitKind: exitkind.Pass, PR: 103, Action: land.ActionDirectMerge, Reason: "ok"}, Status: land.BatchLanded},
+	}}
+	var buf bytes.Buffer
+	printBatchHuman(&buf, res)
+	want := "#102: failed optimistic-merge (boom)\nexit_kind: step_failed\n" +
+		"#103: landed direct-merge (ok)\nexit_kind: pass\n"
+	if buf.String() != want {
+		t.Fatalf("printBatchHuman =\n%q\nwant\n%q", buf.String(), want)
+	}
+}
+
+func TestCLILandHumanOutputOnForgeFailurePrintsExitKind(t *testing.T) {
+	ctx := context.Background()
+	dir := initCLITestRepo(t)
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var out, errBuf bytes.Buffer
+	code := run(ctx, []string{"land", "1", "--dry-run"}, dir, bytes.NewReader(nil), &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("land exited %d, want 1: stdout=%s stderr=%s", code, out.String(), errBuf.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte("exit_kind: infra_error")) {
+		t.Fatalf("expected exit_kind in land human output, got: %s", out.String())
 	}
 }
 

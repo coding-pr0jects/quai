@@ -461,3 +461,59 @@ func TestShellQuote(t *testing.T) {
 		}
 	}
 }
+
+func TestDoctorDiskCheckNamesPoolInSortedOrder(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "user.name", "t")
+	runGit("config", "user.email", "t@example.com")
+	body := `
+version = 1
+
+[slots.beta]
+capacity = 1
+min_free_disk = "999999999G"
+
+[slots.alpha]
+capacity = 1
+min_free_disk = "999999999G"
+`
+	if err := os.WriteFile(filepath.Join(dir, ".quai.toml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-qm", "init")
+
+	g := repo.NewExecGit(dir)
+	first := diskCheckMessage(t, Doctor(ctx, g))
+	second := diskCheckMessage(t, Doctor(ctx, g))
+	if !strings.Contains(first, `pool "alpha"`) {
+		t.Fatalf("expected the first pool alphabetically, got %q", first)
+	}
+	if first != second {
+		t.Fatalf("doctor disk message is not deterministic: %q vs %q", first, second)
+	}
+}
+
+func diskCheckMessage(t *testing.T, doc DoctorReport) string {
+	t.Helper()
+	for _, c := range doc.Checks {
+		if c.Name == "disk" {
+			if c.Status != "warn" {
+				t.Fatalf("expected disk warning, got %+v", c)
+			}
+			return c.Message
+		}
+	}
+	t.Fatalf("no disk check in %+v", doc.Checks)
+	return ""
+}

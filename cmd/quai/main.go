@@ -799,8 +799,10 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 	res, err := land.Run(ctx, g, f, cfg, opts)
 	if *jsonOut {
 		writeJSON(stdout, res)
-	} else if res.Action != "" {
-		fmt.Fprintf(stdout, "#%d: %s (%s)\n", res.PR, res.Action, res.Reason)
+	} else {
+		if res.Action != "" {
+			fmt.Fprintf(stdout, "#%d: %s (%s)\n", res.PR, res.Action, res.Reason)
+		}
 		fmt.Fprintf(stdout, "exit_kind: %s\n", res.ExitKind)
 	}
 	if err != nil {
@@ -830,12 +832,7 @@ func runLandBatch(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Co
 	if opts.JSON {
 		writeJSON(stdout, res)
 	} else {
-		for _, e := range res.PRs {
-			fmt.Fprintf(stdout, "#%d: %s %s (%s)\n", e.PR, e.Status, e.Action, e.Reason)
-			if e.Error != "" {
-				fmt.Fprintf(stdout, "#%d: error: %s\n", e.PR, e.Error)
-			}
-		}
+		printBatchHuman(stdout, res)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "quai land: %v\n", err)
@@ -852,6 +849,16 @@ func runLandBatch(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Co
 		return 1
 	}
 	return 0
+}
+
+func printBatchHuman(w io.Writer, res land.BatchResult) {
+	for _, e := range res.PRs {
+		fmt.Fprintf(w, "#%d: %s %s (%s)\n", e.PR, e.Status, e.Action, e.Reason)
+		if e.Error != "" {
+			fmt.Fprintf(w, "#%d: error: %s\n", e.PR, e.Error)
+		}
+		fmt.Fprintf(w, "exit_kind: %s\n", e.ExitKind)
+	}
 }
 
 func runHooks(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {

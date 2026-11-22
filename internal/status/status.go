@@ -243,7 +243,13 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 	if avail, ok := lock.ReadAvailableDisk(topLevel); ok {
 		rep.AvailableDiskBytes = avail
 		item := CheckItem{Name: "disk", Status: "ok", Message: fmt.Sprintf("%s free on %s", lock.FormatBytes(avail), topLevel)}
-		for name, pool := range cfg.Slots {
+		names := make([]string, 0, len(cfg.Slots))
+		for name := range cfg.Slots {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			pool := cfg.Slots[name]
 			if pool.MinFreeDiskBytes > 0 && avail < pool.MinFreeDiskBytes {
 				item.Status = "warn"
 				item.Message = fmt.Sprintf("%s free on %s, below min_free_disk %s for pool %q",
