@@ -16,8 +16,6 @@ import (
 	"github.com/coding-pr0jects/quai/internal/repo"
 )
 
-// coordinatorFixture is a repository whose main checkout (coord) sits on its own "coord" branch
-// while the PR branch "feat" is checked out in a linked delegation worktree (deleg).
 type coordinatorFixture struct {
 	t         *testing.T
 	tmp       string
@@ -122,8 +120,6 @@ func (fx *coordinatorFixture) run(ctx context.Context, g repo.Git, cfgText strin
 	return res, err
 }
 
-// assertNothingLeftBehind checks that no temporary land worktree remains, on disk or in git's list,
-// and that the delegation worktree still sits on its original commit.
 func (fx *coordinatorFixture) assertNothingLeftBehind() {
 	fx.t.Helper()
 	matches, _ := filepath.Glob(filepath.Join(fx.commonDir, "quai", TempWorktreePrefix+"*"))
@@ -306,5 +302,27 @@ func TestBaseConfigReadsOriginBase(t *testing.T) {
 	cfg, err := BaseConfig(ctx, fx.coordGit, fx.forge, fx.forge.pr.Number)
 	if err != nil || len(cfg.Land.RequiredChecks) != 1 || cfg.Land.RequiredChecks[0] != "from-base" {
 		t.Fatalf("BaseConfig = %+v, %v; want the policy of origin/main", cfg, err)
+	}
+}
+
+func TestLandChecksVerdictOfPRHeadFromCoordinator(t *testing.T) {
+	ctx := context.Background()
+	fx := newCoordinatorFixture(t, "")
+	const cfg = `version = 1
+[tiers]
+full_live = ["b.txt"]
+[land]
+required_checks = ["check"]
+require_verdict_tiers = ["full-live"]
+`
+	for _, dryRun := range []bool{true, false} {
+		res, err := fx.run(ctx, fx.coordGit, cfg, Options{DryRun: dryRun})
+		if err != nil || res.OK || res.Action != ActionRefuse || !strings.Contains(res.Reason, `tier "full-live"`) {
+			t.Fatalf("dry_run=%v: land = %+v, %v; want refusal for the PR head's full-live tier", dryRun, res, err)
+		}
+		fx.assertNothingLeftBehind()
+	}
+	if fx.forge.merged {
+		t.Fatal("a PR without an approved verdict was merged")
 	}
 }

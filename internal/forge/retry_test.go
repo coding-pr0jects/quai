@@ -153,7 +153,6 @@ func TestRetryMergeConfirmsLostResponse(t *testing.T) {
 	}
 }
 
-// lostResponseForge applies the merge but loses gh's response, as on a dropped connection.
 type lostResponseForge struct {
 	*flakyForge
 }

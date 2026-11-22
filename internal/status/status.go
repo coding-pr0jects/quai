@@ -78,7 +78,7 @@ func ParseGitVersion(output string) (major, minor int, ok bool) {
 }
 
 // Inspect collects read-only state for active locks, slot pools, in-flight verifications,
-// local receipts, and local signed attestations.
+// temporary land worktrees, local receipts, and local signed attestations.
 func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error) {
 	topLevel, err := g.TopLevel(ctx)
 	if err != nil {
@@ -172,7 +172,7 @@ func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error
 }
 
 // Doctor checks git version, .quai.toml, hook wiring, external tools, attestation setup,
-// and stale locks in the current repository.
+// stale locks, and leftover land worktrees in the current repository.
 func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 	rep := DoctorReport{OK: true}
 	add := func(item CheckItem) {

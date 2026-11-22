@@ -188,7 +188,7 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 	}
 	defer ws.close(ctx, opts.Stderr)
 
-	clean, headSHA, err := ws.head(ctx, pr)
+	clean, headSHA, err := ws.prHead(ctx, pr)
 	if err != nil {
 		return Result{}, err
 	}
@@ -243,7 +243,7 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 		if err != nil {
 			return Result{}, err
 		}
-		clean, headSHA, err = ws.head(ctx, pr)
+		clean, headSHA, err = ws.prHead(ctx, pr)
 		if err != nil {
 			return Result{}, err
 		}
@@ -415,9 +415,6 @@ type rebased struct {
 	verifyFailure string
 }
 
-// rebaseVerifyPush rebases the PR head checked out in wg onto origin/<base>, verifies the result, and
-// pushes it under a lease pinned to preRebaseSHA. Unless the push succeeds, it resets wg to preRebaseSHA,
-// so a failed landing never leaves the branch diverged from the remote PR head.
 func rebaseVerifyPush(ctx context.Context, wg repo.Git, cfg *config.Config, opts Options, pr forge.PullRequest, preRebaseSHA string) (rb rebased, err error) {
 	pushed := false
 	defer func() {
