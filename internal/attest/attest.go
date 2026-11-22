@@ -111,6 +111,24 @@ type PushResult struct {
 	Pushed []string `json:"pushed"`
 }
 
+type PruneOptions struct {
+	MaxAge    time.Duration
+	Remote    string
+	LocalOnly bool
+	DryRun    bool
+	Now       func() time.Time
+}
+
+type PruneResult struct {
+	OK           bool     `json:"ok"`
+	DryRun       bool     `json:"dry_run,omitempty"`
+	MaxAge       string   `json:"max_age"`
+	Remote       string   `json:"remote,omitempty"`
+	Kept         int      `json:"kept"`
+	PrunedLocal  []string `json:"pruned_local,omitempty"`
+	PrunedRemote []string `json:"pruned_remote,omitempty"`
+}
+
 // PAE returns the DSSE v1 Pre-Authentication Encoding over payloadType and payload.
 func PAE(payloadType string, payload []byte) []byte {
 	var buf bytes.Buffer
@@ -381,6 +399,134 @@ func Fetch(ctx context.Context, g repo.Git, remote string) error {
 	return g.FetchRefs(ctx, remote, RefPrefix+"*:"+RefPrefix+"*")
 }
 
+// FetchTargeted checks which of the requested refs exist on remote via one ls-remote call
+// and fetches only those exact refs in one git fetch call.
+func FetchTargeted(ctx context.Context, g repo.Git, remote string, refs []string) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	if remote == "" {
+		remote = "origin"
+	}
+	existing, err := g.ListRemoteRefs(ctx, remote, refs)
+	if err != nil {
+		return err
+	}
+	if len(existing) == 0 {
+		return nil
+	}
+	refspecs := make([]string, 0, len(existing))
+	for _, r := range existing {
+		refspecs = append(refspecs, r+":"+r)
+	}
+	return g.FetchRefspecs(ctx, remote, refspecs)
+}
+
+// Prune deletes expired or unreadable attestation refs under refs/quai/records/* locally
+// and, unless LocalOnly is set, on remote as well.
+func Prune(ctx context.Context, g repo.Git, cfg *config.Config, opts PruneOptions) (PruneResult, error) {
+	maxAge := opts.MaxAge
+	if maxAge <= 0 {
+		maxAge = cfg.Attest.MaxAgeDur
+	}
+	if maxAge <= 0 {
+		maxAge = 14 * 24 * time.Hour
+	}
+	remote := opts.Remote
+	if remote == "" {
+		remote = cfg.Attest.Remote
+	}
+	if remote == "" {
+		remote = "origin"
+	}
+	nowFn := opts.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	now := nowFn().UTC()
+
+	remoteSet := make(map[string]struct{})
+	if !opts.LocalOnly {
+		if err := Fetch(ctx, g, remote); err != nil {
+			return PruneResult{}, err
+		}
+		remoteRefs, err := g.ListRemoteRefs(ctx, remote, []string{RefPrefix + "*"})
+		if err != nil {
+			return PruneResult{}, err
+		}
+		for _, r := range remoteRefs {
+			remoteSet[r] = struct{}{}
+		}
+	}
+
+	localRefs, err := g.ListRefs(ctx, RefPrefix)
+	if err != nil {
+		return PruneResult{}, err
+	}
+
+	res := PruneResult{
+		OK:     true,
+		DryRun: opts.DryRun,
+		MaxAge: maxAge.String(),
+	}
+	if !opts.LocalOnly {
+		res.Remote = remote
+	}
+
+	var expiredLocal []string
+	var expiredRemote []string
+	for _, ref := range localRefs {
+		expired := isRefExpired(ctx, g, ref, maxAge, now)
+		if !expired {
+			res.Kept++
+			continue
+		}
+		expiredLocal = append(expiredLocal, ref)
+		if _, onRemote := remoteSet[ref]; onRemote {
+			expiredRemote = append(expiredRemote, ref)
+		}
+	}
+
+	if !opts.DryRun {
+		for _, ref := range expiredLocal {
+			if err := g.DeleteLocalRef(ctx, ref); err != nil {
+				return res, err
+			}
+		}
+		if !opts.LocalOnly && len(expiredRemote) > 0 {
+			if err := g.DeleteRemoteRefs(ctx, remote, expiredRemote); err != nil {
+				return res, err
+			}
+		}
+	}
+	res.PrunedLocal = expiredLocal
+	res.PrunedRemote = expiredRemote
+	return res, nil
+}
+
+func isRefExpired(ctx context.Context, g repo.Git, ref string, maxAge time.Duration, now time.Time) bool {
+	raw, ok, err := g.ReadRefBlob(ctx, ref, BlobFileName)
+	if err != nil || !ok {
+		return true
+	}
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return true
+	}
+	payload, err := base64.StdEncoding.DecodeString(env.Payload)
+	if err != nil {
+		return true
+	}
+	var stmt Statement
+	if err := json.Unmarshal(payload, &stmt); err != nil {
+		return true
+	}
+	if stmt.Predicate.CreatedAt.IsZero() {
+		return true
+	}
+	return now.Sub(stmt.Predicate.CreatedAt) > maxAge
+}
+
 // Push pushes local signed attestation refs for the current tree's selected steps to remote.
 func Push(ctx context.Context, g repo.Git, cfg *config.Config, opts PushOptions) (PushResult, error) {
 	remote := opts.Remote
@@ -431,11 +577,6 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 	if remote == "" {
 		remote = cfg.Attest.Remote
 	}
-	if opts.Fetch {
-		if err := Fetch(ctx, g, remote); err != nil {
-			return CheckResult{}, err
-		}
-	}
 
 	steps, err := selectSteps(cfg, opts.StepNames)
 	if err != nil {
@@ -482,31 +623,41 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 		Onto:    opts.Onto,
 	}
 
+	stepFPs := make([]string, len(steps))
+	targetRefs := make([]string, len(steps))
+	for i, step := range steps {
+		fp, err := receipt.Fingerprint(ctx, g, step, treeSHA, baseSHA)
+		if err != nil {
+			return res, err
+		}
+		stepFPs[i] = fp
+		targetRefs[i] = RefName(step.Name, fp)
+	}
+
 	if ShouldSample(opts.Sample, rollFn) {
 		res.OK = false
 		res.Sampled = true
-		for _, step := range steps {
-			fp, err := receipt.Fingerprint(ctx, g, step, treeSHA, baseSHA)
-			if err != nil {
-				return res, err
-			}
+		for i, step := range steps {
 			res.Steps = append(res.Steps, StepCheck{
 				Name:        step.Name,
 				Status:      "sampled",
-				Fingerprint: fp,
-				Ref:         RefName(step.Name, fp),
+				Fingerprint: stepFPs[i],
+				Ref:         targetRefs[i],
 				Error:       fmt.Sprintf("selected for probabilistic audit rerun (--sample %d%%)", opts.Sample),
 			})
 		}
 		return res, nil
 	}
 
-	for _, step := range steps {
-		fp, err := receipt.Fingerprint(ctx, g, step, treeSHA, baseSHA)
-		if err != nil {
-			return res, err
+	if opts.Fetch {
+		if err := FetchTargeted(ctx, g, remote, targetRefs); err != nil {
+			return CheckResult{}, err
 		}
-		ref := RefName(step.Name, fp)
+	}
+
+	for i, step := range steps {
+		fp := stepFPs[i]
+		ref := targetRefs[i]
 		env, ok, err := ReadRecord(ctx, g, step.Name, fp)
 		if err != nil {
 			res.OK = false

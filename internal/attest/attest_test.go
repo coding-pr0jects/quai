@@ -286,3 +286,143 @@ max_age = "14d"
 		t.Fatalf("CI working tree dirtied after merge-tree conflict: clean=%v err=%v", clean, err)
 	}
 }
+
+func TestTargetedFetchAndPrune(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	keyPath, pubKey := genSSHKey(t, tmp, "prune_signer")
+
+	origin := filepath.Join(tmp, "origin.git")
+	devRepo := filepath.Join(tmp, "dev")
+	ciRepo := filepath.Join(tmp, "ci")
+
+	gitRun(t, tmp, "init", "--bare", "-q", "-b", "main", origin)
+	gitRun(t, tmp, "init", "-q", "-b", "main", devRepo)
+	gitRun(t, devRepo, "config", "user.name", "dev")
+	gitRun(t, devRepo, "config", "user.email", "dev@example.com")
+	gitRun(t, devRepo, "remote", "add", "origin", origin)
+
+	writeFile(t, filepath.Join(devRepo, ".quai/allowed_signers"), "dev@example.com "+pubKey+"\n")
+	writeFile(t, filepath.Join(devRepo, "src/app.go"), "package app\n")
+	gitRun(t, devRepo, "add", "-A")
+	gitRun(t, devRepo, "commit", "-q", "-m", "init")
+	gitRun(t, devRepo, "push", "-q", "-u", "origin", "main")
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+inputs = ["src/**"]
+
+[[steps]]
+name = "slow"
+run = "true"
+inputs = ["src/**"]
+
+[attest]
+allowed_signers = ".quai/allowed_signers"
+max_age = "7d"
+`))
+	if err != nil {
+		t.Fatalf("Parse config: %v", err)
+	}
+
+	devGit := repo.NewExecGit(devRepo)
+	headSHA, _ := devGit.HeadSHA(ctx)
+	treeSHA, _ := devGit.TreeSHA(ctx, "HEAD")
+	baseSHA, _ := devGit.MergeBase(ctx, "origin/main", "HEAD")
+	fastFP, err := receipt.Fingerprint(ctx, devGit, cfg.Steps[0], treeSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+
+	// Write one fresh attestation for "fast" and one expired unrelated attestation.
+	freshRef, _, err := WriteRecord(ctx, devGit, receipt.Receipt{
+		Version:     receipt.CurrentVersion,
+		Fingerprint: fastFP,
+		TreeSHA:     treeSHA,
+		HeadSHA:     headSHA,
+		BaseSHA:     baseSHA,
+		Step:        "fast",
+		Passed:      true,
+		CreatedAt:   now.Add(-24 * time.Hour),
+	}, keyPath, "dev@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleRef, _, err := WriteRecord(ctx, devGit, receipt.Receipt{
+		Version:     receipt.CurrentVersion,
+		Fingerprint: strings.Repeat("e", 64),
+		TreeSHA:     treeSHA,
+		HeadSHA:     headSHA,
+		BaseSHA:     baseSHA,
+		Step:        "fast",
+		Passed:      true,
+		CreatedAt:   now.Add(-30 * 24 * time.Hour),
+	}, keyPath, "dev@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := devGit.PushRefs(ctx, "origin", []string{freshRef, staleRef}); err != nil {
+		t.Fatalf("PushRefs: %v", err)
+	}
+
+	// Targeted fetch in CI clone requesting both "fast" (exists) and "slow" (missing on remote)
+	// must fetch only freshRef and NOT pull staleRef.
+	gitRun(t, tmp, "clone", "-q", "-b", "main", origin, ciRepo)
+	ciGit := repo.NewExecGit(ciRepo)
+	res, err := Check(ctx, ciGit, cfg, CheckOptions{
+		Fetch: true,
+		Now:   func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("Check targeted fetch failed: %v", err)
+	}
+	if res.OK || len(res.Steps) != 2 || res.Steps[0].Status != "verified" || res.Steps[1].Status != "missing" {
+		t.Fatalf("unexpected mixed step check result: %+v", res)
+	}
+	ciLocalRefs, err := ciGit.ListRefs(ctx, RefPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ciLocalRefs) != 1 || ciLocalRefs[0] != freshRef {
+		t.Fatalf("expected targeted fetch to pull only [%s], got %v", freshRef, ciLocalRefs)
+	}
+
+	// Prune --dry-run must report staleRef without deleting it.
+	dryRes, err := Prune(ctx, devGit, cfg, PruneOptions{
+		DryRun: true,
+		Now:    func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("Prune dry-run: %v", err)
+	}
+	if dryRes.Kept != 1 || len(dryRes.PrunedLocal) != 1 || dryRes.PrunedLocal[0] != staleRef || len(dryRes.PrunedRemote) != 1 {
+		t.Fatalf("unexpected dry-run prune result: %+v", dryRes)
+	}
+
+	// Real prune deletes staleRef locally and remotely while preserving freshRef.
+	pruneRes, err := Prune(ctx, devGit, cfg, PruneOptions{
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if pruneRes.Kept != 1 || len(pruneRes.PrunedLocal) != 1 || len(pruneRes.PrunedRemote) != 1 {
+		t.Fatalf("unexpected prune result: %+v", pruneRes)
+	}
+
+	remainingLocal, _ := devGit.ListRefs(ctx, RefPrefix)
+	remainingRemote, _ := devGit.ListRemoteRefs(ctx, "origin", []string{RefPrefix + "*"})
+	if len(remainingLocal) != 1 || remainingLocal[0] != freshRef {
+		t.Fatalf("remaining local refs = %v, want [%s]", remainingLocal, freshRef)
+	}
+	if len(remainingRemote) != 1 || remainingRemote[0] != freshRef {
+		t.Fatalf("remaining remote refs = %v, want [%s]", remainingRemote, freshRef)
+	}
+}

@@ -34,7 +34,7 @@ const rootUsage = `quai: local verification, signed attestations, receipts, risk
 
 Usage:
   quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign] [--key <path>] [--push] [--remote <name>] [--json]
-  quai attest check|push|fetch [flags...]
+  quai attest check|push|fetch|prune [flags...]
   quai exec --pool <name> [--slots <n>] [--wait <duration>] -- <command...>
   quai tier [--since <ref>] [--json]
   quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]
@@ -174,7 +174,7 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 
 func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "Usage: quai attest check|push|fetch [flags...]")
+		fmt.Fprintln(stderr, "Usage: quai attest check|push|fetch|prune [flags...]")
 		return 2
 	}
 	action := args[0]
@@ -318,8 +318,57 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 		}
 		return 0
 
+	case "prune":
+		fs := flag.NewFlagSet("attest prune", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		maxAgeStr := fs.String("max-age", "", "maximum age before pruning (defaults to [attest].max_age)")
+		remote := fs.String("remote", "", "git remote")
+		localOnly := fs.Bool("local-only", false, "only prune local refs/quai/records/*")
+		dryRun := fs.Bool("dry-run", false, "preview refs that would be pruned without deleting")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(rest); err != nil {
+			return 2
+		}
+		if fs.NArg() > 0 {
+			fmt.Fprintf(stderr, "quai attest prune: unexpected arguments: %v\n", fs.Args())
+			return 2
+		}
+		g, cfg, _, err := loadRepoAndConfig(ctx, cwd)
+		if err != nil {
+			fmt.Fprintf(stderr, "quai attest prune: %v\n", err)
+			return 2
+		}
+		var maxAge time.Duration
+		if *maxAgeStr != "" {
+			maxAge, err = config.ParseDuration(*maxAgeStr)
+			if err != nil || maxAge <= 0 {
+				fmt.Fprintf(stderr, "quai attest prune: invalid --max-age %q\n", *maxAgeStr)
+				return 2
+			}
+		}
+		res, err := attest.Prune(ctx, g, cfg, attest.PruneOptions{
+			MaxAge:    maxAge,
+			Remote:    *remote,
+			LocalOnly: *localOnly,
+			DryRun:    *dryRun,
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "quai attest prune: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			writeJSON(stdout, res)
+		} else {
+			prefix := "pruned"
+			if res.DryRun {
+				prefix = "would prune"
+			}
+			fmt.Fprintf(stdout, "%s %d local and %d remote attestation(s) (kept %d)\n", prefix, len(res.PrunedLocal), len(res.PrunedRemote), res.Kept)
+		}
+		return 0
+
 	default:
-		fmt.Fprintf(stderr, "quai attest: unknown subcommand %q (expected check, push, or fetch)\n", action)
+		fmt.Fprintf(stderr, "quai attest: unknown subcommand %q (expected check, push, fetch, or prune)\n", action)
 		return 2
 	}
 }

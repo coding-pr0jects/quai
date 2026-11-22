@@ -68,6 +68,11 @@ type Git interface {
 	ReadRefBlob(ctx context.Context, refName, fileName string) ([]byte, bool, error)
 	PushRefs(ctx context.Context, remote string, refs []string) error
 	FetchRefs(ctx context.Context, remote, refspec string) error
+	FetchRefspecs(ctx context.Context, remote string, refspecs []string) error
+	ListRefs(ctx context.Context, prefix string) ([]string, error)
+	ListRemoteRefs(ctx context.Context, remote string, patterns []string) ([]string, error)
+	DeleteLocalRef(ctx context.Context, refName string) error
+	DeleteRemoteRefs(ctx context.Context, remote string, refs []string) error
 }
 
 type ExecGit struct {
@@ -465,13 +470,77 @@ func (g *ExecGit) PushRefs(ctx context.Context, remote string, refs []string) er
 
 // FetchRefs fetches a refspec from remote. Missing remote refs are treated as an empty no-op.
 func (g *ExecGit) FetchRefs(ctx context.Context, remote, refspec string) error {
-	_, errOut, err := g.run(ctx, nil, "fetch", "--quiet", remote, refspec)
+	return g.FetchRefspecs(ctx, remote, []string{refspec})
+}
+
+// FetchRefspecs fetches one or more explicit refspecs from remote.
+// Missing remote refs are treated as an empty no-op.
+func (g *ExecGit) FetchRefspecs(ctx context.Context, remote string, refspecs []string) error {
+	if len(refspecs) == 0 {
+		return nil
+	}
+	args := make([]string, 0, len(refspecs)+3)
+	args = append(args, "fetch", "--quiet", remote)
+	args = append(args, refspecs...)
+	_, errOut, err := g.run(ctx, nil, args...)
 	if err != nil {
 		msg := strings.TrimSpace(string(errOut))
 		if strings.Contains(msg, "couldn't find remote ref") || strings.Contains(msg, "no matching remote") {
 			return nil
 		}
-		return fmt.Errorf("git fetch %s %s: %w (%s)", remote, refspec, err, msg)
+		return fmt.Errorf("git fetch %s %s: %w (%s)", remote, strings.Join(refspecs, " "), err, msg)
+	}
+	return nil
+}
+
+// ListRefs returns all local ref names matching prefix.
+func (g *ExecGit) ListRefs(ctx context.Context, prefix string) ([]string, error) {
+	out, errOut, err := g.run(ctx, nil, "for-each-ref", "--format=%(refname)", prefix)
+	if err != nil {
+		return nil, fmt.Errorf("git for-each-ref %s: %w (%s)", prefix, err, strings.TrimSpace(string(errOut)))
+	}
+	return nonEmptyLines(string(out)), nil
+}
+
+// ListRemoteRefs queries remote via ls-remote for refs matching patterns and returns their ref names.
+func (g *ExecGit) ListRemoteRefs(ctx context.Context, remote string, patterns []string) ([]string, error) {
+	args := make([]string, 0, len(patterns)+3)
+	args = append(args, "ls-remote", "--quiet", remote)
+	args = append(args, patterns...)
+	out, errOut, err := g.run(ctx, nil, args...)
+	if err != nil {
+		return nil, fmt.Errorf("git ls-remote %s: %w (%s)", remote, err, strings.TrimSpace(string(errOut)))
+	}
+	var refs []string
+	for _, line := range nonEmptyLines(string(out)) {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			refs = append(refs, fields[1])
+		}
+	}
+	return refs, nil
+}
+
+// DeleteLocalRef removes a single local ref.
+func (g *ExecGit) DeleteLocalRef(ctx context.Context, refName string) error {
+	if _, errOut, err := g.run(ctx, nil, "update-ref", "-d", refName); err != nil {
+		return fmt.Errorf("git update-ref -d %s: %w (%s)", refName, err, strings.TrimSpace(string(errOut)))
+	}
+	return nil
+}
+
+// DeleteRemoteRefs deletes the given refs on remote in a single push.
+func (g *ExecGit) DeleteRemoteRefs(ctx context.Context, remote string, refs []string) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	args := make([]string, 0, len(refs)+2)
+	args = append(args, "push", remote)
+	for _, r := range refs {
+		args = append(args, ":"+r)
+	}
+	if _, errOut, err := g.run(ctx, nil, args...); err != nil {
+		return fmt.Errorf("git push delete %s: %w (%s)", remote, err, strings.TrimSpace(string(errOut)))
 	}
 	return nil
 }
