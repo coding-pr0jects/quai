@@ -10,12 +10,12 @@ Every feature owns a dedicated package under `internal/<feature>/`. `cmd/quai/` 
 quai/
 ├── cmd/quai/          # CLI entrypoint, subcommand routing, flag parsing, exit codes
 ├── internal/
-│   ├── attest/        # in-toto v1 / DSSE v1 envelopes, ssh-keygen -Y (namespace quai), refs/quai/records/*, --onto and --head (disjoint-base) checks
+│   ├── attest/        # in-toto v1 / DSSE v1 envelopes, ssh-keygen -Y (namespace quai), refs/quai/records/*, --onto and --head (disjoint-base) checks, miss reasons
 │   ├── config/        # .quai.toml decoding, defaults, validation, SHA placeholder expansion
 │   ├── conflicts/     # read-only merge-tree and file-overlap checks across linked worktrees
 │   ├── glob/          # double-star (**) path glob matcher shared by config, receipt, tier, land
 │   ├── gc/            # unified maintenance: expired receipts/attestation/verdict refs, stale locks, last-prune stamp
-│   ├── repo/          # Git interface and ExecGit adapter (diff, ls-tree, merge-tree, patch-id, rebase)
+│   ├── repo/          # Git interface and ExecGit adapter (diff, ls-tree, merge-tree, patch-id, rebase, FETCH_HEAD freshness)
 │   ├── lock/          # mkdir locks, leases with heartbeats, priority queues, slot pools, min_free_mem
 │   ├── execrun/       # process-group command runner (Setpgid) with signal cleanup and slot binding
 │   ├── receipt/       # input fingerprinting, atomic JSON writes, lookup, retention pruning

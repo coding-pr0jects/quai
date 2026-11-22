@@ -69,6 +69,28 @@ type VerifiedInfo struct {
 	Statement Statement
 }
 
+// Diagnostic reason values reported by quai attest check for every step.
+const (
+	ReasonVerified         = "verified"
+	ReasonNoRecord         = "no_record"
+	ReasonBaseMismatch     = "base_mismatch"
+	ReasonTreeMismatch     = "tree_mismatch"
+	ReasonConfigMismatch   = "config_mismatch"
+	ReasonSignatureInvalid = "signature_invalid"
+	ReasonExpired          = "expired"
+	ReasonSampled          = "sampled"
+)
+
+// VerificationError carries the normalized reason a stored record failed verification.
+type VerificationError struct {
+	Reason string
+	Err    error
+}
+
+func (e *VerificationError) Error() string { return e.Err.Error() }
+
+func (e *VerificationError) Unwrap() error { return e.Err }
+
 type CheckOptions struct {
 	StepNames      []string
 	Since          string
@@ -86,7 +108,10 @@ type CheckOptions struct {
 type StepCheck struct {
 	Name        string     `json:"name"`
 	Status      string     `json:"status"` // verified | missing | invalid | sampled
+	Reason      string     `json:"reason"`
 	Fingerprint string     `json:"fingerprint,omitempty"`
+	TreeSHA     string     `json:"tree_sha,omitempty"`
+	BaseSHA     string     `json:"base_sha,omitempty"`
 	Ref         string     `json:"ref,omitempty"`
 	Signer      string     `json:"signer,omitempty"`
 	CreatedAt   *time.Time `json:"created_at,omitempty"`
@@ -194,33 +219,32 @@ func ShouldSample(samplePct int, roll func() int) bool {
 	return roll() < samplePct
 }
 
-// VerifyStatement checks all non-cryptographic invariants of a decoded in-toto Statement.
-func VerifyStatement(stmt Statement, expectedStep, expectedFingerprint string, maxAge time.Duration, now time.Time) error {
+func verifyStatement(stmt Statement, expectedStep, expectedFingerprint string, maxAge time.Duration, now time.Time) (string, error) {
 	if stmt.Type != StatementType {
-		return fmt.Errorf("unexpected statement _type %q", stmt.Type)
+		return ReasonSignatureInvalid, fmt.Errorf("unexpected statement _type %q", stmt.Type)
 	}
 	if stmt.PredicateType != PredicateType {
-		return fmt.Errorf("unexpected predicateType %q", stmt.PredicateType)
+		return ReasonSignatureInvalid, fmt.Errorf("unexpected predicateType %q", stmt.PredicateType)
 	}
 	if !stmt.Predicate.Passed {
-		return errors.New("attestation predicate is not passing")
+		return ReasonSignatureInvalid, errors.New("attestation predicate is not passing")
 	}
 	if stmt.Predicate.Step != expectedStep {
-		return fmt.Errorf("attestation step %q does not match expected %q", stmt.Predicate.Step, expectedStep)
+		return ReasonConfigMismatch, fmt.Errorf("attestation step %q does not match expected %q", stmt.Predicate.Step, expectedStep)
 	}
 	if stmt.Predicate.Fingerprint != expectedFingerprint {
-		return fmt.Errorf("attestation fingerprint %q does not match expected %q", stmt.Predicate.Fingerprint, expectedFingerprint)
+		return ReasonConfigMismatch, fmt.Errorf("attestation fingerprint %q does not match expected %q", stmt.Predicate.Fingerprint, expectedFingerprint)
 	}
 	if len(stmt.Subject) == 0 || stmt.Subject[0].Digest["sha256"] != expectedFingerprint {
-		return errors.New("attestation subject sha256 does not match expected fingerprint")
+		return ReasonConfigMismatch, errors.New("attestation subject sha256 does not match expected fingerprint")
 	}
 	if stmt.Predicate.CreatedAt.IsZero() {
-		return errors.New("attestation missing created_at timestamp")
+		return ReasonSignatureInvalid, errors.New("attestation missing created_at timestamp")
 	}
 	if maxAge > 0 && now.Sub(stmt.Predicate.CreatedAt) > maxAge {
-		return fmt.Errorf("attestation expired (age %s > max_age %s)", now.Sub(stmt.Predicate.CreatedAt).Round(time.Second), maxAge)
+		return ReasonExpired, fmt.Errorf("attestation expired (age %s > max_age %s)", now.Sub(stmt.Predicate.CreatedAt).Round(time.Second), maxAge)
 	}
-	return nil
+	return ReasonVerified, nil
 }
 
 // SignPayload wraps raw JSON payload bytes in a DSSE v1 envelope signed with an OpenSSH
@@ -332,8 +356,8 @@ func VerifyEnvelope(
 	if err := json.Unmarshal(payload, &stmt); err != nil {
 		return VerifiedInfo{}, fmt.Errorf("decode in-toto statement: %w", err)
 	}
-	if err := VerifyStatement(stmt, expectedStep, expectedFingerprint, maxAge, now); err != nil {
-		return VerifiedInfo{}, err
+	if reason, err := verifyStatement(stmt, expectedStep, expectedFingerprint, maxAge, now); err != nil {
+		return VerifiedInfo{}, &VerificationError{Reason: reason, Err: err}
 	}
 	if len(env.Signatures) == 0 {
 		return VerifiedInfo{}, errors.New("DSSE envelope has no signatures")
@@ -370,7 +394,7 @@ func VerifyEnvelope(
 	if lastErr == nil {
 		lastErr = errors.New("no valid signature found")
 	}
-	return VerifiedInfo{}, lastErr
+	return VerifiedInfo{}, &VerificationError{Reason: ReasonSignatureInvalid, Err: lastErr}
 }
 
 // WriteRecord signs receipt r and stores the DSSE envelope under refs/quai/records/<step>-<fingerprint>.
@@ -626,6 +650,80 @@ func Push(ctx context.Context, g repo.Git, cfg *config.Config, opts PushOptions)
 	return PushResult{Remote: remote, Pushed: refs}, nil
 }
 
+// RecordCandidate identifies a stored attestation for a step under another fingerprint.
+type RecordCandidate struct {
+	Fingerprint string
+	TreeSHA     string
+	BaseSHA     string
+}
+
+// ClassifyMiss names the most specific reason no stored record matched treeSHA and baseSHA.
+func ClassifyMiss(treeSHA, baseSHA string, candidates []RecordCandidate) (reason, detail string) {
+	for _, c := range candidates {
+		if c.TreeSHA == treeSHA && c.BaseSHA == baseSHA {
+			return ReasonConfigMismatch, fmt.Sprintf(
+				"stored attestation %s matches tree and base but not the step fingerprint: step run, inputs, or lockfiles changed",
+				shortSHA(c.Fingerprint),
+			)
+		}
+	}
+	for _, c := range candidates {
+		if c.TreeSHA == treeSHA {
+			return ReasonBaseMismatch, fmt.Sprintf(
+				"stored attestation %s matches the current tree but was signed against base %s, current base is %s: the base moved or origin/<base> is stale",
+				shortSHA(c.Fingerprint), shortSHA(c.BaseSHA), shortSHA(baseSHA),
+			)
+		}
+	}
+	if len(candidates) > 0 {
+		c := candidates[0]
+		return ReasonTreeMismatch, fmt.Sprintf(
+			"stored attestation %s was signed for tree %s, current tree is %s: the tree changed since signing",
+			shortSHA(c.Fingerprint), shortSHA(c.TreeSHA), shortSHA(treeSHA),
+		)
+	}
+	return ReasonNoRecord, "no signed attestation found for fingerprint"
+}
+
+func diagnoseMiss(ctx context.Context, g repo.Git, stepName, treeSHA, baseSHA string) (string, string) {
+	refs, err := g.ListRefs(ctx, RefPrefix+stepName+"-*")
+	if err != nil {
+		return ReasonNoRecord, "no signed attestation found for fingerprint"
+	}
+	candidates := make([]RecordCandidate, 0, len(refs))
+	for _, ref := range refs {
+		raw, ok, err := g.ReadRefBlob(ctx, ref, BlobFileName)
+		if err != nil || !ok {
+			continue
+		}
+		var env Envelope
+		if json.Unmarshal(raw, &env) != nil {
+			continue
+		}
+		payload, err := base64.StdEncoding.DecodeString(env.Payload)
+		if err != nil {
+			continue
+		}
+		var stmt Statement
+		if json.Unmarshal(payload, &stmt) != nil || stmt.Predicate.Step != stepName {
+			continue
+		}
+		candidates = append(candidates, RecordCandidate{
+			Fingerprint: stmt.Predicate.Fingerprint,
+			TreeSHA:     stmt.Predicate.TreeSHA,
+			BaseSHA:     stmt.Predicate.BaseSHA,
+		})
+	}
+	return ClassifyMiss(treeSHA, baseSHA, candidates)
+}
+
+func shortSHA(s string) string {
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
+}
+
 // Check verifies signed attestations for the selected steps on HEAD (or virtual merge-tree --onto <ref>).
 // When opts.ConfigRef is set, .quai.toml is loaded from that git ref instead of the working tree.
 func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOptions) (CheckResult, error) {
@@ -716,6 +814,11 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 		Onto:      opts.Onto,
 		HeadSHA:   headSHA,
 	}
+	addStep := func(sc StepCheck) {
+		sc.TreeSHA = treeSHA
+		sc.BaseSHA = baseSHA
+		res.Steps = append(res.Steps, sc)
+	}
 
 	stepFPs := make([]string, len(steps))
 	targetRefs := make([]string, len(steps))
@@ -732,9 +835,10 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 		res.OK = false
 		res.Sampled = true
 		for i, step := range steps {
-			res.Steps = append(res.Steps, StepCheck{
+			addStep(StepCheck{
 				Name:        step.Name,
 				Status:      "sampled",
+				Reason:      ReasonSampled,
 				Fingerprint: stepFPs[i],
 				Ref:         targetRefs[i],
 				Error:       fmt.Sprintf("selected for probabilistic audit rerun (--sample %d%%)", opts.Sample),
@@ -751,7 +855,7 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 
 	c := stepChecker{g: g, cfg: cfg, allowedSigners: allowedSigners, now: now}
 	for i, step := range steps {
-		res.Steps = append(res.Steps, c.check(ctx, step, stepFPs[i], MatchExact))
+		res.Steps = append(res.Steps, c.check(ctx, step, stepFPs[i], MatchExact, treeSHA, baseSHA))
 	}
 	if headSHA != "" && anyStatus(res.Steps, "missing") {
 		if err := c.retryDisjointBase(ctx, steps, headSHA, opts.Fetch, remote, &res); err != nil {
@@ -810,31 +914,42 @@ func (c stepChecker) retryDisjointBase(ctx context.Context, steps []config.Step,
 		if fp == "" {
 			continue
 		}
-		if sc := c.check(ctx, steps[i], fp, MatchDisjointBase); sc.Status != "missing" {
+		if sc := c.check(ctx, steps[i], fp, MatchDisjointBase, headTree, in.OldBaseSHA); sc.Status != "missing" {
 			res.Steps[i] = sc
 		}
 	}
 	return nil
 }
 
-func (c stepChecker) check(ctx context.Context, step config.Step, fp, mode string) StepCheck {
-	sc := StepCheck{Name: step.Name, Fingerprint: fp, Ref: RefName(step.Name, fp)}
+func (c stepChecker) check(ctx context.Context, step config.Step, fp, mode, treeSHA, baseSHA string) StepCheck {
+	sc := StepCheck{
+		Name:        step.Name,
+		Fingerprint: fp,
+		Ref:         RefName(step.Name, fp),
+		TreeSHA:     treeSHA,
+		BaseSHA:     baseSHA,
+	}
 	env, ok, err := ReadRecord(ctx, c.g, step.Name, fp)
 	if err != nil {
-		sc.Status, sc.Error = "invalid", err.Error()
+		sc.Status, sc.Reason, sc.Error = "invalid", ReasonSignatureInvalid, err.Error()
 		return sc
 	}
 	if !ok {
-		sc.Status, sc.Error = "missing", "no signed attestation found for fingerprint"
+		sc.Status = "missing"
+		sc.Reason, sc.Error = diagnoseMiss(ctx, c.g, step.Name, treeSHA, baseSHA)
 		return sc
 	}
 	info, err := VerifyEnvelope(ctx, env, c.allowedSigners, c.cfg.AllowedPrincipalsFor(step), step.Name, fp, c.cfg.Attest.MaxAgeDur, c.now)
 	if err != nil {
-		sc.Status, sc.Error = "invalid", err.Error()
+		sc.Status, sc.Reason, sc.Error = "invalid", ReasonSignatureInvalid, err.Error()
+		var verr *VerificationError
+		if errors.As(err, &verr) && verr.Reason != "" {
+			sc.Reason = verr.Reason
+		}
 		return sc
 	}
 	ts := info.Statement.Predicate.CreatedAt
-	sc.Status, sc.Signer, sc.CreatedAt, sc.MatchMode = "verified", info.Signer, &ts, mode
+	sc.Status, sc.Signer, sc.CreatedAt, sc.MatchMode, sc.Reason = "verified", info.Signer, &ts, mode, ReasonVerified
 	return sc
 }
 

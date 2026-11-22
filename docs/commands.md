@@ -19,7 +19,7 @@ All `quai` commands work from the repository root or any subdirectory inside a m
 Run configured verification steps with slot throttling, mutation guard, input-fingerprinted receipts, and optional SSH-signed attestations.
 
 ```bash
-quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [--key <path>] [--push|--no-push] [--remote <name>] [--priority <int>] [--detach] [--json]
+quai verify [--step <name>...] [--since <ref>] [--no-cache] [--fetch-base] [--sign|--no-sign] [--key <path>] [--push|--no-push] [--remote <name>] [--priority <int>] [--detach] [--json]
 quai verify --wait [<run-id>] [--max <duration>] [--json]
 quai verify --stop [<run-id>] [--json]
 ```
@@ -29,6 +29,7 @@ quai verify --stop [<run-id>] [--json]
 - `--step <name>`: Run only the named step. Repeat `--step` to run multiple steps. Omit to run all configured steps in declaration order.
 - `--since <ref>`: Override the base reference used for `merge-base` and `{{base}}`. Defaults to `origin/<base>` or `<base>`.
 - `--no-cache`: Ignore existing receipts and force execution.
+- `--fetch-base`: Fetch `origin/<base>` before resolving the base, so `{{base}}` and the merge-base use the newest remote tip.
 - `--sign` / `--no-sign`: Enable or suppress SSH signing of clean passing receipts into `refs/quai/records/<step>-<fingerprint>`. Also controlled by `QUAI_SIGN=1|0` and `[attest].auto_sign`.
 - `--key <path>`: Explicit SSH private key path for `--sign` (overrides `QUAI_SIGNING_KEY`, `[attest].signing_key`, and `git config user.signingkey`).
 - `--push` / `--no-push`: Push written attestation refs to `--remote` (implies `--sign`), or suppress `[attest].auto_push` / `QUAI_PUSH=1`.
@@ -47,6 +48,7 @@ quai verify --stop [<run-id>] [--json]
 - On a dirty working tree, steps still execute, but no receipts are read or written (`clean: false`, `receipt_written: false`).
 - **Mutation guard:** if a passing step edits tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai` refuses to write a receipt, reports `status: "mutated"` with `mutated_paths`, and exits `1`.
 - **Conditional pools:** a step with `pool_when` or `pool_tiers` acquires its `pool` only for matching diffs and otherwise runs with `slots = 0`, still writing receipts and signing attestations. Human output prints `pool <step>: routed to|bypassed <pool> ...`, then `pool <step>: acquired <pool>` only once the slot lock is held; JSON adds `pool` and `pool_acquired`, with `pool_acquired: false` on a slot timeout (see [configuration](configuration.md#conditional-pool-routing)).
+- **Stale base warning:** when the base ref is `origin/<base>` and this worktree's `FETCH_HEAD` is missing or older than 10 minutes, `quai` reports `base_warning` so an agent knows the merge-base may not reflect the remote tip. Pass `--fetch-base` to refresh it first.
 - Stops at the first failing or mutating step.
 - When `[attest].auto_prune = true` on the remote default branch, runs one best-effort maintenance pass after the steps complete, at most once per `[attest].prune_interval`. The policy is read only from `refs/remotes/origin/<base>` when `<base>` is a plain branch name equal to `origin/HEAD`; any other value skips automatic pruning with a warning. If `refs/remotes/origin/HEAD` is unset, run `git remote set-head origin --auto`. Prune failures are warnings on stderr and never change the verify outcome.
 
@@ -59,6 +61,7 @@ quai verify --stop [<run-id>] [--json]
 	"head_sha": "a1b2c3d4...",
 	"tree_sha": "e5f6a7b8...",
 	"base_sha": "99887766...",
+	"base_warning": "origin/main may be stale: last fetch was 1h0m0s ago (threshold 10m0s); run git fetch origin",
 	"receipt_written": true,
 	"steps": [
 		{
@@ -143,6 +146,9 @@ quai attest prune [--max-age <duration>] [--remote <name>] [--local-only] [--dry
   A refused fallback leaves the steps `"missing"`, sets `disjoint_refusal`, and exits `1`, so CI runs the steps itself. `--head` requires `--config-ref` and cannot be combined with `--onto` (exit `2`). It needs the history of both parents (`actions/checkout` with `fetch-depth: 0`).
 - When `--sample <pct>` triggers (0 to 100), marks all steps `"sampled"` and exits `1` so CI runs an independent audit, before any exact or disjoint-base lookup.
 - Verifies DSSE v1 PAE, in-toto Statement v1 fields, OpenSSH `SSHSIG` signature under namespace `quai` against the resolved `allowed_signers` file, per-step or `[attest].signers` allowlist, and `[attest].max_age`.
+- Reports a normalized `reason` for every step, so CI logs explain a fallback to a full run without reading raw git refs:
+  `verified`, `no_record`, `base_mismatch`, `tree_mismatch`, `config_mismatch`, `signature_invalid`, `expired`, `sampled`.
+- Each step also carries `base_sha`, `tree_sha`, and `fingerprint`; `base_mismatch` names the base the stored record was signed against and suggests fetching `origin/<base>` when it is stale.
 - Exits `0` only if every selected step is cryptographically `"verified"`, else `1`.
 
 ### `quai attest check` JSON output
@@ -157,7 +163,29 @@ quai attest prune [--max-age <duration>] [--remote <name>] [--local-only] [--dry
 	"head_sha": "11223344...",
 	"old_base_sha": "55667788...",
 	"steps": [
-		{"name": "fast", "status": "verified", "fingerprint": "7a8b...", "ref": "refs/quai/records/fast-7a8b...", "signer": "dev@example.com", "created_at": "2026-11-21T18:10:00Z", "match_mode": "disjoint-base"}
+		{"name": "fast", "status": "verified", "reason": "verified", "fingerprint": "7a8b...", "ref": "refs/quai/records/fast-7a8b...", "signer": "dev@example.com", "created_at": "2026-11-21T18:10:00Z", "match_mode": "disjoint-base"}
+	]
+}
+```
+
+A miss keeps its diagnostic fields:
+
+```json
+{
+	"ok": false,
+	"tree_sha": "e5f6a7b8...",
+	"base_sha": "99887766...",
+	"steps": [
+		{
+			"name": "fast",
+			"status": "missing",
+			"reason": "tree_mismatch",
+			"fingerprint": "7a8b...",
+			"tree_sha": "e5f6a7b8...",
+			"base_sha": "99887766...",
+			"ref": "refs/quai/records/fast-7a8b...",
+			"error": "stored attestation 1234abcd... was signed for tree 00112233..., current tree is e5f6a7b8...: the tree changed since signing"
+		}
 	]
 }
 ```
@@ -266,6 +294,7 @@ Overall branch tier is the maximum across all changed files: `full-live > diff-a
 	"base_sha": "99887766...",
 	"tree_sha": "e5f6a7b8...",
 	"clean": true,
+	"base_warning": "origin/main may be stale: last fetch was 1h0m0s ago (threshold 10m0s); run git fetch origin",
 	"triggers": ["internal/verify/verify.go"],
 	"pure_renames": 0,
 	"tests_tampered": [],
@@ -505,7 +534,15 @@ A waiter that finds its lock held writes a ticket into the lock's queue, and onl
 
 ## `quai doctor`
 
-Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation key and `allowed_signers` resolution, stale lock detection, detached runs that died without an exit record, and temporary land worktrees left while no `quai land` holds `land.lock`. Exits `0` when healthy, `1` if any blocking check fails.
+Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation readiness, stale lock detection, detached runs that died without an exit record, and temporary land worktrees left while no `quai land` holds `land.lock`. Exits `0` when healthy, `1` if any blocking check fails.
+
+Attestation readiness is checked end to end without mutating anything:
+
+- `attest-config`: the resolved `[attest]` remote, `max_age`, and signer count.
+- `attest-signing-key`: `QUAI_SIGNING_KEY`, `[attest].signing_key`, or `git config user.signingkey`, and that the path is a readable private key. The key is checked when `.quai.toml` or the environment enables attestation signing, so a `user.signingkey` set only for commit signing is not flagged.
+- `attest-agent-key`: whether `ssh-agent` is running and whether the signing key's `SHA256:` fingerprint is loaded (`ssh-add -l`).
+- `attest-allowed-signers`: the resolved `allowed_signers` file exists.
+- `attest-remote`: `git ls-remote` proves the attestation remote is reachable for fetch and push; a failure is blocking when `[attest].auto_push` is enabled.
 
 ```bash
 quai doctor [--json]

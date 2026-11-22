@@ -24,6 +24,7 @@ type Options struct {
 	StepNames      []string
 	Since          string
 	NoCache        bool
+	FetchBase      bool
 	Sign           bool
 	BestEffortSign bool
 	SigningKey     string
@@ -90,6 +91,7 @@ type Result struct {
 	HeadSHA        string       `json:"head_sha"`
 	TreeSHA        string       `json:"tree_sha"`
 	BaseSHA        string       `json:"base_sha"`
+	BaseWarning    string       `json:"base_warning,omitempty"`
 	ReceiptWritten bool         `json:"receipt_written"`
 	Attestations   []string     `json:"attestations,omitempty"`
 	Pushed         bool         `json:"pushed,omitempty"`
@@ -117,6 +119,11 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 		return Result{}, err
 	}
 
+	if opts.FetchBase {
+		if err := g.Fetch(ctx, "origin", cfg.Base); err != nil {
+			return Result{}, fmt.Errorf("fetch origin %s: %w", cfg.Base, err)
+		}
+	}
 	baseRef := opts.Since
 	if baseRef == "" {
 		baseRef, err = g.ResolveBaseRef(ctx, cfg.Base)
@@ -171,6 +178,9 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 		HeadSHA: headSHA,
 		TreeSHA: treeSHA,
 		BaseSHA: baseSHA,
+	}
+	if age, fetched, err := repo.FetchHeadAge(ctx, g, time.Now()); err == nil {
+		res.BaseWarning = repo.StaleBaseWarning(baseRef, age, fetched)
 	}
 
 	for _, step := range selected {
