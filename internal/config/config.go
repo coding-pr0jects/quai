@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -97,8 +96,8 @@ type Step struct {
 
 // PoolRouting is the decision to acquire a step's pool or run it unlocked.
 type PoolRouting struct {
-	Acquire bool
-	Matched []string
+	Acquire      bool
+	MatchedPaths int
 }
 
 // HasConditionalPool reports whether a step decides its pool from the diff.
@@ -112,15 +111,14 @@ func (s Step) RoutePool(changedPaths []string, branchTier Tier) PoolRouting {
 	if !s.HasConditionalPool() {
 		return PoolRouting{Acquire: true}
 	}
-	var matched []string
+	matched := 0
 	for _, p := range changedPaths {
 		if glob.MatchAny(s.PoolWhen, p) {
-			matched = append(matched, p)
+			matched++
 		}
 	}
-	if len(matched) > 0 {
-		sort.Strings(matched)
-		return PoolRouting{Acquire: true, Matched: matched}
+	if matched > 0 {
+		return PoolRouting{Acquire: true, MatchedPaths: matched}
 	}
 	if len(s.PoolTiers) > 0 && branchTier.Rank() >= s.lowestPoolTier() {
 		return PoolRouting{Acquire: true}

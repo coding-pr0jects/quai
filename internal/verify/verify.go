@@ -214,7 +214,6 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 	return res, nil
 }
 
-// routingInput is the diff state conditional pool routing needs.
 type routingInput struct {
 	changed []string
 	tier    config.Tier
@@ -286,18 +285,18 @@ func changedPaths(changes []repo.FileChange, untracked []string) []string {
 }
 
 type poolRoute struct {
-	conditional bool
-	acquired    bool
-	pool        string
-	slots       int
-	matched     []string
-	tier        config.Tier
+	conditional  bool
+	acquire      bool
+	pool         string
+	slots        int
+	matchedPaths int
+	tier         config.Tier
 }
 
 func routeForStep(step config.Step, rc routingInput) poolRoute {
 	route := poolRoute{
 		conditional: step.HasConditionalPool(),
-		acquired:    true,
+		acquire:     true,
 		pool:        step.Pool,
 		slots:       step.Slots,
 		tier:        rc.tier,
@@ -306,30 +305,30 @@ func routeForStep(step config.Step, rc routingInput) poolRoute {
 		return route
 	}
 	decision := step.RoutePool(rc.changed, rc.tier)
-	route.acquired = decision.Acquire
-	route.matched = decision.Matched
+	route.acquire = decision.Acquire
+	route.matchedPaths = decision.MatchedPaths
 	if !decision.Acquire {
 		route.slots = 0
 	}
 	return route
 }
 
-func (r poolRoute) annotate(sr *StepResult) {
+func (r poolRoute) annotate(sr *StepResult, held bool) {
 	if !r.conditional {
 		return
 	}
 	sr.Pool = r.pool
-	acquired := r.acquired
-	sr.PoolAcquired = &acquired
+	heldCopy := held
+	sr.PoolAcquired = &heldCopy
 }
 
-func (r poolRoute) describe() string {
-	if r.acquired {
+func (r poolRoute) describeRouting() string {
+	if r.acquire {
 		detail := "branch tier " + string(r.tier)
-		if len(r.matched) > 0 {
-			detail = fmt.Sprintf("%d changed path(s) matched", len(r.matched))
+		if r.matchedPaths > 0 {
+			detail = fmt.Sprintf("%d changed path(s) matched", r.matchedPaths)
 		}
-		return fmt.Sprintf("acquired %s (%s)", r.pool, detail)
+		return fmt.Sprintf("routed to %s (%s)", r.pool, detail)
 	}
 	return fmt.Sprintf("bypassed %s (diff did not match pool_when or pool_tiers)", r.pool)
 }
@@ -411,7 +410,18 @@ func runOneStep(
 	} else if opts.Stdout != nil {
 		fmt.Fprintf(opts.Stdout, "run     %s\n", step.Name)
 		if route.conditional {
-			fmt.Fprintf(opts.Stdout, "pool    %s: %s\n", step.Name, route.describe())
+			fmt.Fprintf(opts.Stdout, "pool    %s: %s\n", step.Name, route.describeRouting())
+		}
+	}
+
+	held := false
+	var onSlotAcquire func()
+	if route.conditional {
+		onSlotAcquire = func() {
+			held = true
+			if !opts.JSON && opts.Stdout != nil {
+				fmt.Fprintf(opts.Stdout, "pool    %s: acquired %s\n", step.Name, route.pool)
+			}
 		}
 	}
 
@@ -436,6 +446,7 @@ func runOneStep(
 		LockWait:        cfg.Land.LockWaitDur,
 		Owner:           owner,
 		OnStart:         opts.OnStepStart,
+		OnSlotAcquire:   onSlotAcquire,
 	})
 	dur := time.Since(started).Milliseconds()
 	if runErr != nil || code != 0 {
@@ -452,7 +463,7 @@ func runOneStep(
 			DurationMS:  dur,
 			Error:       errMsg,
 		}
-		route.annotate(&sr)
+		route.annotate(&sr, held)
 		return sr, false, "", runErr
 	}
 
@@ -480,7 +491,7 @@ func runOneStep(
 				MutatedPaths: mutated,
 				Error:        "step mutated the working tree or HEAD; refusing to record receipt",
 			}
-			route.annotate(&sr)
+			route.annotate(&sr, held)
 			return sr, false, "", nil
 		}
 
@@ -516,7 +527,7 @@ func runOneStep(
 		DurationMS:     dur,
 		AttestationRef: attRef,
 	}
-	route.annotate(&sr)
+	route.annotate(&sr, held)
 	if !opts.JSON && opts.Stdout != nil {
 		fmt.Fprintf(opts.Stdout, "pass    %s (%dms)\n", step.Name, dur)
 	}

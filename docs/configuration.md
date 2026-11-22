@@ -91,7 +91,7 @@ pool_tiers = ["full-live"]
 - `pool_tiers` acquires them when the branch tier reported by `quai tier` is at least the lowest listed tier.
 - Setting both is an OR: a matching path or a high enough tier acquires the pool.
 - Otherwise `quai verify` runs the step immediately with `slots = 0`. It takes no slot and skips `min_free_mem`, but still writes a receipt on a clean passing tree and still signs attestations.
-- `quai verify` prints `pool    <step>: acquired <pool> (...)` or `pool    <step>: bypassed <pool> (...)`, and `--json` adds `pool` and `pool_acquired` to that step. Unconditional and cached steps report neither field.
+- `quai verify` prints `pool    <step>: routed to <pool> (...)` when the diff routes to the pool, then `pool    <step>: acquired <pool>` only once the slot lock is actually held; a bypass prints `pool    <step>: bypassed <pool> (...)`. `--json` adds `pool` and `pool_acquired` to that step, and `pool_acquired` is `true` only when the slot lock was held (a slot timeout reports `false`). Unconditional and cached steps report neither field.
 - `pool_when` and `pool_tiers` require `pool` and `slots > 0`. Configs without them behave exactly as before.
 
 ## Template placeholders in `steps[].run`

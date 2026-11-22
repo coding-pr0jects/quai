@@ -231,8 +231,6 @@ func TestVerifyPoolWhenBypassesOccupiedPoolAndStillWritesReceipt(t *testing.T) {
 	checkoutBranch(t, dir, "feat")
 	commitFile(t, dir, "README.md", "v2\n", "docs only")
 
-	// The only heavy slot is held and min_free_mem can never be satisfied, so an
-	// acquiring step would block until lock_wait expires.
 	holdSlot(t, ctx, g, "heavy", 1)
 
 	cfg, err := config.Parse([]byte(`
@@ -274,7 +272,6 @@ lock_wait = "200ms"
 		t.Fatalf("second run should reuse the bypassed receipt: res=%+v err=%v", again, err)
 	}
 
-	// A path matching pool_when must wait for the occupied pool.
 	commitFile(t, dir, "internal/heavy.go", "package internal\n", "heavy change")
 	buf.Reset()
 	res, err = Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
@@ -282,11 +279,86 @@ lock_wait = "200ms"
 	if !errors.As(err, &timeout) {
 		t.Fatalf("expected slot timeout for a matching path, got res=%+v err=%v", res, err)
 	}
-	if len(res.Steps) != 1 || res.Steps[0].PoolAcquired == nil || !*res.Steps[0].PoolAcquired {
-		t.Fatalf("expected an annotated acquired pool, got %+v", res.Steps)
+	if len(res.Steps) != 1 || res.Steps[0].PoolAcquired == nil || *res.Steps[0].PoolAcquired {
+		t.Fatalf("a timed-out wait must not claim the pool was acquired: %+v", res.Steps)
+	}
+	if !strings.Contains(buf.String(), "routed to heavy") {
+		t.Fatalf("human output should name the routing decision, got %q", buf.String())
+	}
+	if strings.Contains(buf.String(), "acquired heavy") {
+		t.Fatalf("human output must not claim acquisition before the slot is held, got %q", buf.String())
+	}
+}
+
+func TestVerifyPoolWhenReportsAcquiredOnlyAfterSlotIsHeld(t *testing.T) {
+	ctx := context.Background()
+	dir, g := setupRepo(t)
+	checkoutBranch(t, dir, "feat")
+	commitFile(t, dir, "internal/heavy.go", "package internal\n", "heavy change")
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+
+[slots.heavy]
+capacity = 1
+
+[[steps]]
+name = "e2e"
+run = "test -f main.go"
+pool = "heavy"
+slots = 1
+pool_when = ["internal/**"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
+	if err != nil || !res.OK || !res.ReceiptWritten {
+		t.Fatalf("acquired run should pass and write a receipt: res=%+v err=%v", res, err)
+	}
+	if res.Steps[0].PoolAcquired == nil || !*res.Steps[0].PoolAcquired {
+		t.Fatalf("expected pool_acquired true once the slot is held: %+v", res.Steps[0])
+	}
+	if !strings.Contains(buf.String(), "routed to heavy (1 changed path(s) matched)") {
+		t.Fatalf("human output should report the routing decision, got %q", buf.String())
 	}
 	if !strings.Contains(buf.String(), "acquired heavy") {
-		t.Fatalf("human output should name the acquisition, got %q", buf.String())
+		t.Fatalf("human output should report the held slot, got %q", buf.String())
+	}
+}
+
+func TestVerifyUnconditionalPoolKeepsOutputUnchanged(t *testing.T) {
+	ctx := context.Background()
+	_, g := setupRepo(t)
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+
+[slots]
+heavy = 2
+
+[[steps]]
+name = "e2e"
+run = "true"
+pool = "heavy"
+slots = 1
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
+	if err != nil || !res.OK {
+		t.Fatalf("unconditional pooled step should pass: res=%+v err=%v", res, err)
+	}
+	if res.Steps[0].Pool != "" || res.Steps[0].PoolAcquired != nil {
+		t.Fatalf("unconditional step should not report pool routing: %+v", res.Steps[0])
+	}
+	if strings.Contains(buf.String(), "pool    ") {
+		t.Fatalf("unconditional step should not print pool routing, got %q", buf.String())
 	}
 }
 
@@ -334,8 +406,8 @@ lock_wait = "200ms"
 	if !errors.As(err, &timeout) {
 		t.Fatalf("full-live diff should wait for the occupied pool, got res=%+v err=%v", res, err)
 	}
-	if len(res.Steps) != 1 || res.Steps[0].PoolAcquired == nil || !*res.Steps[0].PoolAcquired {
-		t.Fatalf("expected an annotated acquired pool, got %+v", res.Steps)
+	if len(res.Steps) != 1 || res.Steps[0].PoolAcquired == nil || *res.Steps[0].PoolAcquired {
+		t.Fatalf("a timed-out wait must not claim the pool was acquired: %+v", res.Steps)
 	}
 }
 

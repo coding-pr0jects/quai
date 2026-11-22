@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/coding-pr0jects/quai/internal/lock"
 )
 
 func TestRunCleansUpChildProcessGroupOnCancel(t *testing.T) {
@@ -75,5 +77,47 @@ func TestRunPropagatesExitCode(t *testing.T) {
 	}
 	if strings.TrimSpace(out.String()) != "hi" {
 		t.Fatalf("stdout = %q, want hi", out.String())
+	}
+}
+
+func TestRunReportsSlotAcquisitionOnlyWhenHeld(t *testing.T) {
+	ctx := context.Background()
+	locksRoot := t.TempDir()
+	acquired := 0
+
+	code, err := Run(ctx, Request{
+		Dir:           t.TempDir(),
+		Argv:          []string{"true"},
+		LocksRoot:     locksRoot,
+		Pool:          "heavy",
+		Slots:         1,
+		Capacity:      1,
+		LockWait:      time.Second,
+		OnSlotAcquire: func() { acquired++ },
+	})
+	if err != nil || code != 0 || acquired != 1 {
+		t.Fatalf("free slot should report acquisition once: code=%d err=%v acquired=%d", code, err, acquired)
+	}
+
+	held, err := lock.AcquireSlots(ctx, locksRoot, "heavy", 1, 1, lock.Owner{Command: "test"}, lock.Options{Wait: time.Second})
+	if err != nil {
+		t.Fatalf("hold slot: %v", err)
+	}
+	defer held.Release()
+
+	acquired = 0
+	_, err = Run(ctx, Request{
+		Dir:           t.TempDir(),
+		Argv:          []string{"true"},
+		LocksRoot:     locksRoot,
+		Pool:          "heavy",
+		Slots:         1,
+		Capacity:      1,
+		LockWait:      100 * time.Millisecond,
+		OnSlotAcquire: func() { acquired++ },
+	})
+	var timeout *lock.TimeoutError
+	if !errors.As(err, &timeout) || acquired != 0 {
+		t.Fatalf("timed-out wait must not report acquisition: err=%v acquired=%d", err, acquired)
 	}
 }

@@ -29,6 +29,7 @@ type Request struct {
 	LockWait        time.Duration
 	Owner           lock.Owner
 	OnStart         func(Process)
+	OnSlotAcquire   func()
 }
 
 // Run executes a command inside its own process group, optionally bounded by a slot pool,
@@ -45,6 +46,9 @@ func Run(ctx context.Context, req Request) (int, error) {
 			return 1, err
 		}
 		defer sl.Release()
+		if req.OnSlotAcquire != nil {
+			req.OnSlotAcquire()
+		}
 	}
 
 	runCtx := ctx

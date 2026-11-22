@@ -226,7 +226,7 @@ func TestStepRoutePool(t *testing.T) {
 		changed []string
 		tier    Tier
 		want    bool
-		matched []string
+		matched int
 	}{
 		{
 			name:    "no condition always acquires",
@@ -241,7 +241,7 @@ func TestStepRoutePool(t *testing.T) {
 			changed: []string{"README.md", "ui/view.txt"},
 			tier:    TierDiffAudit,
 			want:    true,
-			matched: []string{"ui/view.txt"},
+			matched: 1,
 		},
 		{
 			name:    "pool_when miss bypasses",
@@ -285,13 +285,8 @@ func TestStepRoutePool(t *testing.T) {
 			if got.Acquire != tc.want {
 				t.Fatalf("Acquire = %v, want %v", got.Acquire, tc.want)
 			}
-			if len(got.Matched) != len(tc.matched) {
-				t.Fatalf("Matched = %v, want %v", got.Matched, tc.matched)
-			}
-			for i := range tc.matched {
-				if got.Matched[i] != tc.matched[i] {
-					t.Fatalf("Matched = %v, want %v", got.Matched, tc.matched)
-				}
+			if got.MatchedPaths != tc.matched {
+				t.Fatalf("Matched = %d, want %d", got.MatchedPaths, tc.matched)
 			}
 		})
 	}
