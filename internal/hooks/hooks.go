@@ -23,7 +23,7 @@ if ! command -v quai >/dev/null 2>&1; then
   echo "quai hooks pre-push: quai binary not found on PATH" >&2
   exit 1
 fi
-exec quai hooks pre-push </dev/null
+exec quai hooks pre-push
 `
 
 const ChainSnippet = `if command -v quai >/dev/null 2>&1 && [ -f .quai.toml ]; then quai hooks pre-push || exit 1; fi`
@@ -98,25 +98,88 @@ func Uninstall(ctx context.Context, g repo.Git) (string, error) {
 	return fmt.Sprintf("removed managed pre-push hook at %s", hookPath), nil
 }
 
-// RunPrePush runs all steps configured with hook = "pre-push", reusing cached receipts when valid
-// and honoring [attest].auto_sign / auto_push (or QUAI_SIGN / QUAI_PUSH).
-func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, jsonOut bool, stdout, stderr io.Writer) (verify.Result, error) {
+type Options struct {
+	Refs         []PushRef
+	RefsProvided bool
+	JSON         bool
+	Stdout       io.Writer
+	Stderr       io.Writer
+}
+
+type Result struct {
+	verify.Result
+	RequireCached        []CachedStep `json:"require_cached,omitempty"`
+	AttestationsPushed   []string     `json:"attestations_pushed,omitempty"`
+	AttestationPushError string       `json:"attestation_push_error,omitempty"`
+	Bypassed             bool         `json:"require_cached_bypassed,omitempty"`
+	Skipped              string       `json:"skipped,omitempty"`
+	Warning              string       `json:"warning,omitempty"`
+}
+
+// RunPrePush runs the steps configured with hook = "pre-push", then checks
+// [hooks.pre_push].require_cached for every pushed branch commit from the local receipt cache.
+// A missing receipt warns or refuses according to on_missing, unless QUAI_ALLOW_UNVERIFIED_PUSH=1.
+func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Result, error) {
+	res := Result{Result: verify.Result{OK: true, Clean: true}}
+
+	if opts.RefsProvided && IsAttestationPush(opts.Refs) {
+		res.Skipped = "attestation push"
+		if !opts.JSON && opts.Stdout != nil {
+			fmt.Fprintf(opts.Stdout, "skipped pre-push checks: attestation push (%s*)\n", attestationRefPrefix)
+		}
+		return res, nil
+	}
+
+	targets := pushTargets(ctx, g, opts.Refs, opts.RefsProvided)
+
 	steps := cfg.PrePushSteps()
-	if len(steps) == 0 {
-		return verify.Result{OK: true, Clean: true}, nil
+	if len(steps) > 0 {
+		names := make([]string, len(steps))
+		for i, s := range steps {
+			names[i] = s.Name
+		}
+		doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, false, false, false, false)
+		verifyRes, err := verify.Run(ctx, g, cfg, verify.Options{
+			StepNames:      names,
+			Sign:           doSign,
+			BestEffortSign: bestEffort,
+			Push:           doPush,
+			JSON:           opts.JSON,
+			Stdout:         opts.Stdout,
+			Stderr:         opts.Stderr,
+		})
+		res.Result = verifyRes
+		if err != nil || !verifyRes.OK {
+			return res, err
+		}
 	}
-	names := make([]string, len(steps))
-	for i, s := range steps {
-		names[i] = s.Name
+
+	if len(cfg.Hooks.PrePush.RequireCached) == 0 {
+		return res, nil
 	}
-	doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, false, false, false, false)
-	return verify.Run(ctx, g, cfg, verify.Options{
-		StepNames:      names,
-		Sign:           doSign,
-		BestEffortSign: bestEffort,
-		Push:           doPush,
-		JSON:           jsonOut,
-		Stdout:         stdout,
-		Stderr:         stderr,
-	})
+	report, err := CheckCached(ctx, g, cfg, targets, "")
+	if err != nil {
+		return res, err
+	}
+	res.RequireCached = report.Steps
+	res.AttestationsPushed = report.Pushed
+	res.AttestationPushError = report.PushError
+	if report.PushError != "" {
+		writeWarning(opts, "attestation push failed: "+report.PushError)
+	}
+
+	decision := decideRequirement(report.Missing, cfg.Hooks.PrePush, os.Getenv(EnvAllowUnverifiedPush) == "1")
+	res.Bypassed = decision.bypassed
+	res.Warning = decision.message
+	if decision.message != "" {
+		writeWarning(opts, decision.message)
+	}
+	res.OK = !decision.blocked
+	return res, nil
+}
+
+func writeWarning(opts Options, message string) {
+	if opts.Stderr != nil {
+		fmt.Fprintf(opts.Stderr, "quai hooks pre-push: %s\n", message)
+	}
 }

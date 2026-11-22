@@ -110,6 +110,10 @@ method = "squash"
 optimistic_merge = true
 required_checks = ["ci"]
 global_paths = ["go.mod", "go.sum", ".quai.toml", ".github/**"]
+
+[hooks.pre_push]
+require_cached = ["test"]   # The hook never runs these; it only checks their receipts.
+on_missing = "refuse"       # "warn" (default) allows the push, "refuse" blocks it.
 ```
 
 See [docs/configuration.md](docs/configuration.md) for Node/TypeScript, Rust, and Python presets and the full schema.
@@ -131,6 +135,8 @@ quai verify --wait --max 8m   # exits 4 while it still runs; rerun to stream the
 Re-running `quai verify` on a clean tree with unchanged inputs (or after editing a file outside `inputs`, such as `README.md`, or under an excluded `"!docs/evidence/**"` input) reuses the stored receipt immediately across all linked worktrees. A step with `depends_on = ["fast"]` runs after `fast`, which runs once, and reads `QUAI_PASSED_STEPS` to see what already passed. If a step modifies tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai verify` refuses to write a receipt and exits `1`.
 
 Steps with `pool_when` globs or a `pool_tiers` threshold acquire their slot pool only when the diff needs it; otherwise they run unlocked and still write receipts and sign attestations.
+
+With `[hooks.pre_push].require_cached` set, `git push` also refuses to leave a branch unverified: the hook checks the receipts of each pushed commit in under 100 ms, skips steps whose `inputs` none of the changed files match, and pushes attestation refs CI has not seen yet. `QUAI_ALLOW_UNVERIFIED_PUSH=1` downgrades `on_missing = "refuse"` to a warning for a deliberate WIP push while still running the `pre-push` steps.
 
 ### 3. Classify risk, check rebase survival, and land PRs
 
@@ -168,7 +174,7 @@ quai land 41 42 43
 | `quai verdict record\|check [flags...]` | Record and verify local or SSH-signed review verdicts keyed by `patch-id` and risk tier; gate-only follow-up commits keep the verdict |
 | `quai land <pr>... [--dry-run] [--continue-on-error=false] [--method squash\|merge\|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]` | Land one GitHub PR, or a batch under one `land.lock` session, with `git merge-tree` optimistic merge, stacked child retargeting/restacking, or locked rebase |
 | `quai restack <old-parent-tip> [--base <ref>] [--push] [--json]` | Replay a stacked child branch onto the updated base via `git rebase --onto` with `patch-id` survival check |
-| `quai hooks install\|uninstall\|pre-push [--json]` | Manage the non-destructive `pre-push` receipt hook (with optional auto-sign/push) |
+| `quai hooks install\|uninstall\|pre-push [--json]` | Manage the non-destructive `pre-push` receipt hook (optional auto-sign/push, `require_cached` receipt check) |
 | `quai gc [--dry-run] [--json]` | Prune expired receipts, attestation and verdict refs, and stale lock directories (also run automatically by `verify`/`land` when `[attest].auto_prune` is set on the remote default branch) |
 | `quai status [--json]` | Inspect active `land.lock`, slot pools, free RAM and disk, holders and waiters with their role and priority, in-flight steps, detached runs, and cached counts |
 | `quai doctor [--json]` | Validate git >= 2.38, `.quai.toml`, free disk, hooks, `gh`, `ssh-keygen`, attestation signing key, `ssh-agent` identity, `[attest]` config, remote reachability, and stale locks |
@@ -180,7 +186,7 @@ Exit codes are uniform across commands:
 | Exit code | Meaning |
 |---|---|
 | `0` | Success, passing checks, `SURVIVES`, or PR merged |
-| `1` | Check failed, working tree mutated during `verify`, `CHANGED`, or PR refused |
+| `1` | Check failed, working tree mutated during `verify`, `CHANGED`, a pre-push receipt requirement refused, or PR refused |
 | `2` | Invalid arguments, missing or invalid `.quai.toml`, or not a git repository |
 | `3` | Git rebase conflict encountered and cleanly aborted |
 | `4` | Lock or slot acquisition timed out, or `quai verify --wait` reached `--max` while the run still runs |

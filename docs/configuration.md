@@ -64,6 +64,10 @@ auto_sign = false                         # Best-effort sign passing receipts in
 auto_push = false                         # Implies auto_sign; push signed attestation refs automatically.
 auto_prune = false                        # Best-effort prune of expired state after verify or land. Default: false.
 prune_interval = "24h"                    # Minimum time between automatic prunes. Supports d/h/m/s. Default: "24h".
+
+[hooks.pre_push]
+require_cached = ["verify"]   # Steps whose receipt must already exist before a branch push. Default: [].
+on_missing = "warn"           # "warn" (default) | "refuse". "refuse" blocks git push without a receipt.
 ```
 
 Automatic pruning reads these fields from the remote default branch (`refs/remotes/origin/HEAD`, resolved from `base` only when `base` is a plain branch name) rather than the working tree, so a pull request branch cannot widen a destructive maintenance pass. The manual `quai gc` command uses the working tree's configuration because the operator invoked it explicitly. `max_age` must be at least `1m`.
@@ -122,6 +126,37 @@ esac
 ```
 
 `quai` sets this variable and never reads it, so an inherited value cannot mark a step passed. On a clean tree, each listed step passed on the current tree under the mutation guard. On a dirty tree, no mutation guard runs, so the list only says the step passed earlier in this invocation.
+
+## Required receipts at push time
+
+`hooks.pre_push.require_cached` names steps whose receipt must already exist before a branch push, without running them in the hook:
+
+```toml
+[[steps]]
+name = "fast"
+run = "golangci-lint run"
+hook = "pre-push"
+
+[[steps]]
+name = "verify"
+run = "go test -race ./..."
+inputs = ["**/*.go", "go.mod", "go.sum"]
+
+[hooks.pre_push]
+require_cached = ["verify"]
+on_missing = "refuse"
+```
+
+For every `refs/heads/*` ref git hands the hook, `quai hooks pre-push` first runs the `hook = "pre-push"` steps as before, then checks each `require_cached` step against the pushed commit:
+
+- Changed files between the step base (`merge-base` with `base`) and the pushed commit are matched against the step's `inputs` and `lockfiles`. When none match (a docs-only or `gate-only` change), the step counts as satisfied without a receipt.
+- Otherwise a passing receipt for that pushed tree and base must exist in the local receipt cache and be inside the 14-day retention window. The check reads receipts only: it never executes the step, takes no slot, and stays under 100 ms.
+- When a signed attestation for that receipt exists locally but not on `[attest].remote`, the hook pushes the `refs/quai/records/*` ref before returning so CI sees it when the workflow starts. A failed sync is reported and does not block the push.
+- `on_missing = "warn"` (default) prints the step, commit, ref, and remediation and allows the push. `on_missing = "refuse"` prints the same diagnostic and exits `1` to block the push.
+- Tag pushes, branch deletions, and `refs/quai/*` pushes are never gated; an attestation-only push skips the hook entirely.
+- `QUAI_ALLOW_UNVERIFIED_PUSH=1` downgrades `refuse` to a warning, still runs `[hooks.pre_push].steps`, and prints an auditable notice. `quai restack --push` sets it for its own push so a restack never deadlocks on an unverified rebased branch.
+
+Disjoint-base matching across a moved base (issue #13) is not applied to the local pre-push check yet: a rebase onto a newer base needs a fresh `quai verify`.
 
 ## Template placeholders in `steps[].run`
 

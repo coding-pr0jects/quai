@@ -284,7 +284,7 @@ func Evaluate(ctx context.Context, g repo.Git, cfg *config.Config, since string)
 		if err != nil {
 			return Result{}, err
 		}
-		r, ok, err := store.Lookup(step.Name, fp)
+		r, ok, err := store.LookupFresh(step.Name, fp)
 		if err != nil {
 			return Result{}, err
 		}

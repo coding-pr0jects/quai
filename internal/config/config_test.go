@@ -86,6 +86,9 @@ func TestParseRejectsInvalidConfigs(t *testing.T) {
 		{"self dependency", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\ndepends_on = ['a']\n", "cycle: a -> a"},
 		{"dependency cycle", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\ndepends_on = ['b']\n[[steps]]\nname = 'b'\nrun = 'true'\ndepends_on = ['a']\n", "cycle: a -> b -> a"},
 		{"duplicate dependency", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\n[[steps]]\nname = 'b'\nrun = 'true'\ndepends_on = ['a', 'a']\n", "lists \"a\" twice"},
+		{"unknown required step", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\n[hooks.pre_push]\nrequire_cached = ['nope']\n", "unknown step"},
+		{"duplicate required step", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\n[hooks.pre_push]\nrequire_cached = ['a', 'a']\n", "lists step \"a\" twice"},
+		{"bad on_missing", "version = 1\n[hooks.pre_push]\non_missing = 'explode'\n", "invalid hooks.pre_push.on_missing"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,6 +112,44 @@ func TestExpandCommandValidatesSHAs(t *testing.T) {
 	}
 	if _, err := ExpandCommand("check {{base}}", "main; rm -rf /", sha, sha); err == nil {
 		t.Fatal("expected error for non-SHA placeholder value")
+	}
+}
+
+func TestParsePrePushRequireCached(t *testing.T) {
+	raw := `
+version = 1
+
+[[steps]]
+name = "fast"
+run = "go vet ./..."
+hook = "pre-push"
+
+[[steps]]
+name = "verify"
+run = "go test ./..."
+
+[hooks.pre_push]
+require_cached = ["verify"]
+on_missing = "refuse"
+`
+	cfg, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if cfg.Hooks.PrePush.OnMissing != OnMissingRefuse {
+		t.Fatalf("OnMissing = %q, want refuse", cfg.Hooks.PrePush.OnMissing)
+	}
+	required := cfg.RequireCachedSteps()
+	if len(required) != 1 || required[0].Name != "verify" {
+		t.Fatalf("RequireCachedSteps = %+v, want [verify]", required)
+	}
+
+	defaulted, err := Parse([]byte("version = 1\n[hooks.pre_push]\nrequire_cached = []\n"))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if defaulted.Hooks.PrePush.OnMissing != OnMissingWarn {
+		t.Fatalf("OnMissing = %q, want default warn", defaulted.Hooks.PrePush.OnMissing)
 	}
 }
 

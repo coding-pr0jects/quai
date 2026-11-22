@@ -78,6 +78,22 @@ func (s *Store) Lookup(stepName, fingerprint string) (*Receipt, bool, error) {
 	return &r, true, nil
 }
 
+// LookupFresh returns a passing receipt for (stepName, fingerprint) that is still inside the store retention window.
+func (s *Store) LookupFresh(stepName, fingerprint string) (*Receipt, bool, error) {
+	r, ok, err := s.Lookup(stepName, fingerprint)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	maxAge := s.MaxAge
+	if maxAge <= 0 {
+		maxAge = DefaultMaxAge
+	}
+	if r.CreatedAt.IsZero() || s.now().Sub(r.CreatedAt) > maxAge {
+		return nil, false, nil
+	}
+	return r, true, nil
+}
+
 // Write atomically persists a passing receipt and prunes stale files.
 func (s *Store) Write(r Receipt) error {
 	if !r.Passed {

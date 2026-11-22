@@ -24,7 +24,7 @@ quai/
 │   ├── detach/        # detached runs: start, wait with a read cursor, stop, dead-run cleanup, pruning
 │   ├── tier/          # pure diff risk classifier, R100 rename handling, test-tamper scanner
 │   ├── patchid/       # pure patch-id survival comparator and per-file drift detector
-│   ├── hooks/         # non-destructive pre-push installer and receipt fast path
+│   ├── hooks/         # non-destructive pre-push installer, receipt fast path, require_cached check
 │   ├── status/        # read-only quai status inspection and quai doctor readiness checks
 │   ├── verdict/       # review verdicts keyed by patch-id (and code patch-id) under refs/quai/verdicts/
 │   ├── forge/         # Forge interface, gh CLI implementation, transient-error retry
@@ -138,6 +138,7 @@ Every child command runs in its own process group (`SysProcAttr{Setpgid: true}`)
 2. Before running a step, `verify` snapshots `HEAD` and `git status --porcelain`.
 3. After a passing step on a clean tree, `verify` re-checks `HEAD` and `git status --porcelain`. Any modification, untracked non-ignored file, or `HEAD` move aborts the receipt write and exits `1`.
 4. Valid receipts are written atomically via temp file + rename. After each write, `receipt` prunes entries older than 14 days and retains at most 200 files.
+5. `quai hooks pre-push` runs the receipt fast path, then checks `[hooks.pre_push].require_cached` for every `refs/heads/*` ref git reports: it reads no step command, takes no slot, treats a step with no changed matching `inputs` as satisfied, and pushes local `refs/quai/records/*` attestation refs the remote lacks. `[hooks.pre_push].on_missing` warns or refuses; `QUAI_ALLOW_UNVERIFIED_PUSH=1` and `quai restack --push` downgrade a refusal to a warning.
 
 ## Testing layers
 

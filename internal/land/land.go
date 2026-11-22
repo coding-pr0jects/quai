@@ -491,7 +491,7 @@ func rebaseVerifyPush(ctx context.Context, wg repo.Git, cfg *config.Config, opts
 			return rb, nil
 		}
 	}
-	if err := wg.PushForceWithLease(ctx, "origin", pr.HeadRefName, preRebaseSHA); err != nil {
+	if err := wg.PushForceWithLease(ctx, "origin", pr.HeadRefName, preRebaseSHA, nil); err != nil {
 		return rb, err
 	}
 	pushed = true

@@ -571,7 +571,7 @@ func checkCache(
 	signingKey, principal string,
 	opts Options,
 ) (StepResult, string, bool, error) {
-	cachedRec, hit, err := store.Lookup(stepName, fp)
+	cachedRec, hit, err := store.LookupFresh(stepName, fp)
 	if err != nil || !hit {
 		return StepResult{}, "", false, nil
 	}

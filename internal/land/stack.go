@@ -7,6 +7,7 @@ import (
 
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/forge"
+	"github.com/coding-pr0jects/quai/internal/hooks"
 	"github.com/coding-pr0jects/quai/internal/patchid"
 	"github.com/coding-pr0jects/quai/internal/repo"
 )
@@ -130,7 +131,9 @@ func Restack(ctx context.Context, g repo.Git, cfg *config.Config, opts RestackOp
 		if remote == "" {
 			remote = "origin"
 		}
-		if err := g.PushForceWithLease(ctx, remote, branch, oldHead); err != nil {
+		// A restacked branch is re-verified after the push, so its own push must not deadlock on
+		// require_cached: the hook sees the same auditable escape hatch a human would use.
+		if err := g.PushForceWithLease(ctx, remote, branch, oldHead, map[string]string{hooks.EnvAllowUnverifiedPush: "1"}); err != nil {
 			res.Error = err.Error()
 			return res, err
 		}

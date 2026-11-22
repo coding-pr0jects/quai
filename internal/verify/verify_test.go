@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -869,4 +870,63 @@ func TestVerifyClassifiesStepExitKind(t *testing.T) {
 			}
 		})
 	}
+}
+func TestVerifyRerunsExpiredReceipt(t *testing.T) {
+	ctx := context.Background()
+	counter := filepath.Join(t.TempDir(), "runs.log")
+	_, g := setupRepo(t)
+	cfg, err := config.Parse([]byte(`
+version = 1
+[[steps]]
+name = "code"
+run = "echo x >> ` + counter + `"
+inputs = ["**/*.go"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	commonDir, err := g.CommonDir(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeSHA, _ := g.TreeSHA(ctx, "HEAD")
+	headSHA, _ := g.HeadSHA(ctx)
+	baseSHA, _ := g.MergeBase(ctx, "main", "HEAD")
+	fp, err := receipt.Fingerprint(ctx, g, cfg.Steps[0], treeSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := receipt.NewStore(commonDir)
+	stale := receipt.Receipt{
+		Version:     receipt.CurrentVersion,
+		Fingerprint: fp,
+		TreeSHA:     treeSHA,
+		HeadSHA:     headSHA,
+		BaseSHA:     baseSHA,
+		Step:        "code",
+		Passed:      true,
+		CreatedAt:   time.Now().UTC().Add(-30 * 24 * time.Hour),
+	}
+	if err := os.MkdirAll(store.Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.Dir, "code-"+fp+".json"), mustJSON(t, stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
+	if err != nil || !res.OK || res.Steps[0].Status != "passed" {
+		t.Fatalf("expired receipt must rerun the step: res=%+v err=%v", res, err)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }

@@ -98,7 +98,7 @@ hook = "pre-push"
 	}
 
 	started := time.Now()
-	r, err := RunPrePush(ctx, g, cfg, false, &buf, &buf)
+	r, err := RunPrePush(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
 	elapsed := time.Since(started)
 	if err != nil || !r.OK || len(r.Steps) != 1 || r.Steps[0].Status != "cached" {
 		t.Fatalf("expected cached pre-push hit, got %+v err=%v", r, err)
@@ -159,7 +159,7 @@ auto_push = true
 	}
 
 	var buf bytes.Buffer
-	res, err := RunPrePush(ctx, g, cfgWithKey, false, &buf, &buf)
+	res, err := RunPrePush(ctx, g, cfgWithKey, Options{Stdout: &buf, Stderr: &buf})
 	if err != nil || !res.OK || !res.Pushed || len(res.Attestations) != 1 {
 		t.Fatalf("expected pre-push auto_sign + auto_push to succeed, got res=%+v err=%v", res, err)
 	}
@@ -186,7 +186,7 @@ auto_sign = true
 		t.Fatal(err)
 	}
 	var outBuf, errBuf bytes.Buffer
-	res2, err := RunPrePush(ctx, g, cfgNoKey, false, &outBuf, &errBuf)
+	res2, err := RunPrePush(ctx, g, cfgNoKey, Options{Stdout: &outBuf, Stderr: &errBuf})
 	if err != nil || !res2.OK {
 		t.Fatalf("expected best-effort auto_sign without key to still pass, got res=%+v err=%v", res2, err)
 	}

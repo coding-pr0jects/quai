@@ -7,7 +7,7 @@ All `quai` commands work from the repository root or any subdirectory inside a m
 | Exit code | Meaning |
 |---|---|
 | `0` | Success, all checks passed, `SURVIVES`, or PR merged |
-| `1` | Verification failed, step mutated the working tree, `CHANGED`, or PR refused |
+| `1` | Verification failed, step mutated the working tree, `CHANGED`, a pre-push receipt requirement refused, or PR refused |
 | `2` | Invalid arguments, missing or invalid `.quai.toml`, or not inside a git repository |
 | `3` | Git rebase conflict encountered and cleanly aborted |
 | `4` | Lock or slot acquisition timed out, or `quai verify --wait` reached `--max` while the detached run still runs: retry later |
@@ -64,7 +64,7 @@ quai verify --stop [<run-id>] [--json]
 
 ### Behavior
 
-- On a clean working tree, passing steps reuse an existing receipt if the fingerprint matches (`status: "cached"`).
+- On a clean working tree, passing steps reuse an existing receipt if the fingerprint matches (`status: "cached"`). Receipts older than the 14-day retention are rerun.
 - Concurrent calls on the same `(step, fingerprint)` share one execution via an in-flight lock; waiting callers immediately receive `status: "cached"` once the first run succeeds.
 - On a dirty working tree, steps still execute, but no receipts are read or written (`clean: false`, `receipt_written: false`).
 - **Mutation guard:** if a passing step edits tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai` refuses to write a receipt, reports `status: "mutated"` with `mutated_paths`, and exits `1`.
@@ -533,13 +533,37 @@ quai hooks pre-push [--json]
 
 - `install`: Writes a managed hook at `git rev-parse --git-path hooks/pre-push` with `# managed by quai`. If a non-quai hook already exists or `core.hooksPath` points to a committed directory, `install` refuses to overwrite it and prints the one-line snippet to chain `quai hooks pre-push`.
 - `uninstall`: Removes the hook only if it contains `# managed by quai`.
-- `pre-push`: Checks all steps with `hook = "pre-push"`. If the tree is clean and every receipt hits, exits `0` in under 50 ms. Otherwise executes the missing steps via `verify` and writes receipts on pass.
+- `pre-push`: Runs all steps with `hook = "pre-push"` and executes the missing ones via `verify`, writing receipts on pass. A clean tree whose receipts all hit exits `0` in under 50 ms.
+- `pre-push` then checks `[hooks.pre_push].require_cached` for every `refs/heads/*` ref git reports: for each listed step it reads only the local receipt cache (no step execution, no slot, under 100 ms) and treats a step as satisfied when no changed file matches its `inputs` or `lockfiles`. A local `refs/quai/records/*` attestation missing on `[attest].remote` is pushed before returning, so CI sees it when the workflow starts. Tag pushes, branch deletions, and `refs/quai/*` pushes are ignored, and an attestation-only push skips the hook.
+- A missing receipt prints the step, commit, ref, and `run quai verify first`. `on_missing = "warn"` (default) allows the push; `on_missing = "refuse"` exits `1` to block it. `QUAI_ALLOW_UNVERIFIED_PUSH=1` downgrades `refuse` to an auditable warning while still running the configured steps, and `quai restack --push` sets it for its own push.
+
+### `quai hooks pre-push --json`
+
+```json
+{
+	"ok": false,
+	"clean": true,
+	"head_sha": "a1b2c3d4...",
+	"require_cached": [
+		{
+			"step": "verify",
+			"commit": "a1b2c3d4...",
+			"ref": "refs/heads/feat",
+			"status": "missing",
+			"fingerprint": "7a8b..."
+		}
+	],
+	"warning": "no cached receipt for step \"verify\" at a1b2c3d4e5f6 on refs/heads/feat; run quai verify first, then push again (or set [hooks.pre_push].on_missing = \"warn\")"
+}
+```
+
+`require_cached[].status` is `cached`, `skipped` (no changed inputs), or `missing`. A cached step whose attestation the hook pushed adds it to `attestations_pushed`; a failed sync reports `attestation_push_error`. A bypass adds `"require_cached_bypassed": true`, and an attestation-only push adds `"skipped": "attestation push"`.
 
 ---
 
 ## `quai status`
 
-Inspect active `land.lock`, configured slot pools, their holders and queued waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), temporary land worktrees (`land_worktrees`), local receipt count, and local attestation count without mutating any state. JSON output also includes the host's `available_mem_bytes` and `available_disk_bytes`, and pool entries carry `min_free_mem_bytes` and `min_free_disk_bytes`.
+Inspect active `land.lock`, configured slot pools, their holders and queued waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), temporary land worktrees (`land_worktrees`), local receipt count, local attestation count, and the `[hooks.pre_push].require_cached` policy without mutating any state. JSON output also includes the host's `available_mem_bytes` and `available_disk_bytes`, and pool entries carry `min_free_mem_bytes` and `min_free_disk_bytes`.
 
 ```bash
 quai status [--json]
@@ -562,7 +586,7 @@ A waiter that finds its lock held writes a ticket into the lock's queue, and onl
 
 ## `quai doctor`
 
-Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, free disk, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation readiness, stale lock detection, detached runs that died without an exit record, and temporary land worktrees left while no `quai land` holds `land.lock`. The report includes `available_mem_bytes` and `available_disk_bytes`, and the `disk` check warns when a pool's `min_free_disk` is not met. Exits `0` when healthy, `1` if any blocking check fails.
+Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, free disk, `pre-push` hook wiring (including an outdated managed hook that would drop the pushed refs), `gh`, `ssh-keygen`, attestation readiness, stale lock detection, detached runs that died without an exit record, and temporary land worktrees left while no `quai land` holds `land.lock`. The report includes `available_mem_bytes` and `available_disk_bytes`, and the `disk` check warns when a pool's `min_free_disk` is not met. Exits `0` when healthy, `1` if any blocking check fails.
 
 Attestation readiness is checked end to end without mutating anything:
 
