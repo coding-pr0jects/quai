@@ -110,11 +110,17 @@ type CachedStep struct {
 	Step              string `json:"step"`
 	Commit            string `json:"commit"`
 	Ref               string `json:"ref"`
-	Status            string `json:"status"` // cached | skipped | missing
+	Status            string `json:"status"`
 	Fingerprint       string `json:"fingerprint,omitempty"`
 	AttestationRef    string `json:"attestation_ref,omitempty"`
 	AttestationPushed bool   `json:"attestation_pushed,omitempty"`
 }
+
+const (
+	statusCached  = "cached"
+	statusSkipped = "skipped"
+	statusMissing = "missing"
+)
 
 // CachedReport is the outcome of checking [hooks.pre_push].require_cached for every pushed branch commit.
 type CachedReport struct {
@@ -179,12 +185,12 @@ func CheckCached(ctx context.Context, g repo.Git, cfg *config.Config, targets []
 			entry.Fingerprint = fp
 			switch status {
 			case cacheHit:
-				entry.Status = "cached"
+				entry.Status = statusCached
 				entry.AttestationRef = attest.RefName(step.Name, fp)
 			case cacheSkippedInputs:
-				entry.Status = "skipped"
+				entry.Status = statusSkipped
 			default:
-				entry.Status = "missing"
+				entry.Status = statusMissing
 				report.Missing = append(report.Missing, entry)
 			}
 			report.Steps = append(report.Steps, entry)
@@ -245,7 +251,7 @@ func pushMissingAttestations(ctx context.Context, g repo.Git, remote string, ste
 	var local []string
 	seen := make(map[string]struct{}, len(steps))
 	for _, entry := range steps {
-		if entry.Status != "cached" || entry.Fingerprint == "" {
+		if entry.Status != statusCached || entry.Fingerprint == "" {
 			continue
 		}
 		if _, ok := seen[entry.AttestationRef]; ok {

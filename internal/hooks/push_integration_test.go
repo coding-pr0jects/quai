@@ -65,18 +65,19 @@ func (r pushRepo) commit(t *testing.T, rel, body, message string) string {
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", message}, {"rev-parse", "HEAD"}} {
+	run := func(args ...string) string {
+		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = r.dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, string(out))
 		}
-		if args[0] == "rev-parse" {
-			return strings.TrimSpace(string(out))
-		}
+		return strings.TrimSpace(string(out))
 	}
-	return ""
+	run("add", "-A")
+	run("commit", "-qm", message)
+	return run("rev-parse", "HEAD")
 }
 
 func (r pushRepo) pushRef(t *testing.T, commit string) []PushRef {
@@ -108,14 +109,14 @@ require_cached = ["verify"]
 
 func TestPrePushRequireCachedWarnsOnMissingReceipt(t *testing.T) {
 	ctx := context.Background()
-	repo := initPushRepo(t, requireCachedTOML+"on_missing = \"warn\"\n")
-	cfg, err := config.Load(repo.dir)
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"warn\"\n")
+	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var out, errOut bytes.Buffer
-	res, err := RunPrePush(ctx, repo.git, cfg, Options{Refs: repo.pushRef(t, repo.head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, pr.head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil || !res.OK {
 		t.Fatalf("warn must allow the push: res=%+v err=%v", res, err)
 	}
@@ -125,7 +126,7 @@ func TestPrePushRequireCachedWarnsOnMissingReceipt(t *testing.T) {
 	if len(res.Steps) != 1 || res.Steps[0].Name != "fast" {
 		t.Fatalf("pre-push steps must still run, got %+v", res.Steps)
 	}
-	for _, want := range []string{"no cached receipt", `"verify"`, repo.head[:12], "run quai verify first"} {
+	for _, want := range []string{"no cached receipt", `"verify"`, pr.head[:12], "run quai verify first"} {
 		if !strings.Contains(res.Warning, want) || !strings.Contains(errOut.String(), want) {
 			t.Fatalf("warning %q / stderr %q missing %q", res.Warning, errOut.String(), want)
 		}
@@ -134,15 +135,15 @@ func TestPrePushRequireCachedWarnsOnMissingReceipt(t *testing.T) {
 
 func TestPrePushRequireCachedRefusesUntilVerified(t *testing.T) {
 	ctx := context.Background()
-	repo := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
-	cfg, err := config.Load(repo.dir)
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	refs := repo.pushRef(t, repo.head)
+	refs := pr.pushRef(t, pr.head)
 
 	var out, errOut bytes.Buffer
-	res, err := RunPrePush(ctx, repo.git, cfg, Options{Refs: refs, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: refs, RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil {
 		t.Fatalf("RunPrePush: %v", err)
 	}
@@ -154,12 +155,12 @@ func TestPrePushRequireCachedRefusesUntilVerified(t *testing.T) {
 	}
 
 	var seed bytes.Buffer
-	if vres, verr := verify.Run(ctx, repo.git, cfg, verify.Options{StepNames: []string{"verify"}, Stdout: &seed, Stderr: &seed}); verr != nil || !vres.OK {
+	if vres, verr := verify.Run(ctx, pr.git, cfg, verify.Options{StepNames: []string{"verify"}, Stdout: &seed, Stderr: &seed}); verr != nil || !vres.OK {
 		t.Fatalf("seed verify failed: %+v err=%v", vres, verr)
 	}
 	out.Reset()
 	errOut.Reset()
-	res, err = RunPrePush(ctx, repo.git, cfg, Options{Refs: refs, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err = RunPrePush(ctx, pr.git, cfg, Options{Refs: refs, RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil || !res.OK {
 		t.Fatalf("verified head must pass: res=%+v err=%v", res, err)
 	}
@@ -170,15 +171,15 @@ func TestPrePushRequireCachedRefusesUntilVerified(t *testing.T) {
 
 func TestPrePushRequireCachedSkipsStepsWithNoChangedInputs(t *testing.T) {
 	ctx := context.Background()
-	repo := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
-	cfg, err := config.Load(repo.dir)
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	head := repo.commit(t, "README.md", "v2\n", "docs only")
+	head := pr.commit(t, "README.md", "v2\n", "docs only")
 
 	var out, errOut bytes.Buffer
-	res, err := RunPrePush(ctx, repo.git, cfg, Options{Refs: repo.pushRef(t, head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil || !res.OK {
 		t.Fatalf("docs-only commit must satisfy require_cached: res=%+v err=%v", res, err)
 	}
@@ -189,15 +190,15 @@ func TestPrePushRequireCachedSkipsStepsWithNoChangedInputs(t *testing.T) {
 
 func TestPrePushEscapeHatchStillRunsSteps(t *testing.T) {
 	ctx := context.Background()
-	repo := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
-	cfg, err := config.Load(repo.dir)
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(EnvAllowUnverifiedPush, "1")
 
 	var out, errOut bytes.Buffer
-	res, err := RunPrePush(ctx, repo.git, cfg, Options{Refs: repo.pushRef(t, repo.head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, pr.head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil || !res.OK {
 		t.Fatalf("escape hatch must allow the push: res=%+v err=%v", res, err)
 	}
@@ -214,21 +215,21 @@ func TestPrePushEscapeHatchStillRunsSteps(t *testing.T) {
 
 func TestPrePushIgnoresTagsDeletionsAndAttestationPushes(t *testing.T) {
 	ctx := context.Background()
-	repo := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
-	cfg, err := config.Load(repo.dir)
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var out, errOut bytes.Buffer
 	refs, err := ParsePushRefs(strings.NewReader(
-		"refs/tags/v1 " + repo.head + " refs/tags/v1 " + zeroSHA + "\n" +
-			"(delete) " + zeroSHA + " refs/heads/gone " + repo.head + "\n" +
-			"refs/quai/records/fast-x " + repo.head + " refs/quai/records/fast-x " + zeroSHA + "\n"))
+		"refs/tags/v1 " + pr.head + " refs/tags/v1 " + zeroSHA + "\n" +
+			"(delete) " + zeroSHA + " refs/heads/gone " + pr.head + "\n" +
+			"refs/quai/records/fast-x " + pr.head + " refs/quai/records/fast-x " + zeroSHA + "\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := RunPrePush(ctx, repo.git, cfg, Options{Refs: refs, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: refs, RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil || !res.OK {
 		t.Fatalf("tag/deletion/attestation refs must not be gated: res=%+v err=%v", res, err)
 	}
@@ -238,7 +239,7 @@ func TestPrePushIgnoresTagsDeletionsAndAttestationPushes(t *testing.T) {
 
 	out.Reset()
 	errOut.Reset()
-	res, err = RunPrePush(ctx, repo.git, cfg, Options{Refs: refs[2:], RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err = RunPrePush(ctx, pr.git, cfg, Options{Refs: refs[2:], RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil || !res.OK {
 		t.Fatalf("attestation-only push must pass: res=%+v err=%v", res, err)
 	}
@@ -249,21 +250,21 @@ func TestPrePushIgnoresTagsDeletionsAndAttestationPushes(t *testing.T) {
 
 func TestPrePushReportsEveryMissingStepAndRef(t *testing.T) {
 	ctx := context.Background()
-	repo := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
-	cfg, err := config.Load(repo.dir)
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := repo.commit(t, "app/main.txt", "v2\n", "second branch commit")
+	other := pr.commit(t, "app/main.txt", "v2\n", "second branch commit")
 	refs, err := ParsePushRefs(strings.NewReader(
-		"refs/heads/feat " + repo.head + " refs/heads/feat " + zeroSHA + "\n" +
-			"refs/heads/other " + other + " refs/heads/other " + repo.head + "\n"))
+		"refs/heads/feat " + pr.head + " refs/heads/feat " + zeroSHA + "\n" +
+			"refs/heads/other " + other + " refs/heads/other " + pr.head + "\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var out, errOut bytes.Buffer
-	res, err := RunPrePush(ctx, repo.git, cfg, Options{Refs: refs, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: refs, RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil {
 		t.Fatalf("RunPrePush: %v", err)
 	}
@@ -279,7 +280,7 @@ func TestPrePushReportsEveryMissingStepAndRef(t *testing.T) {
 	if missing != 2 {
 		t.Fatalf("require_cached = %+v, want both entries missing", res.RequireCached)
 	}
-	for _, want := range []string{"refs/heads/feat", "refs/heads/other", repo.head[:12], other[:12]} {
+	for _, want := range []string{"refs/heads/feat", "refs/heads/other", pr.head[:12], other[:12]} {
 		if !strings.Contains(res.Warning, want) {
 			t.Fatalf("warning %q missing %q", res.Warning, want)
 		}
@@ -288,14 +289,14 @@ func TestPrePushReportsEveryMissingStepAndRef(t *testing.T) {
 
 func TestPrePushManualInvocationChecksCurrentBranch(t *testing.T) {
 	ctx := context.Background()
-	repo := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
-	cfg, err := config.Load(repo.dir)
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var out, errOut bytes.Buffer
-	res, err := RunPrePush(ctx, repo.git, cfg, Options{Stdout: &out, Stderr: &errOut})
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Stdout: &out, Stderr: &errOut})
 	if err != nil {
 		t.Fatalf("RunPrePush: %v", err)
 	}
@@ -320,7 +321,7 @@ func TestPrePushAutoPushesMissingAttestationRef(t *testing.T) {
 		t.Fatalf("ssh-keygen: %v\n%s", err, string(out))
 	}
 
-	repo := initPushRepo(t, `
+	pr := initPushRepo(t, `
 version = 1
 base = "main"
 
@@ -343,27 +344,27 @@ signing_key = "`+keyPath+`"
 remote = "origin"
 `)
 	gitCmd := exec.Command("git", "remote", "add", "origin", origin)
-	gitCmd.Dir = repo.dir
+	gitCmd.Dir = pr.dir
 	if out, err := gitCmd.CombinedOutput(); err != nil {
 		t.Fatalf("add remote: %v\n%s", err, string(out))
 	}
-	cfg, err := config.Load(repo.dir)
+	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var seed bytes.Buffer
-	vres, err := verify.Run(ctx, repo.git, cfg, verify.Options{StepNames: []string{"verify"}, Sign: true, SigningKey: keyPath, Stdout: &seed, Stderr: &seed})
+	vres, err := verify.Run(ctx, pr.git, cfg, verify.Options{StepNames: []string{"verify"}, Sign: true, SigningKey: keyPath, Stdout: &seed, Stderr: &seed})
 	if err != nil || !vres.OK || len(vres.Attestations) != 1 {
 		t.Fatalf("seed signed verify failed: %+v err=%v", vres, err)
 	}
 	attRef := vres.Attestations[0]
-	if remoteRefs, err := repo.git.ListRemoteRefs(ctx, "origin", []string{attestationRefPrefix + "*"}); err != nil || len(remoteRefs) != 0 {
+	if remoteRefs, err := pr.git.ListRemoteRefs(ctx, "origin", []string{attestationRefPrefix + "*"}); err != nil || len(remoteRefs) != 0 {
 		t.Fatalf("expected no remote attestation yet, got %v (err=%v)", remoteRefs, err)
 	}
 
 	var out, errOut bytes.Buffer
-	res, err := RunPrePush(ctx, repo.git, cfg, Options{Refs: repo.pushRef(t, repo.head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, pr.head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil || !res.OK {
 		t.Fatalf("pre-push must pass with a cached receipt: res=%+v err=%v", res, err)
 	}
@@ -373,14 +374,14 @@ remote = "origin"
 	if len(res.RequireCached) != 1 || !res.RequireCached[0].AttestationPushed {
 		t.Fatalf("require_cached = %+v, want attestation_pushed", res.RequireCached)
 	}
-	remoteRefs, err := repo.git.ListRemoteRefs(ctx, "origin", []string{attestationRefPrefix + "*"})
+	remoteRefs, err := pr.git.ListRemoteRefs(ctx, "origin", []string{attestationRefPrefix + "*"})
 	if err != nil || len(remoteRefs) != 1 || remoteRefs[0] != attRef {
 		t.Fatalf("remote refs = %v, want [%s] (err=%v)", remoteRefs, attRef, err)
 	}
 
 	out.Reset()
 	errOut.Reset()
-	res, err = RunPrePush(ctx, repo.git, cfg, Options{Refs: repo.pushRef(t, repo.head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err = RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, pr.head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil || !res.OK || len(res.AttestationsPushed) != 0 {
 		t.Fatalf("second push must not re-push the attestation: res=%+v err=%v", res, err)
 	}
@@ -388,21 +389,21 @@ remote = "origin"
 
 func TestRequireCachedCheckStaysUnder100ms(t *testing.T) {
 	ctx := context.Background()
-	repo := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
-	cfg, err := config.Load(repo.dir)
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var seed bytes.Buffer
-	if vres, verr := verify.Run(ctx, repo.git, cfg, verify.Options{StepNames: []string{"verify"}, Stdout: &seed, Stderr: &seed}); verr != nil || !vres.OK {
+	if vres, verr := verify.Run(ctx, pr.git, cfg, verify.Options{StepNames: []string{"verify"}, Stdout: &seed, Stderr: &seed}); verr != nil || !vres.OK {
 		t.Fatalf("seed verify failed: %+v err=%v", vres, verr)
 	}
-	targets := BranchTargets(repo.pushRef(t, repo.head))
+	targets := BranchTargets(pr.pushRef(t, pr.head))
 
 	durations := make([]time.Duration, 5)
 	for i := range durations {
 		started := time.Now()
-		report, err := CheckCached(ctx, repo.git, cfg, targets, "")
+		report, err := CheckCached(ctx, pr.git, cfg, targets, "")
 		durations[i] = time.Since(started)
 		if err != nil || len(report.Missing) != 0 || len(report.Steps) != 1 || report.Steps[0].Status != "cached" {
 			t.Fatalf("check %d: report=%+v err=%v", i, report, err)
@@ -422,7 +423,7 @@ func TestPrePushAttestationPushFailureDoesNotBlock(t *testing.T) {
 	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyPath).CombinedOutput(); err != nil {
 		t.Fatalf("ssh-keygen: %v\n%s", err, string(out))
 	}
-	repo := initPushRepo(t, `
+	pr := initPushRepo(t, `
 version = 1
 base = "main"
 
@@ -444,17 +445,17 @@ on_missing = "refuse"
 signing_key = "`+keyPath+`"
 remote = "origin"
 `)
-	cfg, err := config.Load(repo.dir)
+	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var seed bytes.Buffer
-	if vres, verr := verify.Run(ctx, repo.git, cfg, verify.Options{StepNames: []string{"verify"}, Sign: true, SigningKey: keyPath, Stdout: &seed, Stderr: &seed}); verr != nil || !vres.OK {
+	if vres, verr := verify.Run(ctx, pr.git, cfg, verify.Options{StepNames: []string{"verify"}, Sign: true, SigningKey: keyPath, Stdout: &seed, Stderr: &seed}); verr != nil || !vres.OK {
 		t.Fatalf("seed signed verify failed: %+v err=%v", vres, verr)
 	}
 
 	var out, errOut bytes.Buffer
-	res, err := RunPrePush(ctx, repo.git, cfg, Options{Refs: repo.pushRef(t, repo.head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, pr.head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
 	if err != nil || !res.OK {
 		t.Fatalf("an unreachable remote must not block the push: res=%+v err=%v", res, err)
 	}
