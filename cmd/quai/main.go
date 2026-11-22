@@ -18,6 +18,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/attest"
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/conflicts"
+	"github.com/coding-pr0jects/quai/internal/detach"
 	"github.com/coding-pr0jects/quai/internal/execrun"
 	"github.com/coding-pr0jects/quai/internal/forge"
 	"github.com/coding-pr0jects/quai/internal/hooks"
@@ -36,9 +37,11 @@ const version = "0.3.0"
 const rootUsage = `quai: local verification, signed attestations, receipts, risk tiering, and serialized PR landing
 
 Usage:
-  quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [--key <path>] [--push|--no-push] [--remote <name>] [--json]
+  quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [--key <path>] [--push|--no-push] [--remote <name>] [--detach] [--json]
+  quai verify --wait [<run-id>] [--max <duration>] [--json]
+  quai verify --stop [<run-id>] [--json]
   quai attest check|push|fetch|prune [flags...]
-  quai exec --pool <name> [--slots <n>] [--wait <duration>] -- <command...>
+  quai exec --pool <name> [--slots <n>] [--wait <duration>] [--detach] -- <command...>
   quai tier [--since <ref>] [--json]
   quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]
   quai verdict record|check [flags...]
@@ -53,9 +56,41 @@ Usage:
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	code := run(ctx, os.Args[1:], ".", os.Stdin, os.Stdout, os.Stderr)
+	var code int
+	if id, ok := os.LookupEnv(detach.EnvRunID); ok {
+		_ = os.Unsetenv(detach.EnvRunID)
+		code = runRecorded(ctx, id, os.Args[1:], os.Stdout, os.Stderr)
+	} else {
+		code = run(ctx, os.Args[1:], ".", os.Stdin, os.Stdout, os.Stderr)
+	}
 	stop()
 	os.Exit(code)
+}
+
+func runRecorded(ctx context.Context, id string, args []string, stdout, stderr io.Writer) int {
+	commonDir, err := repo.NewExecGit(".").CommonDir(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "quai: detached run %s: not inside a git repository: %v\n", id, err)
+		return 2
+	}
+	rec, err := detach.OpenRecorder(commonDir, id)
+	if err != nil {
+		fmt.Fprintf(stderr, "quai: %v\n", err)
+		return 2
+	}
+	code := 2
+	switch {
+	case len(args) > 0 && args[0] == "verify":
+		code = runVerify(ctx, ".", args[1:], stdout, stderr, rec)
+	case len(args) > 0 && args[0] == "exec":
+		code = runExec(ctx, ".", args[1:], nil, stdout, stderr, rec)
+	default:
+		fmt.Fprintf(stderr, "quai: detached run %s: unsupported command %v\n", id, args)
+	}
+	if err := rec.Finish(code); err != nil {
+		fmt.Fprintf(stderr, "quai: record exit of detached run %s: %v\n", id, err)
+	}
+	return code
 }
 
 func run(ctx context.Context, args []string, cwd string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -74,11 +109,11 @@ func run(ctx context.Context, args []string, cwd string, stdin io.Reader, stdout
 		fmt.Fprintf(stdout, "quai %s\n", version)
 		return 0
 	case "verify":
-		return runVerify(ctx, cwd, rest, stdout, stderr)
+		return runVerify(ctx, cwd, rest, stdout, stderr, nil)
 	case "attest":
 		return runAttest(ctx, cwd, rest, stdout, stderr)
 	case "exec":
-		return runExec(ctx, cwd, rest, stdin, stdout, stderr)
+		return runExec(ctx, cwd, rest, stdin, stdout, stderr, nil)
 	case "tier":
 		return runTier(ctx, cwd, rest, stdout, stderr)
 	case "patch-id":
@@ -125,7 +160,7 @@ func loadRepoAndConfig(ctx context.Context, cwd string) (*repo.ExecGit, *config.
 	return g, cfg, top, nil
 }
 
-func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
+func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer, rec *detach.Recorder) int {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var steps multiFlag
@@ -139,19 +174,48 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 	noPush := fs.Bool("no-push", false, "disable automatic attestation push even when configured")
 	remote := fs.String("remote", "", "git remote for --push (defaults to [attest].remote)")
 	jsonOut := fs.Bool("json", false, "output JSON")
+	detachRun := fs.Bool("detach", false, "start the run in the background, print its run id, and exit 0")
+	wait := fs.Bool("wait", false, "wait for a detached run: [<run-id>], default the latest from this worktree")
+	stop := fs.Bool("stop", false, "stop a detached run: [<run-id>], default the latest from this worktree")
+	maxWait := fs.Duration("max", 8*time.Minute, "with --wait: longest wait before exiting 4 (0 checks without blocking)")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	var runID string
+	if (*wait || *stop) && fs.NArg() > 0 {
+		runID = fs.Arg(0)
+		if err := fs.Parse(fs.Args()[1:]); err != nil {
+			return 2
+		}
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "quai verify: unexpected arguments: %v\n", fs.Args())
 		return 2
 	}
-	g, cfg, _, err := loadRepoAndConfig(ctx, cwd)
+	if *wait || *stop {
+		if msg := checkRunControlFlags(fs, *detachRun, *wait, *stop); msg != "" {
+			fmt.Fprintf(stderr, "quai verify: %s\n", msg)
+			return 2
+		}
+		return runRunControl(ctx, cwd, runID, *wait, *maxWait, *jsonOut, stdout, stderr)
+	}
+	if isFlagSet(fs, "max") {
+		fmt.Fprintln(stderr, "quai verify: --max applies only to --wait")
+		return 2
+	}
+	g, cfg, top, err := loadRepoAndConfig(ctx, cwd)
 	if err != nil {
 		fmt.Fprintf(stderr, "quai verify: %v\n", err)
 		return 2
 	}
+	if *detachRun {
+		return startDetached(ctx, g, top, cwd, append([]string{"verify"}, forwardFlags(fs, "detach", "json")...), *jsonOut, stdout, stderr)
+	}
 	doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, *sign, *noSign, *push, *noPush)
+	var onStepStart func(execrun.Process)
+	if rec != nil {
+		onStepStart = rec.ProcessStarted
+	}
 	res, err := verify.Run(ctx, g, cfg, verify.Options{
 		StepNames:      steps,
 		Since:          *since,
@@ -164,7 +228,11 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 		JSON:           *jsonOut,
 		Stdout:         stdout,
 		Stderr:         stderr,
+		OnStepStart:    onStepStart,
 	})
+	if rec != nil {
+		rec.SetResult(res)
+	}
 	if *jsonOut {
 		writeJSON(stdout, res)
 	} else if err != nil && !res.OK {
@@ -409,12 +477,13 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 	}
 }
 
-func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, stdout, stderr io.Writer, rec *detach.Recorder) int {
 	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	pool := fs.String("pool", "", "slot pool name from [slots]")
 	slots := fs.Int("slots", 1, "number of slots to acquire")
 	waitStr := fs.String("wait", "30m", "max wait duration")
+	detachRun := fs.Bool("detach", false, "start the command in the background, print its run id, and exit 0")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -423,7 +492,7 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 		cmdArgs = cmdArgs[1:]
 	}
 	if *pool == "" || len(cmdArgs) == 0 || *slots <= 0 {
-		fmt.Fprintln(stderr, "Usage: quai exec --pool <name> [--slots <n>] [--wait <duration>] -- <command...>")
+		fmt.Fprintln(stderr, "Usage: quai exec --pool <name> [--slots <n>] [--wait <duration>] [--detach] -- <command...>")
 		return 2
 	}
 	waitDur, err := time.ParseDuration(*waitStr)
@@ -445,10 +514,18 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 		fmt.Fprintf(stderr, "quai exec: requested %d slots in pool %q (capacity %d)\n", *slots, *pool, sp.Capacity)
 		return 2
 	}
+	if *detachRun {
+		args := append(append([]string{"exec"}, forwardFlags(fs, "detach")...), "--")
+		return startDetached(ctx, g, top, cwd, append(args, cmdArgs...), false, stdout, stderr)
+	}
 	commonDir, err := g.CommonDir(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "quai exec: %v\n", err)
 		return 2
+	}
+	var onStart func(execrun.Process)
+	if rec != nil {
+		onStart = rec.ProcessStarted
 	}
 	absCwd, err := filepath.Abs(cwd)
 	if err != nil {
@@ -470,6 +547,7 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 			Command:  "quai exec --pool " + *pool + " -- " + strings.Join(cmdArgs, " "),
 			Worktree: top,
 		},
+		OnStart: onStart,
 	})
 	if err != nil {
 		var te *lock.TimeoutError
@@ -782,6 +860,9 @@ func runStatus(ctx context.Context, cwd string, args []string, stdout, stderr io
 		fmt.Fprintf(stdout, "in-flight: %d step(s)\n", len(rep.InFlight))
 	}
 	fmt.Fprintf(stdout, "receipts: %d cached, attestations: %d local\n", rep.ReceiptCount, rep.AttestCount)
+	for _, r := range rep.Runs {
+		fmt.Fprintf(stdout, "run %s: %s (pid %d, quai %s, %s)\n", r.ID, r.State, r.PID, strings.Join(r.Args, " "), r.Worktree)
+	}
 	return 0
 }
 

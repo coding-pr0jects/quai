@@ -19,6 +19,7 @@ quai/
 │   ├── execrun/       # process-group command runner (Setpgid) with signal cleanup and slot binding
 │   ├── receipt/       # input fingerprinting, atomic JSON writes, lookup, retention pruning
 │   ├── verify/        # step orchestration, cache lookup, mutation guard
+│   ├── detach/        # detached runs: start, wait with a read cursor, stop, dead-run cleanup, pruning
 │   ├── tier/          # pure diff risk classifier, R100 rename handling, test-tamper scanner
 │   ├── patchid/       # pure patch-id survival comparator and per-file drift detector
 │   ├── hooks/         # non-destructive pre-push installer and receipt fast path
@@ -79,8 +80,15 @@ All mutable state lives inside `<git-common-dir>/quai/` (resolved via `git rev-p
 │   │   └── owner
 │   ├── slot-<pool>.queue/
 │   └── inflight-<step>-<fingerprint>.lock/   # dedupes concurrent identical verify runs
-└── receipts/
-    └── <step>-<fingerprint>.json
+├── receipts/
+│   └── <step>-<fingerprint>.json
+└── runs/
+    └── <run-id>/                 # one detached run; the 20 latest finished runs are kept
+        ├── meta.json             # args, worktree, pid + kernel start time, host, pid_ns
+        ├── output.log            # stdout and stderr of the run
+        ├── cursor                # byte offset read by the previous quai verify --wait
+        ├── groups                # pid + start time of each step's process group
+        └── exit.json             # exit code, stopped flag, verify result; absent while running or dead
 ```
 
 ### Atomic lock and dead-PID recovery (`internal/lock`)
@@ -96,6 +104,13 @@ All mutable state lives inside `<git-common-dir>/quai/` (resolved via `git rev-p
 ### Process-group isolation (`internal/execrun`)
 
 Every child command runs in its own process group (`SysProcAttr{Setpgid: true}`). On `SIGINT`, `SIGTERM`, `SIGHUP`, or step timeout, `quai` sends `SIGTERM` to `-pgid`, waits up to 5 seconds, then sends `SIGKILL` to `-pgid` before releasing any held locks.
+
+### Detached runs (`internal/detach`)
+
+1. `--detach` re-executes the same `quai` binary with the same flags in a new session (`Setsid`), with `QUAI_RUN_ID=<run-id>` in its environment. That process unsets the variable, runs the command in-process, appends each step's process group (PID and kernel start time from `/proc/<pid>/stat`) to `groups`, and writes `exit.json` atomically when the command returns, including after `SIGTERM`.
+2. A process is identified by PID plus start time, so a reused PID never passes for the run, and a step group whose PID now names another process is never signalled.
+3. A run is `passed` or `failed` once `exit.json` exists, `running` while its process lives (or when it belongs to another host or PID namespace), and `dead` otherwise. Cleaning a dead run kills its live step groups, then removes the locks and queue tickets whose lease names its PID on this host and namespace, under the same `.takeover` guard as a takeover, and only while no process has that PID.
+4. `--stop` sends `SIGTERM` to the run's group and gives it 10 seconds, longer than the 5 seconds a step gets, so the run can kill its own steps and release its own locks first.
 
 ### Receipts and mutation guard (`internal/receipt`, `internal/verify`)
 

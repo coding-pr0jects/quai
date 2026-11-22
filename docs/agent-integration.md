@@ -37,6 +37,21 @@ Benefits:
 - When `quai hooks install` is enabled, the subsequent `git push` hits the receipt cache in under 50 ms instead of rerunning checks.
 - If a check secretly runs a formatter or code generator that dirties the tree, the mutation guard catches it and exits `1` instead of recording a false pass.
 
+#### Verification longer than a tool call
+
+Agent tool calls usually time out after about 10 minutes, while a heavy step plus its wait for a slot can take longer. Start the run detached and poll it, instead of wrapping `quai verify` in `setsid` and a shared `/tmp` log:
+
+```bash
+quai verify --detach --json        # prints run_id, exits 0 at once
+quai verify --wait --max 8m --json # repeat while it exits 4
+```
+
+- Exit `0`: passed, with receipts and attestations written as in the foreground.
+- Exit `1`: failed (read `exit.result.steps`) or `dead` (its process vanished; its steps and locks are cleaned up).
+- Exit `4`: still running; call `--wait` again, which prints only the output written since the previous call.
+
+Each worktree's `--wait` without a run ID follows the latest run started from that worktree. `quai verify --stop` ends a run and its steps.
+
 ### 2. Right-sizing independent review with `quai tier --json`
 
 Before spinning up an expensive reviewer agent or browser/E2E verification session, query `quai tier --json`:

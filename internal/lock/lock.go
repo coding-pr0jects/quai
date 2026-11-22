@@ -171,7 +171,7 @@ func AcquireDir(ctx context.Context, lockDir string, owner Owner, opts Options) 
 	}
 	owner = normalizeOwner(owner)
 	opts = normalizeOptions(opts, 500*time.Millisecond)
-	localHost, localPIDNS := currentHost(), currentPIDNS()
+	localHost, localPIDNS := LocalHost(), LocalPIDNS()
 	queueDir := lockDir + ".queue"
 
 	// Fast path when no live waiters are queued.
@@ -268,7 +268,7 @@ func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity i
 	}
 	owner = normalizeOwner(owner)
 	opts = normalizeOptions(opts, 500*time.Millisecond)
-	localHost, localPIDNS := currentHost(), currentPIDNS()
+	localHost, localPIDNS := LocalHost(), LocalPIDNS()
 	queueDir := filepath.Join(locksRoot, fmt.Sprintf("slot-%s.queue", pool))
 	memFn := opts.AvailableMem
 	if memFn == nil {
@@ -386,7 +386,7 @@ func InspectDir(lockDir string, staleAfter time.Duration) InspectState {
 	if staleAfter <= 0 {
 		staleAfter = DefaultStaleAfter
 	}
-	localHost, localPIDNS := currentHost(), currentPIDNS()
+	localHost, localPIDNS := LocalHost(), LocalPIDNS()
 	now := time.Now().UTC()
 	st := InspectState{Path: lockDir}
 	if _, err := os.Stat(lockDir); err == nil {
@@ -405,12 +405,89 @@ func InspectDir(lockDir string, staleAfter time.Duration) InspectState {
 	return st
 }
 
+// ReleaseDead removes every lock under locksRoot whose lease names pid on this host and PID
+// namespace, and every queue ticket of that pid, provided no process with that PID is alive.
+// It returns the released lock directories.
+func ReleaseDead(locksRoot string, pid int) ([]string, error) {
+	if pid <= 0 || processAlive(pid) {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(locksRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read locks dir %s: %w", locksRoot, err)
+	}
+	localHost, localPIDNS := LocalHost(), LocalPIDNS()
+	ownedHere := func(o Owner) bool {
+		return o.PID == pid && (o.Host == "" || o.Host == localHost) && (o.PIDNS == "" || o.PIDNS == localPIDNS)
+	}
+	var released []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(locksRoot, e.Name())
+		switch {
+		case strings.HasSuffix(e.Name(), ".lock"):
+			ok, err := releaseDeadLease(dir, ownedHere)
+			if err != nil {
+				return released, err
+			}
+			if ok {
+				released = append(released, dir)
+			}
+		case strings.HasSuffix(e.Name(), ".queue"):
+			tickets, _ := os.ReadDir(dir)
+			for _, t := range tickets {
+				p := filepath.Join(dir, t.Name())
+				raw, err := os.ReadFile(p)
+				if err != nil {
+					continue
+				}
+				var o Owner
+				if json.Unmarshal(raw, &o) == nil && ownedHere(o) {
+					removeTicket(dir, p)
+				}
+			}
+		}
+	}
+	return released, nil
+}
+
+func releaseDeadLease(lockDir string, ownedHere func(Owner) bool) (bool, error) {
+	cur, err := readOwner(lockDir)
+	if err != nil || !ownedHere(cur) {
+		return false, nil
+	}
+	takeoverDir := lockDir + ".takeover"
+	if err := os.Mkdir(takeoverDir, 0o755); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("mkdir %s: %w", takeoverDir, err)
+	}
+	defer os.Remove(takeoverDir)
+	again, err := readOwner(lockDir)
+	if err != nil || !sameOwnerIdentity(again, cur) {
+		return false, nil
+	}
+	if err := os.Remove(filepath.Join(lockDir, "owner")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("release dead lock %s: %w", lockDir, err)
+	}
+	if err := os.Remove(lockDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("release dead lock %s: %w", lockDir, err)
+	}
+	return true, nil
+}
+
 // InspectWaiters returns the live queued waiters for a slot pool queue directory.
 func InspectWaiters(queueDir string, staleAfter time.Duration) []Owner {
 	if staleAfter <= 0 {
 		staleAfter = DefaultStaleAfter
 	}
-	return readLiveWaiters(queueDir, currentHost(), currentPIDNS(), staleAfter, time.Now().UTC())
+	return readLiveWaiters(queueDir, LocalHost(), LocalPIDNS(), staleAfter, time.Now().UTC())
 }
 
 // OwnerAlive decides whether a lock owner is still live, using kill(pid, 0) only within
@@ -446,10 +523,10 @@ func normalizeOwner(owner Owner) Owner {
 		owner.PID = os.Getpid()
 	}
 	if owner.Host == "" {
-		owner.Host = currentHost()
+		owner.Host = LocalHost()
 	}
 	if owner.PIDNS == "" {
-		owner.PIDNS = currentPIDNS()
+		owner.PIDNS = LocalPIDNS()
 	}
 	if owner.Token == "" {
 		owner.Token = newToken()
@@ -700,7 +777,8 @@ func sameOwnerIdentity(a, b Owner) bool {
 	return a.PID == b.PID && a.Host == b.Host && a.PIDNS == b.PIDNS
 }
 
-func currentHost() string {
+// LocalHost is the host name that leases record.
+func LocalHost() string {
 	h, err := os.Hostname()
 	if err != nil {
 		return ""
@@ -708,7 +786,8 @@ func currentHost() string {
 	return h
 }
 
-func currentPIDNS() string {
+// LocalPIDNS is the Linux PID namespace that leases record, empty outside Linux.
+func LocalPIDNS() string {
 	ns, err := os.Readlink("/proc/self/ns/pid")
 	if err != nil {
 		return ""

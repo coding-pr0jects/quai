@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - `AGENTS.md` (imported by `CLAUDE.md`) and `GLOSSARY.md` for contributors and coding agents.
+- Detached runs (`internal/detach`): `quai verify --detach` and `quai exec --detach` start the command in the background under `<git-common-dir>/quai/runs/<run-id>/`; `quai verify --wait [<run-id>] [--max <duration>]` streams the new output and exits `0` passed, `1` failed or dead, `4` still running; `quai verify --stop [<run-id>]` stops the run and its steps. Dead runs have their step groups killed and their locks released, and `quai status` and `quai doctor` list running and dead runs (#11).
 
 ### Changed
 - `docs/agents.md` is now `docs/agent-integration.md`; the `verify-quai` harness moved to `.agents/skills/verify-quai/`, linked from `.claude/skills/` and `.cursor/skills/`.

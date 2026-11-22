@@ -37,4 +37,5 @@ Each feature file starts with an H1 title and one summary paragraph, followed by
 - [Slots and exec](./slots-and-exec.md) covers `quai exec` pool concurrency throttling, exit-code propagation, and dead-PID lock takeover.
 - [Tier and test tampering](./tier-and-tamper.md) covers `quai tier` risk classification, `R100` pure rename handling, `tests_tampered` escalation, and receipt visibility.
 - [Patch-id and hooks](./patch-id-and-hooks.md) covers `quai patch-id` verdict survival after rebase, drift detection, and `quai hooks` installation, non-destructive refusal, and fast `pre-push` receipt hits.
+- [Detached runs](./detached-runs.md) covers `quai verify --detach`, `--wait`, and `--stop`, `quai exec --detach`, dead-run cleanup after `SIGKILL`, and per-worktree isolation.
 - [Land pull requests](./land-pr.md) covers `quai land` dry-run planning, direct merge, `git merge-tree` optimistic merge, rebase-and-merge with conflict abort, and draft or fork refusal.
