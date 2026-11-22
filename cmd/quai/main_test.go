@@ -123,7 +123,25 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 		t.Fatalf("expected SURVIVES, got: %s", out.String())
 	}
 
-	// 6. Unknown command -> exit 2.
+	// 6. quai status --json & quai doctor --json
+	out.Reset()
+	errBuf.Reset()
+	if code := run(ctx, []string{"status", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
+		t.Fatalf("status failed: %d %s %s", code, out.String(), errBuf.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"receipt_count": 2`)) {
+		t.Fatalf("expected 2 cached receipts in status json, got: %s", out.String())
+	}
+	out.Reset()
+	errBuf.Reset()
+	if code := run(ctx, []string{"doctor", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
+		t.Fatalf("doctor failed: %d %s %s", code, out.String(), errBuf.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"ok": true`)) {
+		t.Fatalf("expected ok doctor json, got: %s", out.String())
+	}
+
+	// 7. Unknown command -> exit 2.
 	out.Reset()
 	errBuf.Reset()
 	if code := run(ctx, []string{"nope"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 2 {

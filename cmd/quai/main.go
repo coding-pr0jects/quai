@@ -24,22 +24,25 @@ import (
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/patchid"
 	"github.com/coding-pr0jects/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/status"
 	"github.com/coding-pr0jects/quai/internal/tier"
 	"github.com/coding-pr0jects/quai/internal/verify"
 )
 
-const version = "0.2.0-alpha"
+const version = "0.2.0"
 
 const rootUsage = `quai: local verification, signed attestations, receipts, risk tiering, and serialized PR landing
 
 Usage:
-  quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign] [--key <path>] [--push] [--remote <name>] [--json]
+  quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign|--no-sign] [--key <path>] [--push|--no-push] [--remote <name>] [--json]
   quai attest check|push|fetch|prune [flags...]
   quai exec --pool <name> [--slots <n>] [--wait <duration>] -- <command...>
   quai tier [--since <ref>] [--json]
   quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]
-  quai land <pr> [--dry-run] [--method squash|merge|rebase] [--json]
+  quai land <pr> [--dry-run] [--method squash|merge|rebase] [--no-sign] [--no-push] [--json]
   quai hooks install|uninstall|pre-push [--json]
+  quai status [--json]
+  quai doctor [--json]
   quai version
 `
 
@@ -79,6 +82,10 @@ func run(ctx context.Context, args []string, cwd string, stdin io.Reader, stdout
 		return runLand(ctx, cwd, rest, stdout, stderr)
 	case "hooks":
 		return runHooks(ctx, cwd, rest, stdout, stderr)
+	case "status":
+		return runStatus(ctx, cwd, rest, stdout, stderr)
+	case "doctor":
+		return runDoctor(ctx, cwd, rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "quai: unknown command %q\n\n%s", sub, rootUsage)
 		return 2
@@ -709,6 +716,89 @@ func runHooks(ctx context.Context, cwd string, args []string, stdout, stderr io.
 		fmt.Fprintf(stderr, "quai hooks: unknown subcommand %q (expected install, uninstall, or pre-push)\n", action)
 		return 2
 	}
+}
+
+func runStatus(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	jsonOut := fs.Bool("json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "quai status: unexpected arguments: %v\n", fs.Args())
+		return 2
+	}
+	g := repo.NewExecGit(cwd)
+	top, err := g.TopLevel(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "quai status: not inside a git repository: %v\n", err)
+		return 2
+	}
+	g.Dir = top
+	cfg, _ := config.Load(top)
+	rep, err := status.Inspect(ctx, g, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "quai status: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		writeJSON(stdout, rep)
+		return 0
+	}
+	if rep.LandLock.Held {
+		state := "live"
+		if rep.LandLock.Stale {
+			state = "stale"
+		}
+		if rep.LandLock.Owner != nil {
+			fmt.Fprintf(stdout, "land.lock: held (%s, pid %d, %s, waiters=%d)\n", state, rep.LandLock.Owner.PID, rep.LandLock.Owner.Command, len(rep.LandLock.Waiters))
+		} else {
+			fmt.Fprintf(stdout, "land.lock: held (%s, waiters=%d)\n", state, len(rep.LandLock.Waiters))
+		}
+	} else {
+		fmt.Fprintln(stdout, "land.lock: free")
+	}
+	for _, p := range rep.Pools {
+		fmt.Fprintf(stdout, "pool %-10s %d/%d held (stale=%d, waiters=%d)\n", p.Name+":", p.Held, p.Capacity, p.Stale, len(p.Waiters))
+	}
+	if len(rep.InFlight) > 0 {
+		fmt.Fprintf(stdout, "in-flight: %d step(s)\n", len(rep.InFlight))
+	}
+	fmt.Fprintf(stdout, "receipts: %d cached, attestations: %d local\n", rep.ReceiptCount, rep.AttestCount)
+	return 0
+}
+
+func runDoctor(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	jsonOut := fs.Bool("json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "quai doctor: unexpected arguments: %v\n", fs.Args())
+		return 2
+	}
+	g := repo.NewExecGit(cwd)
+	if top, err := g.TopLevel(ctx); err == nil {
+		g.Dir = top
+	}
+	rep := status.Doctor(ctx, g)
+	if *jsonOut {
+		writeJSON(stdout, rep)
+	} else {
+		for _, c := range rep.Checks {
+			fmt.Fprintf(stdout, "%-4s %-22s %s\n", c.Status, c.Name, c.Message)
+			if c.Fix != "" {
+				fmt.Fprintf(stdout, "     fix: %s\n", c.Fix)
+			}
+		}
+	}
+	if !rep.OK {
+		return 1
+	}
+	return 0
 }
 
 func reorderFlags(args []string, valueFlags map[string]bool) []string {
