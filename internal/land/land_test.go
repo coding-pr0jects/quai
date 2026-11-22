@@ -40,7 +40,7 @@ func TestDecideStateMachine(t *testing.T) {
 	}{
 		{
 			name: "dirty tree refused",
-			in:   DecisionInput{Clean: false, CurrentBranch: "feat/x", LocalHeadSHA: basePR.HeadRefOid, PR: basePR, Policy: policy},
+			in:   DecisionInput{Clean: false, CurrentBranch: "feat/x", HeadSHA: basePR.HeadRefOid, PR: basePR, Policy: policy},
 			want: ActionRefuse,
 		},
 		{
@@ -48,7 +48,7 @@ func TestDecideStateMachine(t *testing.T) {
 			in: func() DecisionInput {
 				pr := basePR
 				pr.IsDraft = true
-				return DecisionInput{Clean: true, CurrentBranch: "feat/x", LocalHeadSHA: pr.HeadRefOid, PR: pr, Policy: policy}
+				return DecisionInput{Clean: true, CurrentBranch: "feat/x", HeadSHA: pr.HeadRefOid, PR: pr, Policy: policy}
 			}(),
 			want: ActionRefuse,
 		},
@@ -57,19 +57,52 @@ func TestDecideStateMachine(t *testing.T) {
 			in: func() DecisionInput {
 				pr := basePR
 				pr.IsCrossRepository = true
-				return DecisionInput{Clean: true, CurrentBranch: "feat/x", LocalHeadSHA: pr.HeadRefOid, PR: pr, Policy: policy}
+				return DecisionInput{Clean: true, CurrentBranch: "feat/x", HeadSHA: pr.HeadRefOid, PR: pr, Policy: policy}
+			}(),
+			want: ActionRefuse,
+		},
+		{
+			name: "PR branch checked out with unpushed commit refused",
+			in:   DecisionInput{Clean: true, CurrentBranch: "feat/x", HeadSHA: strings.Repeat("b", 40), PR: basePR, Policy: policy},
+			want: ActionRefuse,
+		},
+		{
+			name: "coordinator on another branch ignores its own dirty tree",
+			in:   DecisionInput{Clean: false, CurrentBranch: "coord", HeadSHA: basePR.HeadRefOid, PR: basePR, Policy: policy},
+			want: ActionDirectMerge,
+		},
+		{
+			name: "detached coordinator lands optimistically",
+			in: DecisionInput{
+				CurrentBranch: "", HeadSHA: basePR.HeadRefOid, PR: basePR,
+				BaseDelta: []string{"docs/a.md"}, PRFiles: []string{"pkg/b.go"},
+				MergeTree: repo.MergeTreeResult{Clean: true}, Policy: policy,
+			},
+			want: ActionOptimisticMerge,
+		},
+		{
+			name: "coordinator refuses origin head GitHub does not report",
+			in:   DecisionInput{Clean: true, CurrentBranch: "coord", HeadSHA: strings.Repeat("c", 40), PR: basePR, Policy: policy},
+			want: ActionRefuse,
+		},
+		{
+			name: "fork refused before any head check",
+			in: func() DecisionInput {
+				pr := basePR
+				pr.IsCrossRepository = true
+				return DecisionInput{Clean: true, CurrentBranch: "coord", HeadSHA: pr.HeadRefOid, PR: pr, Policy: policy}
 			}(),
 			want: ActionRefuse,
 		},
 		{
 			name: "up to date -> direct merge",
-			in:   DecisionInput{Clean: true, CurrentBranch: "feat/x", LocalHeadSHA: basePR.HeadRefOid, PR: basePR, Policy: policy},
+			in:   DecisionInput{Clean: true, CurrentBranch: "feat/x", HeadSHA: basePR.HeadRefOid, PR: basePR, Policy: policy},
 			want: ActionDirectMerge,
 		},
 		{
 			name: "disjoint base move + clean merge-tree -> optimistic merge",
 			in: DecisionInput{
-				Clean: true, CurrentBranch: "feat/x", LocalHeadSHA: basePR.HeadRefOid, PR: basePR,
+				Clean: true, CurrentBranch: "feat/x", HeadSHA: basePR.HeadRefOid, PR: basePR,
 				BaseDelta: []string{"docs/a.md"}, PRFiles: []string{"pkg/b.go"},
 				MergeTree: repo.MergeTreeResult{Clean: true}, Policy: policy,
 			},
@@ -78,7 +111,7 @@ func TestDecideStateMachine(t *testing.T) {
 		{
 			name: "global path on base forces rebase",
 			in: DecisionInput{
-				Clean: true, CurrentBranch: "feat/x", LocalHeadSHA: basePR.HeadRefOid, PR: basePR,
+				Clean: true, CurrentBranch: "feat/x", HeadSHA: basePR.HeadRefOid, PR: basePR,
 				BaseDelta: []string{"packages/protocol/src/a.ts"}, PRFiles: []string{"pkg/b.go"},
 				MergeTree: repo.MergeTreeResult{Clean: true}, Policy: policy,
 			},
@@ -87,7 +120,7 @@ func TestDecideStateMachine(t *testing.T) {
 		{
 			name: "overlapping file forces rebase",
 			in: DecisionInput{
-				Clean: true, CurrentBranch: "feat/x", LocalHeadSHA: basePR.HeadRefOid, PR: basePR,
+				Clean: true, CurrentBranch: "feat/x", HeadSHA: basePR.HeadRefOid, PR: basePR,
 				BaseDelta: []string{"pkg/b.go"}, PRFiles: []string{"pkg/b.go"},
 				MergeTree: repo.MergeTreeResult{Clean: true}, Policy: policy,
 			},
@@ -96,7 +129,7 @@ func TestDecideStateMachine(t *testing.T) {
 		{
 			name: "merge-tree conflict forces rebase",
 			in: DecisionInput{
-				Clean: true, CurrentBranch: "feat/x", LocalHeadSHA: basePR.HeadRefOid, PR: basePR,
+				Clean: true, CurrentBranch: "feat/x", HeadSHA: basePR.HeadRefOid, PR: basePR,
 				BaseDelta: []string{"docs/a.md"}, PRFiles: []string{"pkg/b.go"},
 				MergeTree: repo.MergeTreeResult{Clean: false, ConflictFiles: []string{"x"}}, Policy: policy,
 			},
@@ -108,7 +141,7 @@ func TestDecideStateMachine(t *testing.T) {
 				pr := basePR
 				pr.MergeStateStatus = "BEHIND"
 				return DecisionInput{
-					Clean: true, CurrentBranch: "feat/x", LocalHeadSHA: pr.HeadRefOid, PR: pr,
+					Clean: true, CurrentBranch: "feat/x", HeadSHA: pr.HeadRefOid, PR: pr,
 					BaseDelta: []string{"docs/a.md"}, PRFiles: []string{"pkg/b.go"},
 					MergeTree: repo.MergeTreeResult{Clean: true}, Policy: policy,
 				}
@@ -118,7 +151,7 @@ func TestDecideStateMachine(t *testing.T) {
 		{
 			name: "optimistic disabled forces rebase",
 			in: DecisionInput{
-				Clean: true, CurrentBranch: "feat/x", LocalHeadSHA: basePR.HeadRefOid, PR: basePR,
+				Clean: true, CurrentBranch: "feat/x", HeadSHA: basePR.HeadRefOid, PR: basePR,
 				BaseDelta: []string{"docs/a.md"}, PRFiles: []string{"pkg/b.go"},
 				MergeTree: repo.MergeTreeResult{Clean: true}, Policy: config.LandPolicy{OptimisticMerge: &no},
 			},

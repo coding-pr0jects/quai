@@ -105,13 +105,20 @@ A PR whose base branch is another PR's branch. Landing the parent retargets its 
 **Restack**
 Replaying a child branch's own commits onto the updated base with `git rebase --onto`, then checking patch-id survival. `quai restack`, or `quai land --restack`.
 
+**Land worktree**
+The temporary detached worktree, `land-worktree-<pr>-<pid>` under the common dir, in which `quai land` rebases and verifies a PR whose branch the caller does not have checked out. Removed when the run ends.
+_Avoid_: scratch worktree, temp checkout.
+
+**Transient error**
+A `gh` failure from the network rather than from GitHub's judgment: TLS handshake timeout, EOF, connection reset, i/o timeout, or HTTP 5xx. `quai land` retries it; a refusal (HTTP 4xx, conflict, failing check) it never retries.
+
 **Conflicts**
 What `quai conflicts` reports: virtual merge conflicts and file overlaps between active worktrees, or between a worktree and the base, found before anyone lands.
 
 ## Places
 
 **Common dir**
-`<git-common-dir>/quai/`, the state shared by the main checkout and every linked worktree: locks, queues, receipts, and detached runs.
+`<git-common-dir>/quai/`, the state shared by the main checkout and every linked worktree: locks, queues, receipts, detached runs, and land worktrees.
 
 **Forge**
 The hosting service behind PRs and checks. Today only GitHub, reached through `gh`.

@@ -15,6 +15,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/detach"
 	"github.com/coding-pr0jects/quai/internal/hooks"
+	"github.com/coding-pr0jects/quai/internal/land"
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
 )
@@ -42,6 +43,7 @@ type Report struct {
 	LandLock          lock.InspectState `json:"land_lock"`
 	Pools             []PoolStatus      `json:"pools,omitempty"`
 	InFlight          []InFlightStatus  `json:"in_flight,omitempty"`
+	LandWorktrees     []string          `json:"land_worktrees,omitempty"`
 	ReceiptCount      int               `json:"receipt_count"`
 	AttestCount       int               `json:"attestation_count"`
 	Runs              []detach.Status   `json:"runs,omitempty"`
@@ -142,6 +144,14 @@ func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error
 				Key:   key,
 				State: lock.InspectDir(filepath.Join(locksRoot, name), lock.DefaultStaleAfter),
 			})
+		}
+	}
+
+	if entries, err := os.ReadDir(filepath.Join(commonDir, "quai")); err == nil {
+		for _, e := range entries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), land.TempWorktreePrefix) {
+				rep.LandWorktrees = append(rep.LandWorktrees, filepath.Join(commonDir, "quai", e.Name()))
+			}
 		}
 	}
 
@@ -268,6 +278,14 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 			if r.State == detach.Dead {
 				add(CheckItem{Name: "detached-runs", Status: "warn", Message: fmt.Sprintf("detached run %s died without an exit record (pid %d)", r.ID, r.PID), Fix: "quai verify --wait " + r.ID})
 			}
+		}
+		if len(st.LandWorktrees) > 0 && !(st.LandLock.Held && !st.LandLock.Stale) {
+			add(CheckItem{
+				Name:    "land-worktrees",
+				Status:  "warn",
+				Message: fmt.Sprintf("%d temporary land worktree(s) left while no quai land holds land.lock: %s", len(st.LandWorktrees), strings.Join(st.LandWorktrees, ", ")),
+				Fix:     "If no quai land --dry-run is running either, remove each with git worktree remove --force <path>",
+			})
 		}
 	}
 

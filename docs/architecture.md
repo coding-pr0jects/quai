@@ -25,7 +25,7 @@ quai/
 │   ├── hooks/         # non-destructive pre-push installer and receipt fast path
 │   ├── status/        # read-only quai status inspection and quai doctor readiness checks
 │   ├── verdict/       # review verdicts keyed by patch-id under refs/quai/verdicts/<patch-id>
-│   ├── forge/         # Forge interface and gh CLI implementation
+│   ├── forge/         # Forge interface, gh CLI implementation, transient-error retry
 │   └── land/          # pure DecideLand state machine, locked landing executor, stacked PR restack
 ```
 
@@ -82,13 +82,14 @@ All mutable state lives inside `<git-common-dir>/quai/` (resolved via `git rev-p
 │   └── inflight-<step>-<fingerprint>.lock/   # dedupes concurrent identical verify runs
 ├── receipts/
 │   └── <step>-<fingerprint>.json
-└── runs/
-    └── <run-id>/                 # one detached run; the 20 latest finished runs are kept
-        ├── meta.json             # args, worktree, pid + kernel start time, host, pid_ns
-        ├── output.log            # stdout and stderr of the run
-        ├── cursor                # byte offset read by the previous quai verify --wait
-        ├── groups                # pid + start time of each step's process group
-        └── exit.json             # exit code, stopped flag, verify result; absent while running or dead
+├── runs/
+│   └── <run-id>/                 # one detached run; the 20 latest finished runs are kept
+│       ├── meta.json             # args, worktree, pid + kernel start time, host, pid_ns
+│       ├── output.log            # stdout and stderr of the run
+│       ├── cursor                # byte offset read by the previous quai verify --wait
+│       ├── groups                # pid + start time of each step's process group
+│       └── exit.json             # exit code, stopped flag, verify result; absent while running or dead
+└── land-worktree-<pr>-<pid>/     # temporary detached worktree of a quai land run off the PR branch
 ```
 
 ### Atomic lock and dead-PID recovery (`internal/lock`)

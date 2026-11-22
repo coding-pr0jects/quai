@@ -693,12 +693,23 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 			return 2
 		}
 	}
-	g, cfg, top, err := loadRepoAndConfig(ctx, cwd)
+	g := repo.NewExecGit(cwd)
+	top, err := g.TopLevel(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "quai land: not inside a git repository: %v\n", err)
+		return 2
+	}
+	g.Dir = top
+	f := forge.NewRetry(forge.NewGHForge(top), stderr)
+	cfg, err := config.Load(top)
+	if errors.Is(err, os.ErrNotExist) {
+		cfg, err = land.BaseConfig(ctx, g, f, prNum)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "quai land: %v\n", err)
 		return 2
 	}
-	res, err := land.Run(ctx, g, forge.NewGHForge(top), cfg, land.Options{
+	res, err := land.Run(ctx, g, f, cfg, land.Options{
 		PRNumber:       prNum,
 		DryRun:         *dryRun,
 		Method:         method,
@@ -858,6 +869,9 @@ func runStatus(ctx context.Context, cwd string, args []string, stdout, stderr io
 	}
 	if len(rep.InFlight) > 0 {
 		fmt.Fprintf(stdout, "in-flight: %d step(s)\n", len(rep.InFlight))
+	}
+	for _, wt := range rep.LandWorktrees {
+		fmt.Fprintf(stdout, "land worktree: %s\n", wt)
 	}
 	fmt.Fprintf(stdout, "receipts: %d cached, attestations: %d local\n", rep.ReceiptCount, rep.AttestCount)
 	for _, r := range rep.Runs {

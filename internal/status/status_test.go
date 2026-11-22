@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/land"
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
 )
@@ -100,8 +101,31 @@ slots = 1
 		t.Fatalf("unexpected pool status: %+v", rep.Pools)
 	}
 
-	doc := Doctor(ctx, g)
-	if !doc.OK {
-		t.Fatalf("expected healthy doctor report, got %+v", doc)
+	leftover := filepath.Join(commonDir, "quai", land.TempWorktreePrefix+"7-4242")
+	if err := os.MkdirAll(leftover, 0o755); err != nil {
+		t.Fatal(err)
 	}
+	rep, err = Inspect(ctx, g, cfg)
+	if err != nil || len(rep.LandWorktrees) != 1 || rep.LandWorktrees[0] != leftover {
+		t.Fatalf("expected land worktree %s in status, got %v (err %v)", leftover, rep.LandWorktrees, err)
+	}
+
+	doc := Doctor(ctx, g)
+	if !doc.OK || hasCheck(doc, "land-worktrees") {
+		t.Fatalf("expected healthy doctor report while quai land holds land.lock, got %+v", doc)
+	}
+	landLease.Release()
+	doc = Doctor(ctx, g)
+	if !doc.OK || !hasCheck(doc, "land-worktrees") {
+		t.Fatalf("expected a land-worktrees warning once land.lock is free, got %+v", doc)
+	}
+}
+
+func hasCheck(rep DoctorReport, name string) bool {
+	for _, c := range rep.Checks {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
 }

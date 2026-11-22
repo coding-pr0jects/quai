@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -28,10 +29,17 @@ const (
 	ActionRebaseAndMerge  Action = "rebase-and-merge"
 )
 
+// FailurePostRebaseVerify is the Result.Failure of a landing whose verification failed after the
+// rebase; the rebased branch was reset to its original commit and nothing was pushed.
+const FailurePostRebaseVerify = "post-rebase-verify-failed"
+
+// DecisionInput holds the facts Decide reads. HeadSHA is the PR head as quai sees it: the caller's
+// HEAD when CurrentBranch is the PR head branch, else the fetched origin/<pr-head>. Clean is
+// consulted only in the first case, because landing never touches another branch's worktree.
 type DecisionInput struct {
 	Clean         bool
 	CurrentBranch string
-	LocalHeadSHA  string
+	HeadSHA       string
 	PR            forge.PullRequest
 	BaseDelta     []string
 	PRFiles       []string
@@ -76,28 +84,24 @@ type Result struct {
 	Verdict         *verdict.CheckResult `json:"verdict,omitempty"`
 	StackedChildren []StackedChild       `json:"stacked_children,omitempty"`
 	ConflictFiles   []string             `json:"conflict_files,omitempty"`
+	Failure         string               `json:"failure,omitempty"`
 }
 
 // Decide is the pure state machine that selects direct-merge, optimistic-merge,
 // rebase-and-merge, or refuse from repository and PR facts.
 func Decide(in DecisionInput) Decision {
-	if !in.Clean {
-		return Decision{Action: ActionRefuse, Reason: "working tree is dirty; commit or stash changes first"}
+	if d, ok := admit(in.PR); !ok {
+		return d
 	}
-	if in.PR.State != "OPEN" {
-		return Decision{Action: ActionRefuse, Reason: fmt.Sprintf("PR #%d is %s, not OPEN", in.PR.Number, in.PR.State)}
-	}
-	if in.PR.IsDraft {
-		return Decision{Action: ActionRefuse, Reason: fmt.Sprintf("PR #%d is a draft; mark it ready first", in.PR.Number)}
-	}
-	if in.PR.IsCrossRepository {
-		return Decision{Action: ActionRefuse, Reason: fmt.Sprintf("PR #%d is from a fork; refusing to land untrusted fork", in.PR.Number)}
-	}
-	if in.CurrentBranch != in.PR.HeadRefName {
-		return Decision{Action: ActionRefuse, Reason: fmt.Sprintf("checked-out branch %q does not match PR head %q", in.CurrentBranch, in.PR.HeadRefName)}
-	}
-	if in.LocalHeadSHA != in.PR.HeadRefOid {
-		return Decision{Action: ActionRefuse, Reason: fmt.Sprintf("local HEAD %s differs from remote PR head %s; push or pull first", short(in.LocalHeadSHA), short(in.PR.HeadRefOid))}
+	if in.CurrentBranch == in.PR.HeadRefName {
+		if !in.Clean {
+			return Decision{Action: ActionRefuse, Reason: "working tree is dirty; commit or stash changes first"}
+		}
+		if in.HeadSHA != in.PR.HeadRefOid {
+			return Decision{Action: ActionRefuse, Reason: fmt.Sprintf("local HEAD %s differs from remote PR head %s; push or pull first", short(in.HeadSHA), short(in.PR.HeadRefOid))}
+		}
+	} else if in.HeadSHA != in.PR.HeadRefOid {
+		return Decision{Action: ActionRefuse, Reason: fmt.Sprintf("origin/%s is at %s but GitHub reports PR head %s; rerun quai land %d", in.PR.HeadRefName, short(in.HeadSHA), short(in.PR.HeadRefOid), in.PR.Number)}
 	}
 	if len(in.BaseDelta) == 0 {
 		return Decision{Action: ActionDirectMerge, Reason: "branch is already up to date with base"}
@@ -122,6 +126,35 @@ func Decide(in DecisionInput) Decision {
 	return Decision{Action: ActionOptimisticMerge, Reason: fmt.Sprintf("base moved by %d disjoint file(s) and merge-tree is clean", len(in.BaseDelta))}
 }
 
+// BaseConfig loads .quai.toml from origin/<base> of PR prNumber, for a caller whose worktree predates it.
+func BaseConfig(ctx context.Context, g repo.Git, f forge.Forge, prNumber int) (*config.Config, error) {
+	pr, err := f.ViewPR(ctx, prNumber)
+	if err != nil {
+		return nil, err
+	}
+	baseRef := "refs/remotes/origin/" + pr.BaseRefName
+	if err := g.Fetch(ctx, "origin", "+refs/heads/"+pr.BaseRefName+":"+baseRef); err != nil {
+		return nil, err
+	}
+	raw, err := g.ShowFile(ctx, baseRef, config.FileName)
+	if err != nil {
+		return nil, fmt.Errorf("no %s in this worktree nor on origin/%s: %w", config.FileName, pr.BaseRefName, err)
+	}
+	return config.Parse(raw)
+}
+
+func admit(pr forge.PullRequest) (Decision, bool) {
+	switch {
+	case pr.State != "OPEN":
+		return Decision{Action: ActionRefuse, Reason: fmt.Sprintf("PR #%d is %s, not OPEN", pr.Number, pr.State)}, false
+	case pr.IsDraft:
+		return Decision{Action: ActionRefuse, Reason: fmt.Sprintf("PR #%d is a draft; mark it ready first", pr.Number)}, false
+	case pr.IsCrossRepository:
+		return Decision{Action: ActionRefuse, Reason: fmt.Sprintf("PR #%d is from a fork; refusing to land untrusted fork", pr.Number)}, false
+	}
+	return Decision{}, true
+}
+
 // Run executes quai land for one pull request, holding land.lock across rebase, verify, push, and merge.
 func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opts Options) (Result, error) {
 	topLevel, err := g.TopLevel(ctx)
@@ -137,27 +170,32 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 		method = opts.Method
 	}
 
-	// Pre-lock fast validation so obviously invalid calls never wait on land.lock.
-	clean, _, err := g.IsClean(ctx)
+	pr, err := f.ViewPR(ctx, opts.PRNumber)
 	if err != nil {
 		return Result{}, err
+	}
+	if d, ok := admit(pr); !ok {
+		return Result{DryRun: opts.DryRun, PR: opts.PRNumber, Action: ActionRefuse, Reason: d.Reason, URL: pr.URL}, nil
 	}
 	branch, err := g.CurrentBranch(ctx)
 	if err != nil {
 		return Result{}, err
 	}
-	headSHA, err := g.HeadSHA(ctx)
-	if err != nil {
-		return Result{}, err
+	ws := &workspace{
+		caller:     g,
+		onPRBranch: branch == pr.HeadRefName,
+		tempPath:   filepath.Join(commonDir, "quai", fmt.Sprintf("%s%d-%d", TempWorktreePrefix, pr.Number, os.Getpid())),
 	}
-	pr, err := f.ViewPR(ctx, opts.PRNumber)
+	defer ws.close(ctx, opts.Stderr)
+
+	clean, headSHA, err := ws.head(ctx, pr)
 	if err != nil {
 		return Result{}, err
 	}
 	preDec := Decide(DecisionInput{
 		Clean:         clean,
 		CurrentBranch: branch,
-		LocalHeadSHA:  headSHA,
+		HeadSHA:       headSHA,
 		PR:            pr,
 		Policy:        cfg.Land,
 	})
@@ -174,7 +212,7 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 	}
 
 	if opts.DryRun {
-		return runDry(ctx, g, f, cfg, opts, pr, headSHA)
+		return runDry(ctx, g, ws, f, cfg, opts, pr, clean, branch, headSHA)
 	}
 
 	lockDir := filepath.Join(commonDir, "quai", "locks", "land.lock")
@@ -205,15 +243,7 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 		if err != nil {
 			return Result{}, err
 		}
-		headSHA, err = g.HeadSHA(ctx)
-		if err != nil {
-			return Result{}, err
-		}
-		clean, _, err = g.IsClean(ctx)
-		if err != nil {
-			return Result{}, err
-		}
-		branch, err = g.CurrentBranch(ctx)
+		clean, headSHA, err = ws.head(ctx, pr)
 		if err != nil {
 			return Result{}, err
 		}
@@ -239,73 +269,42 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 
 		var patchRes *patchid.Result
 		if dec.Action == ActionRebaseAndMerge {
-			preRebaseSHA := headSHA
-			if err := g.Rebase(ctx, "origin/"+pr.BaseRefName); err != nil {
-				var rce *repo.RebaseConflictError
-				if errors.As(err, &rce) {
-					return Result{
-						OK:            false,
-						PR:            opts.PRNumber,
-						Action:        ActionRebaseAndMerge,
-						Reason:        rce.Error(),
-						HeadSHA:       preRebaseSHA,
-						URL:           pr.URL,
-						ConflictFiles: rce.ConflictFiles,
-					}, rce
-				}
-				return Result{}, err
-			}
-			newHead, err := g.HeadSHA(ctx)
+			wg, err := ws.open(ctx, headSHA)
 			if err != nil {
 				return Result{}, err
 			}
-			pid, err := patchid.Compare(ctx, g, "origin/"+pr.BaseRefName, preRebaseSHA, newHead)
-			if err == nil {
-				patchRes = &pid
-			}
-
-			if len(cfg.Steps) > 0 {
-				doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, false, opts.NoSign, false, opts.NoPush)
-				vRes, vErr := verify.Run(ctx, g, cfg, verify.Options{
-					Since:          "origin/" + pr.BaseRefName,
-					Sign:           doSign,
-					BestEffortSign: bestEffort,
-					Push:           doPush,
-					JSON:           opts.JSON,
-					Stdout:         opts.Stdout,
-					Stderr:         opts.Stderr,
-				})
-				if vErr != nil {
-					return Result{
-						OK:      false,
-						PR:      opts.PRNumber,
-						Action:  ActionRebaseAndMerge,
-						Reason:  fmt.Sprintf("verification failed after rebase: %v", vErr),
-						HeadSHA: newHead,
-						URL:     pr.URL,
-						PatchID: patchRes,
-					}, vErr
-				}
-				if !vRes.OK {
-					return Result{
-						OK:      false,
-						PR:      opts.PRNumber,
-						Action:  ActionRebaseAndMerge,
-						Reason:  "verification failed after rebase",
-						HeadSHA: newHead,
-						URL:     pr.URL,
-						PatchID: patchRes,
-					}, nil
-				}
-			}
-
-			if err := g.PushForceWithLease(ctx, "origin", pr.HeadRefName, preRebaseSHA); err != nil {
+			rb, err := rebaseVerifyPush(ctx, wg, cfg, opts, pr, headSHA)
+			var rce *repo.RebaseConflictError
+			switch {
+			case errors.As(err, &rce):
+				return Result{
+					OK:            false,
+					PR:            opts.PRNumber,
+					Action:        ActionRebaseAndMerge,
+					Reason:        rce.Error(),
+					HeadSHA:       headSHA,
+					URL:           pr.URL,
+					ConflictFiles: rce.ConflictFiles,
+				}, rce
+			case rb.verifyFailure != "":
+				return Result{
+					OK:      false,
+					PR:      opts.PRNumber,
+					Action:  ActionRebaseAndMerge,
+					Reason:  rb.verifyFailure,
+					HeadSHA: rb.headSHA,
+					URL:     pr.URL,
+					PatchID: rb.patchID,
+					Failure: FailurePostRebaseVerify,
+				}, err
+			case err != nil:
 				return Result{}, err
 			}
-			headSHA = newHead
+			headSHA = rb.headSHA
+			patchRes = rb.patchID
 		}
 
-		verdictRes, vRefuse, err := enforceVerdict(ctx, g, cfg, "origin/"+pr.BaseRefName, opts)
+		verdictRes, vRefuse, err := enforceVerdict(ctx, ws, headSHA, cfg, "origin/"+pr.BaseRefName, opts)
 		if err != nil {
 			return Result{}, err
 		}
@@ -410,7 +409,65 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 	}, nil
 }
 
-func runDry(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opts Options, pr forge.PullRequest, headSHA string) (Result, error) {
+type rebased struct {
+	headSHA       string
+	patchID       *patchid.Result
+	verifyFailure string
+}
+
+// rebaseVerifyPush rebases the PR head checked out in wg onto origin/<base>, verifies the result, and
+// pushes it under a lease pinned to preRebaseSHA. Unless the push succeeds, it resets wg to preRebaseSHA,
+// so a failed landing never leaves the branch diverged from the remote PR head.
+func rebaseVerifyPush(ctx context.Context, wg repo.Git, cfg *config.Config, opts Options, pr forge.PullRequest, preRebaseSHA string) (rb rebased, err error) {
+	pushed := false
+	defer func() {
+		if pushed {
+			return
+		}
+		if resetErr := wg.ResetHard(context.WithoutCancel(ctx), preRebaseSHA); resetErr != nil {
+			err = errors.Join(err, fmt.Errorf("roll back PR head to %s: %w", short(preRebaseSHA), resetErr))
+		}
+	}()
+	baseRef := "origin/" + pr.BaseRefName
+	if err := wg.Rebase(ctx, baseRef); err != nil {
+		return rb, err
+	}
+	rb.headSHA, err = wg.HeadSHA(ctx)
+	if err != nil {
+		return rb, err
+	}
+	if pid, err := patchid.Compare(ctx, wg, baseRef, preRebaseSHA, rb.headSHA); err == nil {
+		rb.patchID = &pid
+	}
+	if len(cfg.Steps) > 0 {
+		doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, false, opts.NoSign, false, opts.NoPush)
+		vRes, vErr := verify.Run(ctx, wg, cfg, verify.Options{
+			Since:          baseRef,
+			Sign:           doSign,
+			BestEffortSign: bestEffort,
+			Push:           doPush,
+			JSON:           opts.JSON,
+			Stdout:         opts.Stdout,
+			Stderr:         opts.Stderr,
+		})
+		rolledBack := fmt.Sprintf("PR head reset to %s, nothing pushed", short(preRebaseSHA))
+		if vErr != nil {
+			rb.verifyFailure = fmt.Sprintf("verification failed after rebase: %v; %s", vErr, rolledBack)
+			return rb, vErr
+		}
+		if !vRes.OK {
+			rb.verifyFailure = "verification failed after rebase; " + rolledBack
+			return rb, nil
+		}
+	}
+	if err := wg.PushForceWithLease(ctx, "origin", pr.HeadRefName, preRebaseSHA); err != nil {
+		return rb, err
+	}
+	pushed = true
+	return rb, nil
+}
+
+func runDry(ctx context.Context, g repo.Git, ws *workspace, f forge.Forge, cfg *config.Config, opts Options, pr forge.PullRequest, clean bool, branch, headSHA string) (Result, error) {
 	_ = g.Fetch(ctx, "origin", pr.BaseRefName)
 	baseTip, err := g.RevParse(ctx, "origin/"+pr.BaseRefName)
 	if err != nil {
@@ -419,7 +476,7 @@ func runDry(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, 
 			return Result{}, err
 		}
 	}
-	dec, err := computeDecision(ctx, g, cfg, true, pr.HeadRefName, headSHA, pr, baseTip)
+	dec, err := computeDecision(ctx, g, cfg, clean, branch, headSHA, pr, baseTip)
 	if err != nil {
 		return Result{}, err
 	}
@@ -428,7 +485,7 @@ func runDry(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, 
 		return Result{}, err
 	}
 	verdictChecks := forge.EvaluateChecks(checks, cfg.Land.RequiredChecks)
-	verdictRes, vRefuse, err := enforceVerdict(ctx, g, cfg, baseTip, opts)
+	verdictRes, vRefuse, err := enforceVerdict(ctx, ws, headSHA, cfg, baseTip, opts)
 	if err != nil {
 		return Result{}, err
 	}
@@ -459,9 +516,13 @@ func runDry(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, 
 	}, nil
 }
 
-func enforceVerdict(ctx context.Context, g repo.Git, cfg *config.Config, since string, opts Options) (*verdict.CheckResult, string, error) {
+func enforceVerdict(ctx context.Context, ws *workspace, headSHA string, cfg *config.Config, since string, opts Options) (*verdict.CheckResult, string, error) {
 	if !opts.RequireVerdict && len(cfg.Land.RequireVerdictTiers) == 0 {
 		return nil, "", nil
+	}
+	g, err := ws.open(ctx, headSHA)
+	if err != nil {
+		return nil, "", err
 	}
 	tRes, err := tier.Evaluate(ctx, g, cfg, since)
 	if err != nil {
@@ -519,7 +580,7 @@ func computeDecision(ctx context.Context, g repo.Git, cfg *config.Config, clean 
 	return Decide(DecisionInput{
 		Clean:         clean,
 		CurrentBranch: branch,
-		LocalHeadSHA:  headSHA,
+		HeadSHA:       headSHA,
 		PR:            pr,
 		BaseDelta:     baseDelta,
 		PRFiles:       prFiles,
