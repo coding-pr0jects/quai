@@ -704,3 +704,44 @@ inputs = ["**", "!docs/evidence/**"]
 		t.Fatalf("an included input must change the fingerprint: res=%+v err=%v", third, err)
 	}
 }
+
+func TestVerifyDependencyRoutesItsOwnPool(t *testing.T) {
+	ctx := context.Background()
+	dir, g := setupRepo(t)
+	checkoutBranch(t, dir, "feat")
+	commitFile(t, dir, "README.md", "v2\n", "docs only")
+	holdSlot(t, ctx, g, "heavy", 1)
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+
+[slots.heavy]
+capacity = 1
+
+[[steps]]
+name = "verify"
+run = 'test "$QUAI_PASSED_STEPS" = e2e'
+depends_on = ["e2e"]
+
+[[steps]]
+name = "e2e"
+run = 'test -z "$QUAI_PASSED_STEPS"'
+pool = "heavy"
+slots = 1
+pool_when = ["internal/**"]
+
+[land]
+lock_wait = "200ms"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, cfg, Options{StepNames: []string{"verify"}, Stdout: &buf, Stderr: &buf})
+	if err != nil || !res.OK || stepNames(res) != "e2e=passed,verify=passed" {
+		t.Fatalf("a prerequisite pulled in by depends_on must bypass its pool on a docs-only diff: res=%+v err=%v\n%s", res, err, buf.String())
+	}
+	if e2e := res.Steps[0]; e2e.Pool != "heavy" || e2e.PoolAcquired == nil || *e2e.PoolAcquired {
+		t.Fatalf("expected e2e annotated as bypassing heavy, got %+v", e2e)
+	}
+}
