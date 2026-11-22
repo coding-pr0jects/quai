@@ -159,9 +159,9 @@ quai land 41 42 43
 
 | Command | Purpose |
 |---|---|
-| `quai verify [--step <name>...] [--since <ref>] [--no-cache] [--sign\|--no-sign] [--key <path>] [--push\|--no-push] [--priority <int>] [--detach] [--json]` | Run steps with slot locks, conditional pool routing, in-flight deduplication, mutation guard, receipts, and optional SSH-signed attestations, in the foreground or as a detached run |
+| `quai verify [--step <name>...] [--since <ref>] [--no-cache] [--fetch-base] [--sign\|--no-sign] [--key <path>] [--push\|--no-push] [--priority <int>] [--detach] [--json]` | Run steps with slot locks, conditional pool routing, in-flight deduplication, mutation guard, receipts, a stale `origin/<base>` warning, and optional SSH-signed attestations, in the foreground or as a detached run |
 | `quai verify --wait [<run-id>] [--max <duration>] [--json]`, `quai verify --stop [<run-id>] [--json]` | Stream a detached run's new output until it ends or `--max` passes, or stop it and its steps |
-| `quai attest check\|push\|fetch\|prune [flags...]` | Verify SSH-signed in-toto/DSSE attestations in CI (`--onto`, `--head`, `--config-ref`, `--sample`), sync, and prune expired `refs/quai/records/*` |
+| `quai attest check\|push\|fetch\|prune [flags...]` | Verify SSH-signed in-toto/DSSE attestations in CI (`--onto`, `--head`, `--config-ref`, `--sample`) with a normalized per-step `reason`, sync, and prune expired `refs/quai/records/*` |
 | `quai exec --pool <name> [--slots <n>] [--wait <duration>] [--priority <int>] [--detach] -- <cmd...>` | Serialize any command behind a slot pool, served by priority then arrival, in its own process group |
 | `quai tier [--since <ref>] [--json]` | Classify diff risk (`gate-only`, `diff-audit`, `full-live`), detect test tampering, list receipt status |
 | `quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]` | Verify whether a reviewed diff survived rebase unchanged (`SURVIVES` vs `CHANGED`) |
@@ -171,7 +171,7 @@ quai land 41 42 43
 | `quai hooks install\|uninstall\|pre-push [--json]` | Manage the non-destructive `pre-push` receipt hook (with optional auto-sign/push) |
 | `quai gc [--dry-run] [--json]` | Prune expired receipts, attestation and verdict refs, and stale lock directories (also run automatically by `verify`/`land` when `[attest].auto_prune` is set on the remote default branch) |
 | `quai status [--json]` | Inspect active `land.lock`, slot pools, free RAM, holders and waiters with their role and priority, in-flight steps, detached runs, and cached counts |
-| `quai doctor [--json]` | Validate git >= 2.38, `.quai.toml`, hooks, `gh`, `ssh-keygen`, signing keys, and stale locks |
+| `quai doctor [--json]` | Validate git >= 2.38, `.quai.toml`, hooks, `gh`, `ssh-keygen`, attestation signing key, `ssh-agent` identity, `[attest]` config, remote reachability, and stale locks |
 | `quai conflicts [--base <ref>] [--conflicts-only] [--json]` | Run read-only virtual `git merge-tree` and overlap checks across active linked worktrees |
 | `quai version` | Print the installed version |
 

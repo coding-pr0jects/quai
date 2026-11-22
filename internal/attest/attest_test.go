@@ -600,3 +600,171 @@ func TestPruneRejectsMaxAgeBelowMinimum(t *testing.T) {
 		t.Fatalf("Prune error = %v, want a minimum max_age error", err)
 	}
 }
+
+func TestClassifyMiss(t *testing.T) {
+	tree := strings.Repeat("a", 40)
+	otherTree := strings.Repeat("b", 40)
+	base := strings.Repeat("c", 40)
+	otherBase := strings.Repeat("d", 40)
+
+	cases := []struct {
+		name       string
+		candidates []RecordCandidate
+		want       string
+	}{
+		{"no candidates", nil, ReasonNoRecord},
+		{
+			"same tree and base, different fingerprint",
+			[]RecordCandidate{{Fingerprint: "f1", TreeSHA: tree, BaseSHA: base}},
+			ReasonConfigMismatch,
+		},
+		{
+			"same tree, different base",
+			[]RecordCandidate{{Fingerprint: "f1", TreeSHA: tree, BaseSHA: otherBase}},
+			ReasonBaseMismatch,
+		},
+		{
+			"different tree",
+			[]RecordCandidate{{Fingerprint: "f1", TreeSHA: otherTree, BaseSHA: base}},
+			ReasonTreeMismatch,
+		},
+		{
+			"same-tree base mismatch outranks tree mismatch",
+			[]RecordCandidate{
+				{Fingerprint: "f1", TreeSHA: otherTree, BaseSHA: base},
+				{Fingerprint: "f2", TreeSHA: tree, BaseSHA: otherBase},
+			},
+			ReasonBaseMismatch,
+		},
+		{
+			"config mismatch outranks base mismatch",
+			[]RecordCandidate{
+				{Fingerprint: "f1", TreeSHA: tree, BaseSHA: otherBase},
+				{Fingerprint: "f2", TreeSHA: tree, BaseSHA: base},
+			},
+			ReasonConfigMismatch,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, detail := ClassifyMiss(tree, base, tc.candidates)
+			if reason != tc.want {
+				t.Fatalf("reason = %q, want %q (%s)", reason, tc.want, detail)
+			}
+			if detail == "" {
+				t.Fatal("expected a diagnostic detail")
+			}
+		})
+	}
+}
+
+func TestCheckDiagnosticReasons(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	aliceKey, alicePub := genSSHKey(t, tmp, "alice")
+	bobKey, _ := genSSHKey(t, tmp, "bob")
+
+	repoDir := filepath.Join(tmp, "repo")
+	gitRun(t, tmp, "init", "-q", "-b", "main", repoDir)
+	gitRun(t, repoDir, "config", "user.name", "alice")
+	gitRun(t, repoDir, "config", "user.email", "alice@example.com")
+	writeFile(t, filepath.Join(repoDir, ".quai/allowed_signers"), "alice@example.com "+alicePub+"\n")
+	writeFile(t, filepath.Join(repoDir, "src/app.go"), "package app\n")
+	gitRun(t, repoDir, "add", "-A")
+	gitRun(t, repoDir, "commit", "-q", "-m", "init")
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+inputs = ["src/**"]
+
+[attest]
+allowed_signers = ".quai/allowed_signers"
+max_age = "14d"
+`))
+	if err != nil {
+		t.Fatalf("Parse config: %v", err)
+	}
+
+	g := repo.NewExecGit(repoDir)
+	headSHA, err := g.HeadSHA(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	treeSHA, err := g.TreeSHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSHA := headSHA
+	fp, err := receipt.Fingerprint(ctx, g, cfg.Steps[0], treeSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	writeRecord := func(keyPath, principal string) {
+		t.Helper()
+		if _, _, err := WriteRecord(ctx, g, receipt.Receipt{
+			Version:     receipt.CurrentVersion,
+			Fingerprint: fp,
+			TreeSHA:     treeSHA,
+			HeadSHA:     headSHA,
+			BaseSHA:     baseSHA,
+			Step:        "fast",
+			Passed:      true,
+			CreatedAt:   now,
+		}, keyPath, principal); err != nil {
+			t.Fatalf("WriteRecord(%s): %v", principal, err)
+		}
+	}
+	checkReason := func(name string, opts CheckOptions, wantOK bool, wantReason string) {
+		t.Helper()
+		res, err := Check(ctx, g, cfg, opts)
+		if err != nil {
+			t.Fatalf("%s: Check failed: %v", name, err)
+		}
+		if res.OK != wantOK {
+			t.Fatalf("%s: OK = %v, want %v (%+v)", name, res.OK, wantOK, res.Steps)
+		}
+		if len(res.Steps) != 1 {
+			t.Fatalf("%s: expected one step, got %+v", name, res.Steps)
+		}
+		sc := res.Steps[0]
+		if sc.Reason != wantReason {
+			t.Fatalf("%s: reason = %q, want %q (%s)", name, sc.Reason, wantReason, sc.Error)
+		}
+		if sc.TreeSHA != res.TreeSHA || sc.BaseSHA != res.BaseSHA || sc.Fingerprint == "" {
+			t.Fatalf("%s: incomplete diagnostics: %+v", name, sc)
+		}
+	}
+
+	checkReason("no record", CheckOptions{}, false, ReasonNoRecord)
+
+	writeRecord(aliceKey, "alice@example.com")
+	checkReason("verified", CheckOptions{}, true, ReasonVerified)
+
+	changed := *cfg
+	changed.Steps = append([]config.Step(nil), cfg.Steps...)
+	changed.Steps[0].Run = "true # changed"
+	res, err := Check(ctx, g, &changed, CheckOptions{})
+	if err != nil {
+		t.Fatalf("config mismatch Check failed: %v", err)
+	}
+	if res.Steps[0].Reason != ReasonConfigMismatch {
+		t.Fatalf("config change reason = %q, want %q (%s)", res.Steps[0].Reason, ReasonConfigMismatch, res.Steps[0].Error)
+	}
+
+	checkReason("expired", CheckOptions{Now: func() time.Time { return now.Add(30 * 24 * time.Hour) }}, false, ReasonExpired)
+
+	writeRecord(bobKey, "bob@example.com")
+	checkReason("foreign signer", CheckOptions{}, false, ReasonSignatureInvalid)
+
+	writeRecord(aliceKey, "alice@example.com")
+	writeFile(t, filepath.Join(repoDir, "src/app.go"), "package app\nconst V = 2\n")
+	gitRun(t, repoDir, "add", "src/app.go")
+	gitRun(t, repoDir, "commit", "-q", "-m", "change src")
+	checkReason("tree changed", CheckOptions{}, false, ReasonTreeMismatch)
+}

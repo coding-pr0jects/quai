@@ -171,6 +171,7 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 	fs.Var(&steps, "step", "step name to run (repeatable)")
 	since := fs.String("since", "", "base ref")
 	noCache := fs.Bool("no-cache", false, "ignore existing receipts")
+	fetchBase := fs.Bool("fetch-base", false, "fetch origin/<base> before resolving the base")
 	sign := fs.Bool("sign", false, "sign passing receipts with SSH key into refs/quai/records/*")
 	noSign := fs.Bool("no-sign", false, "disable automatic attestation signing even when configured")
 	keyPath := fs.String("key", "", "SSH private key path for --sign")
@@ -230,6 +231,7 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 		StepNames:      steps,
 		Since:          *since,
 		NoCache:        *noCache,
+		FetchBase:      *fetchBase,
 		Sign:           doSign,
 		BestEffortSign: bestEffort,
 		SigningKey:     *keyPath,
@@ -241,6 +243,9 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 		OnStepStart:    onStepStart,
 		Priority:       *priority,
 	})
+	if res.BaseWarning != "" {
+		fmt.Fprintf(stderr, "quai verify: warning: %s\n", res.BaseWarning)
+	}
 	if rec != nil {
 		rec.SetResult(res)
 	}
@@ -352,7 +357,7 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 				case "verified":
 					fmt.Fprintf(stdout, "verified %s (%s by %s, %s)\n", s.Name, s.Fingerprint[:min(12, len(s.Fingerprint))], s.Signer, s.MatchMode)
 				default:
-					fmt.Fprintf(stdout, "%-8s %s (%s)\n", s.Status, s.Name, s.Error)
+					fmt.Fprintf(stdout, "%-8s %s [%s] (%s)\n", s.Status, s.Name, s.Reason, s.Error)
 				}
 			}
 			if res.DisjointRefusal != "" {
@@ -625,6 +630,9 @@ func runTier(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 	if *jsonOut {
 		writeJSON(stdout, res)
 		return 0
+	}
+	if res.BaseWarning != "" {
+		fmt.Fprintf(stdout, "warning: %s\n", res.BaseWarning)
 	}
 	fmt.Fprintf(stdout, "tier: %s\n", res.Tier)
 	if len(res.Triggers) > 0 {

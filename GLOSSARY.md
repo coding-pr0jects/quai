@@ -55,6 +55,10 @@ _Avoid_: cleanup, vacuum.
 **Last prune stamp**
 The `<git-common-dir>/quai/last-prune` timestamp written atomically after a maintenance pass. A fresh stamp skips automatic pruning until `prune_interval` elapses.
 
+**Miss reason**
+The normalized `reason` that `quai attest check` gives every step: `verified`, `no_record`, `base_mismatch`, `tree_mismatch`, `config_mismatch`, `signature_invalid`, `expired`, or `sampled`. It says why a fallback to a full run is needed without reading raw git refs.
+_Avoid_: error, failure code.
+
 ## Concurrency
 
 **Pool**

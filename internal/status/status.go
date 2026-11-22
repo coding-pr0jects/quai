@@ -1,7 +1,9 @@
 package status
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +17,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/attest"
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/detach"
+	"github.com/coding-pr0jects/quai/internal/execrun"
 	"github.com/coding-pr0jects/quai/internal/gc"
 	"github.com/coding-pr0jects/quai/internal/hooks"
 	"github.com/coding-pr0jects/quai/internal/land"
@@ -67,6 +70,8 @@ type DoctorReport struct {
 }
 
 var gitVersionRe = regexp.MustCompile(`git version (\d+)\.(\d+)`)
+
+var sshFingerprintRe = regexp.MustCompile(`SHA256:[A-Za-z0-9+/=]+`)
 
 // ParseGitVersion extracts major and minor numbers from `git --version` output.
 func ParseGitVersion(output string) (major, minor int, ok bool) {
@@ -238,7 +243,10 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 	}
 
 	// 5. ssh-keygen & attestation readiness
-	attestUsed := cfg.Attest.AllowedSigners != "" || cfg.Attest.SigningKey != "" || len(cfg.Attest.Signers) > 0 || cfg.Attest.AutoSign || cfg.Attest.AutoPush || os.Getenv("QUAI_ALLOWED_SIGNERS") != ""
+	explicitAttestSigning := cfg.Attest.SigningKey != "" || cfg.Attest.AutoSign || cfg.Attest.AutoPush ||
+		os.Getenv("QUAI_SIGNING_KEY") != "" || os.Getenv("QUAI_SIGN") == "1"
+	attestUsed := explicitAttestSigning || cfg.Attest.AllowedSigners != "" || len(cfg.Attest.Signers) > 0 ||
+		os.Getenv("QUAI_ALLOWED_SIGNERS") != ""
 	if sshPath, err := exec.LookPath("ssh-keygen"); err != nil {
 		st := "warn"
 		if attestUsed {
@@ -250,14 +258,33 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 	}
 
 	if attestUsed {
-		if cfg.Attest.SigningKey != "" || cfg.Attest.AutoSign || cfg.Attest.AutoPush || os.Getenv("QUAI_SIGNING_KEY") != "" {
+		remote := cfg.Attest.Remote
+		if remote == "" {
+			remote = "origin"
+		}
+		add(CheckItem{
+			Name:    "attest-config",
+			Status:  "ok",
+			Message: fmt.Sprintf("[attest] remote=%s max_age=%s signers=%d", remote, cfg.Attest.MaxAgeDur, len(cfg.Attest.Signers)),
+		})
+		if explicitAttestSigning {
 			keyPath, err := attest.ResolveSigningKey(ctx, g, cfg, "")
-			if err != nil {
-				add(CheckItem{Name: "attest-signing-key", Status: "warn", Message: err.Error(), Fix: "Set git config --global user.signingkey ~/.ssh/id_ed25519.pub or QUAI_SIGNING_KEY"})
-			} else if _, statErr := os.Stat(keyPath); statErr != nil {
-				add(CheckItem{Name: "attest-signing-key", Status: "fail", Message: fmt.Sprintf("signing key not found: %s", keyPath), Fix: "Check [attest].signing_key, QUAI_SIGNING_KEY, or git user.signingkey"})
-			} else {
-				add(CheckItem{Name: "attest-signing-key", Status: "ok", Message: keyPath})
+			switch {
+			case err != nil:
+				st := "warn"
+				if explicitAttestSigning {
+					st = "fail"
+				}
+				add(CheckItem{Name: "attest-signing-key", Status: st, Message: err.Error(), Fix: "Set QUAI_SIGNING_KEY or [attest].signing_key to the SSH private key"})
+			case strings.HasSuffix(keyPath, ".pub"):
+				add(CheckItem{Name: "attest-signing-key", Status: "fail", Message: fmt.Sprintf("signing key %s is a public key", keyPath), Fix: "Point QUAI_SIGNING_KEY, [attest].signing_key, or git user.signingkey at the matching private key"})
+			default:
+				if _, statErr := os.Stat(keyPath); statErr != nil {
+					add(CheckItem{Name: "attest-signing-key", Status: "fail", Message: fmt.Sprintf("signing key not found: %s", keyPath), Fix: "Check [attest].signing_key, QUAI_SIGNING_KEY, or git user.signingkey"})
+				} else {
+					add(CheckItem{Name: "attest-signing-key", Status: "ok", Message: keyPath})
+					add(checkAgentKey(ctx, keyPath))
+				}
 			}
 		}
 		if cfg.Attest.AllowedSigners != "" || os.Getenv("QUAI_ALLOWED_SIGNERS") != "" {
@@ -270,6 +297,7 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 				add(CheckItem{Name: "attest-allowed-signers", Status: "ok", Message: allowedPath})
 			}
 		}
+		add(checkAttestRemote(ctx, g, remote, cfg.Attest.AutoPush))
 	}
 
 	// 6. Lock health
@@ -354,4 +382,85 @@ func checkPrePushHook(ctx context.Context, g repo.Git, topLevel string) CheckIte
 		return CheckItem{Name: "hooks", Status: "ok", Message: fmt.Sprintf("pre-push wired at %s", hookPath)}
 	}
 	return CheckItem{Name: "hooks", Status: "warn", Message: fmt.Sprintf("%s exists but does not call quai hooks pre-push", hookPath), Fix: "Chain: " + hooks.ChainSnippet}
+}
+
+func checkAgentKey(ctx context.Context, keyPath string) CheckItem {
+	name := "attest-agent-key"
+	if _, err := exec.LookPath("ssh-add"); err != nil {
+		return CheckItem{Name: name, Status: "warn", Message: "ssh-add not found on PATH; cannot confirm the signing key is loaded in ssh-agent", Fix: "Install OpenSSH client tools"}
+	}
+	var buf bytes.Buffer
+	code, err := execrun.Run(ctx, execrun.Request{
+		Argv:    []string{"ssh-add", "-l"},
+		Timeout: 5 * time.Second,
+		Stdout:  &buf,
+		Stderr:  &buf,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+			return CheckItem{Name: name, Status: "warn", Message: "ssh-add -l timed out; cannot confirm the signing key is loaded in ssh-agent"}
+		case code == 1:
+			return CheckItem{Name: name, Status: "warn", Message: "ssh-agent has no loaded identities", Fix: "ssh-add " + shellQuote(keyPath)}
+		case code == 2:
+			return CheckItem{Name: name, Status: "warn", Message: "no ssh-agent is running", Fix: `eval "$(ssh-agent -s)" && ssh-add ` + shellQuote(keyPath)}
+		}
+		return CheckItem{Name: name, Status: "warn", Message: fmt.Sprintf("ssh-add -l failed: %v", err), Fix: "ssh-add " + shellQuote(keyPath)}
+	}
+
+	fingerprint := sshKeyFingerprint(ctx, keyPath)
+	identities := 0
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if strings.TrimSpace(line) != "" {
+			identities++
+		}
+	}
+	if fingerprint != "" && strings.Contains(buf.String(), fingerprint) {
+		return CheckItem{Name: name, Status: "ok", Message: fmt.Sprintf("signing key %s is loaded in ssh-agent", fingerprint)}
+	}
+	if fingerprint != "" {
+		return CheckItem{Name: name, Status: "warn", Message: fmt.Sprintf("signing key %s is not loaded in ssh-agent (%d identity(ies) loaded)", fingerprint, identities), Fix: "ssh-add " + shellQuote(keyPath)}
+	}
+	return CheckItem{Name: name, Status: "ok", Message: fmt.Sprintf("ssh-agent holds %d identity(ies)", identities)}
+}
+
+func sshKeyFingerprint(ctx context.Context, keyPath string) string {
+	target := keyPath
+	if _, err := os.Stat(keyPath + ".pub"); err == nil {
+		target = keyPath + ".pub"
+	}
+	var out bytes.Buffer
+	code, err := execrun.Run(ctx, execrun.Request{
+		Argv:    []string{"ssh-keygen", "-l", "-f", target},
+		Timeout: 5 * time.Second,
+		Stdout:  &out,
+	})
+	if err != nil || code != 0 {
+		return ""
+	}
+	return sshFingerprintRe.FindString(out.String())
+}
+
+func shellQuote(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\n\r'\"\\$`;&|<>()*?[]{}!#~") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func checkAttestRemote(ctx context.Context, g repo.Git, remote string, required bool) CheckItem {
+	name := "attest-remote"
+	if remote == "" {
+		remote = "origin"
+	}
+	remoteCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := g.ListRemoteRefs(remoteCtx, remote, []string{"HEAD"}); err != nil {
+		status := "warn"
+		if required {
+			status = "fail"
+		}
+		return CheckItem{Name: name, Status: status, Message: fmt.Sprintf("remote %q is not reachable for attestation push or fetch: %v", remote, err), Fix: "Check git remote -v and your GitHub credentials (gh auth status)"}
+	}
+	return CheckItem{Name: name, Status: "ok", Message: fmt.Sprintf("remote %q is reachable", remote)}
 }

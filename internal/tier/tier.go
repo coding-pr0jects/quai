@@ -56,6 +56,7 @@ type Result struct {
 	BaseSHA       string                   `json:"base_sha"`
 	TreeSHA       string                   `json:"tree_sha"`
 	Clean         bool                     `json:"clean"`
+	BaseWarning   string                   `json:"base_warning,omitempty"`
 	Triggers      []string                 `json:"triggers"`
 	PureRenames   int                      `json:"pure_renames"`
 	TestsTampered []TamperFinding          `json:"tests_tampered"`
@@ -202,6 +203,7 @@ func ScanDiff(ctx context.Context, g repo.Git, policy config.TierPolicy, from, t
 // BranchClassification is the diff-derived state behind a branch tier decision.
 type BranchClassification struct {
 	Decision Decision
+	BaseRef  string
 	BaseSHA  string
 	TreeSHA  string
 	Clean    bool
@@ -244,6 +246,7 @@ func ClassifyBranch(ctx context.Context, g repo.Git, cfg *config.Config, since s
 	}
 	return BranchClassification{
 		Decision: Classify(changes, untracked, tampered, cfg.Tiers),
+		BaseRef:  baseRef,
 		BaseSHA:  baseSHA,
 		TreeSHA:  treeSHA,
 		Clean:    clean,
@@ -284,11 +287,17 @@ func Evaluate(ctx context.Context, g repo.Git, cfg *config.Config, since string)
 		}
 	}
 
+	baseWarning := ""
+	if age, fetched, err := repo.FetchHeadAge(ctx, g, time.Now()); err == nil {
+		baseWarning = repo.StaleBaseWarning(bc.BaseRef, age, fetched)
+	}
+
 	return Result{
 		Tier:          bc.Decision.Tier,
 		BaseSHA:       bc.BaseSHA,
 		TreeSHA:       bc.TreeSHA,
 		Clean:         bc.Clean,
+		BaseWarning:   baseWarning,
 		Triggers:      bc.Decision.Triggers,
 		PureRenames:   bc.Decision.PureRenames,
 		TestsTampered: bc.Decision.TestsTampered,

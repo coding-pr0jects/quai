@@ -127,3 +127,76 @@ func execGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v\n%s", args, err, string(out))
 	}
 }
+
+func TestRemoteAndRefArgumentsCannotInjectOptions(t *testing.T) {
+	ctx := context.Background()
+	dir, g := initTestRepo(t)
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	execGit(t, dir, "init", "--bare", "-q", origin)
+	execGit(t, dir, "remote", "add", "origin", origin)
+	execGit(t, dir, "push", "-q", "origin", "HEAD:refs/heads/main")
+
+	refs, err := g.ListRemoteRefs(ctx, "origin", []string{"HEAD", "refs/heads/*"})
+	if err != nil {
+		t.Fatalf("ListRemoteRefs: %v", err)
+	}
+	if len(refs) == 0 {
+		t.Fatal("expected the bare remote to expose refs/heads/main")
+	}
+
+	marker := filepath.Join(t.TempDir(), "pwned")
+	payload := "--upload-pack=touch " + marker + ";true"
+	if _, err := g.ListRemoteRefs(ctx, payload, []string{"HEAD"}); err == nil {
+		t.Fatal("expected ls-remote to reject an option-shaped remote name")
+	}
+	if err := g.Fetch(ctx, payload, "main"); err == nil {
+		t.Fatal("expected fetch to reject an option-shaped remote name")
+	}
+	if err := g.Fetch(ctx, "origin", payload); err == nil {
+		t.Fatal("expected fetch to reject an option-shaped ref")
+	}
+	if err := g.PushRefs(ctx, payload, []string{"refs/heads/main"}); err == nil {
+		t.Fatal("expected push to reject an option-shaped remote name")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("option injection executed: marker %s exists", marker)
+	}
+}
+
+func TestResetHardRequiresCommitSHA(t *testing.T) {
+	ctx := context.Background()
+	_, g := initTestRepo(t)
+	if err := g.ResetHard(ctx, "--upload-pack=touch /tmp/quai-pwn;true"); err == nil {
+		t.Fatal("expected reset --hard to reject a non-SHA revision")
+	}
+	head, err := g.HeadSHA(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ResetHard(ctx, head); err != nil {
+		t.Fatalf("reset --hard to HEAD SHA: %v", err)
+	}
+}
+
+func TestBranchAndSymrefArgumentsCannotInjectOptions(t *testing.T) {
+	ctx := context.Background()
+	_, g := initTestRepo(t)
+	marker := filepath.Join(t.TempDir(), "pwned")
+	payload := "--upload-pack=touch " + marker + ";true"
+
+	if err := g.CheckRefFormatBranch(ctx, payload); err == nil {
+		t.Fatal("expected check-ref-format to reject an option-shaped branch")
+	}
+	if _, err := g.SymbolicRef(ctx, payload); err == nil {
+		t.Fatal("expected symbolic-ref to reject an option-shaped ref")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("option injection executed: marker %s exists", marker)
+	}
+	if err := g.CheckRefFormatBranch(ctx, "main"); err != nil {
+		t.Fatalf("check-ref-format main: %v", err)
+	}
+	if _, err := g.SymbolicRef(ctx, "HEAD"); err != nil {
+		t.Fatalf("symbolic-ref HEAD: %v", err)
+	}
+}

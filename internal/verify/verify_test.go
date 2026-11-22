@@ -455,3 +455,85 @@ lock_wait = "200ms"
 		t.Fatalf("attestation should exist for the bypassed run (ok=%v err=%v)", ok, err)
 	}
 }
+
+func TestVerifyFetchBaseRefreshesOriginAndWarnsWhenStale(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	devDir := filepath.Join(tmp, "dev")
+	cloneDir := filepath.Join(tmp, "clone")
+
+	runIn := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, string(out))
+		}
+	}
+	runIn(tmp, "init", "--bare", "-q", "-b", "main", origin)
+	runIn(tmp, "init", "-q", "-b", "main", devDir)
+	runIn(devDir, "config", "user.name", "t")
+	runIn(devDir, "config", "user.email", "t@example.com")
+	runIn(devDir, "remote", "add", "origin", origin)
+	if err := os.WriteFile(filepath.Join(devDir, "app.go"), []byte("package app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runIn(devDir, "add", "-A")
+	runIn(devDir, "commit", "-qm", "init")
+	runIn(devDir, "push", "-q", "-u", "origin", "main")
+	runIn(tmp, "clone", "-q", origin, cloneDir)
+
+	g := repo.NewExecGit(cloneDir)
+	oldMain, err := g.RevParse(ctx, "origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(cloneDir, ".git", "FETCH_HEAD")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(devDir, "next.go"), []byte("package app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runIn(devDir, "add", "-A")
+	runIn(devDir, "commit", "-qm", "advance main")
+	runIn(devDir, "push", "-q", "origin", "main")
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+[[steps]]
+name = "fast"
+run = "true"
+`))
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+
+	var buf bytes.Buffer
+	stale, err := Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
+	if err != nil {
+		t.Fatalf("Run without fetch: %v", err)
+	}
+	if stale.BaseWarning == "" {
+		t.Fatalf("expected a stale base warning without FETCH_HEAD, got none")
+	}
+	if got, _ := g.RevParse(ctx, "origin/main"); got != oldMain {
+		t.Fatalf("origin/main moved without --fetch-base: %s -> %s", oldMain, got)
+	}
+
+	fresh, err := Run(ctx, g, cfg, Options{FetchBase: true, Stdout: &buf, Stderr: &buf})
+	if err != nil {
+		t.Fatalf("Run with --fetch-base: %v", err)
+	}
+	if fresh.BaseWarning != "" {
+		t.Fatalf("unexpected warning after fetch: %s", fresh.BaseWarning)
+	}
+	newMain, err := g.RevParse(ctx, "origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newMain == oldMain {
+		t.Fatalf("--fetch-base did not refresh origin/main (%s)", oldMain)
+	}
+}

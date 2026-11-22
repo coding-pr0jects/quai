@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -460,5 +461,68 @@ prune_interval = "1h"
 	}
 	if _, err := os.Stat(third); err != nil {
 		t.Fatalf("rate-limited auto prune removed %s: %v", third, err)
+	}
+}
+
+func TestCLIRejectsOptionInjectionInConfig(t *testing.T) {
+	ctx := context.Background()
+	cases := map[string]string{
+		"base": `version = 1
+base = "--upload-pack=touch %s;true"
+
+[[steps]]
+name = "fast"
+run = "true"
+`,
+		"attest remote": `version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+
+[attest]
+signers = ["someone@example.com"]
+remote = "--upload-pack=touch %s;true"
+`,
+	}
+	for name, tmpl := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(t.TempDir(), "pwned")
+			runGit := func(args ...string) {
+				t.Helper()
+				cmd := exec.Command("git", args...)
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v\n%s", args, err, string(out))
+				}
+			}
+			runGit("init", "-q", "-b", "main")
+			runGit("config", "user.name", "t")
+			runGit("config", "user.email", "t@example.com")
+			if err := os.WriteFile(filepath.Join(dir, ".quai.toml"), []byte(fmt.Sprintf(tmpl, marker)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runGit("add", "-A")
+			runGit("commit", "-qm", "init")
+
+			var out, errBuf bytes.Buffer
+			if code := run(ctx, []string{"verify", "--fetch-base", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 2 {
+				t.Fatalf("verify --fetch-base exited %d, want 2: %s %s", code, out.String(), errBuf.String())
+			}
+			if !bytes.Contains(errBuf.Bytes(), []byte("must not start with")) {
+				t.Fatalf("verify error does not say what to fix: %s", errBuf.String())
+			}
+
+			out.Reset()
+			errBuf.Reset()
+			if code := run(ctx, []string{"doctor", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 1 {
+				t.Fatalf("doctor exited %d, want 1 for invalid config: %s %s", code, out.String(), errBuf.String())
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("option injection executed: marker %s exists", marker)
+			}
+		})
 	}
 }

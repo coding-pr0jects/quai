@@ -68,7 +68,17 @@ Route verification depth based on `tier` and `tests_tampered`:
 | `diff-audit` | Run a focused code-diff review on `triggers`; reuse valid local `receipts` |
 | `full-live` | Require full live/end-to-end verification; inspect any entries in `tests_tampered` |
 
-### 3. Avoiding redundant re-reviews after a rebase
+### 3. Checking attestation readiness with `quai doctor --json`
+
+Before an agent waits on CI attestations or starts a signing cycle, check that the local setup can produce and verify them:
+
+```bash
+quai doctor --json
+```
+
+Read `checks` for `attest-signing-key`, `attest-agent-key`, `attest-allowed-signers`, and `attest-remote`. A `fail` on the signing key or a `warn` that the key is not loaded in `ssh-agent` means a later `quai verify --sign` or CI attestation check would waste a cycle; fix it first.
+
+### 4. Avoiding redundant re-reviews after a rebase
 
 When an agent rebases a previously reviewed branch onto an updated `main`, check whether the patch actually changed:
 
@@ -79,7 +89,7 @@ quai patch-id <reviewed-sha> HEAD --json
 - Exit `0` (`"status": "SURVIVES"`): the diff is identical; prior review verdicts still apply.
 - Exit `1` (`"status": "CHANGED"`): re-review only the files listed in `changed_files`.
 
-### 4. Serialized PR landing
+### 5. Serialized PR landing
 
 Instead of letting parallel agents race to rebase and merge PRs simultaneously:
 

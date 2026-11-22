@@ -7,6 +7,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `quai attest check --json` reports a normalized per-step `reason` (`verified`, `no_record`, `base_mismatch`, `tree_mismatch`, `config_mismatch`, `signature_invalid`, `expired`, `sampled`) plus `base_sha`, `tree_sha`, and `fingerprint`, so CI logs explain a fallback to a full run (#15).
+- `quai verify --fetch-base` refreshes `origin/<base>` before resolving `{{base}}`, and both `quai verify` and `quai tier --json` report `base_warning` when `FETCH_HEAD` is missing or older than 10 minutes (#15).
+- `quai doctor` checks end-to-end attestation readiness: `[attest]` config, signing key resolution, `ssh-agent` identity, `allowed_signers` file, and `git ls-remote` remote reachability, all read-only (#15).
 - `AGENTS.md` (imported by `CLAUDE.md`) and `GLOSSARY.md` for contributors and coding agents.
 - Detached runs (`internal/detach`): `quai verify --detach` and `quai exec --detach` start the command in the background under `<git-common-dir>/quai/runs/<run-id>/`; `quai verify --wait [<run-id>] [--max <duration>]` streams the new output and exits `0` passed, `1` failed or dead, `4` still running; `quai verify --stop [<run-id>]` stops the run and its steps. Dead runs have their step groups killed and their locks released, and `quai status` and `quai doctor` list running and dead runs (#11).
 - `quai land` works from any worktree: off the PR branch it evaluates `origin/<pr-head>`, and rebases and verifies in a temporary detached worktree under `<git-common-dir>/quai/`, removed on every exit and signal, even when the PR branch is checked out elsewhere. It reads `.quai.toml` from `origin/<base>` when the caller's worktree has none (#12).
@@ -19,6 +22,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Unified maintenance command `quai gc [--dry-run] [--json]` (`internal/gc`): prunes expired receipts, local and remote `refs/quai/records/*`, expired verdicts, and stale lock directories without touching a live lock, and reports the plan without mutating anything under `--dry-run`.
 - Best-effort automatic pruning via `[attest].auto_prune` and `[attest].prune_interval` (default `24h`), rate-limited by an atomically written `<git-common-dir>/quai/last-prune` stamp and serialized by `prune.lock`. The automatic policy is read from the remote default branch; when `refs/remotes/origin/HEAD` is unset the skip warning and `quai doctor` both name `git remote set-head origin --auto`, remote failures warn on stderr, and neither changes the outcome of `quai verify` or `quai land` (#20).
 - Batch landing: `quai land <pr1> <pr2>...` lands several PRs under one `land.lock` session, `direct-merge` and `optimistic-merge` PRs first, then rebases with stacked parents before children, with `--continue-on-error` (default `true`) and a per-PR `--json` report. Policy comes from `origin/<base>`, and a PR whose branch no worktree has checked out lands from the calling checkout like `quai land <pr>` does (#18).
+
+### Security
+- Every git call that takes a remote, ref, base, or refspec now passes `--end-of-options` (and `git reset --hard`, which has none, accepts only a validated 40-character SHA), and `.quai.toml` rejects a `base` or `[attest].remote` that starts with `-`, closing a git option-injection path through `quai doctor`, `quai attest fetch/push`, `quai verify --fetch-base`, and land's temporary worktrees (#15).
+- `quai doctor` shell-quotes signing-key paths in its `fix` hints instead of pasting them into a runnable command unquoted (#15).
 
 ### Changed
 - `[attest].max_age` and `quai attest prune --max-age` now reject values below `1m`, so a mistyped policy cannot expire the whole attestation history in one pass.
