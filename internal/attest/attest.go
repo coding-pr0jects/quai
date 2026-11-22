@@ -73,6 +73,7 @@ type CheckOptions struct {
 	StepNames      []string
 	Since          string
 	Onto           string
+	ConfigRef      string
 	AllowedSigners string
 	Sample         int
 	Fetch          bool
@@ -92,12 +93,13 @@ type StepCheck struct {
 }
 
 type CheckResult struct {
-	OK      bool        `json:"ok"`
-	Sampled bool        `json:"sampled,omitempty"`
-	TreeSHA string      `json:"tree_sha"`
-	BaseSHA string      `json:"base_sha"`
-	Onto    string      `json:"onto,omitempty"`
-	Steps   []StepCheck `json:"steps"`
+	OK        bool        `json:"ok"`
+	Sampled   bool        `json:"sampled,omitempty"`
+	ConfigRef string      `json:"config_ref,omitempty"`
+	TreeSHA   string      `json:"tree_sha"`
+	BaseSHA   string      `json:"base_sha"`
+	Onto      string      `json:"onto,omitempty"`
+	Steps     []StepCheck `json:"steps"`
 }
 
 type PushOptions struct {
@@ -561,6 +563,7 @@ func Push(ctx context.Context, g repo.Git, cfg *config.Config, opts PushOptions)
 }
 
 // Check verifies signed attestations for the selected steps on HEAD (or virtual merge-tree --onto <ref>).
+// When opts.ConfigRef is set, .quai.toml is loaded from that git ref instead of the working tree.
 func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOptions) (CheckResult, error) {
 	if opts.Sample < 0 || opts.Sample > 100 {
 		return CheckResult{}, fmt.Errorf("--sample must be between 0 and 100, got %d", opts.Sample)
@@ -568,6 +571,19 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 	topLevel, err := g.TopLevel(ctx)
 	if err != nil {
 		return CheckResult{}, err
+	}
+	if opts.ConfigRef != "" {
+		rawCfg, err := g.ShowFile(ctx, opts.ConfigRef, config.FileName)
+		if err != nil {
+			return CheckResult{}, fmt.Errorf("load %s from --config-ref %q: %w", config.FileName, opts.ConfigRef, err)
+		}
+		cfg, err = config.Parse(rawCfg)
+		if err != nil {
+			return CheckResult{}, fmt.Errorf("parse %s from --config-ref %q: %w", config.FileName, opts.ConfigRef, err)
+		}
+	}
+	if cfg == nil {
+		return CheckResult{}, errors.New("config is required")
 	}
 	allowedSigners, err := ResolveAllowedSigners(topLevel, cfg, opts.AllowedSigners)
 	if err != nil {
@@ -617,10 +633,11 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 	}
 
 	res := CheckResult{
-		OK:      true,
-		TreeSHA: treeSHA,
-		BaseSHA: baseSHA,
-		Onto:    opts.Onto,
+		OK:        true,
+		ConfigRef: opts.ConfigRef,
+		TreeSHA:   treeSHA,
+		BaseSHA:   baseSHA,
+		Onto:      opts.Onto,
 	}
 
 	stepFPs := make([]string, len(steps))

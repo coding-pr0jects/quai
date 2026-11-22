@@ -73,6 +73,7 @@ type Git interface {
 	ListRemoteRefs(ctx context.Context, remote string, patterns []string) ([]string, error)
 	DeleteLocalRef(ctx context.Context, refName string) error
 	DeleteRemoteRefs(ctx context.Context, remote string, refs []string) error
+	ShowFile(ctx context.Context, rev, filePath string) ([]byte, error)
 }
 
 type ExecGit struct {
@@ -543,6 +544,15 @@ func (g *ExecGit) DeleteRemoteRefs(ctx context.Context, remote string, refs []st
 		return fmt.Errorf("git push delete %s: %w (%s)", remote, err, strings.TrimSpace(string(errOut)))
 	}
 	return nil
+}
+
+// ShowFile returns the raw bytes of filePath at git revision rev.
+func (g *ExecGit) ShowFile(ctx context.Context, rev, filePath string) ([]byte, error) {
+	out, errOut, err := g.run(ctx, nil, "show", rev+":"+filePath)
+	if err != nil {
+		return nil, fmt.Errorf("git show %s:%s: %w (%s)", rev, filePath, err, strings.TrimSpace(string(errOut)))
+	}
+	return out, nil
 }
 
 func splitNull(data []byte) []string {

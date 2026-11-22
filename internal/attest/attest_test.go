@@ -426,3 +426,113 @@ max_age = "7d"
 		t.Fatalf("remaining remote refs = %v, want [%s]", remainingRemote, freshRef)
 	}
 }
+
+func TestConfigRefPreventsPRConfigTampering(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	keyPath, pubKey := genSSHKey(t, tmp, "base_signer")
+	extAllowed := filepath.Join(tmp, "allowed_signers")
+	writeFile(t, extAllowed, "dev@example.com "+pubKey+"\n")
+
+	origin := filepath.Join(tmp, "origin.git")
+	devRepo := filepath.Join(tmp, "dev")
+	gitRun(t, tmp, "init", "--bare", "-q", "-b", "main", origin)
+	gitRun(t, tmp, "init", "-q", "-b", "main", devRepo)
+	gitRun(t, devRepo, "config", "user.name", "dev")
+	gitRun(t, devRepo, "config", "user.email", "dev@example.com")
+	gitRun(t, devRepo, "remote", "add", "origin", origin)
+
+	baseCfgText := `
+version = 1
+base = "main"
+
+[[steps]]
+name = "verify"
+run = "go test ./..."
+inputs = ["src/**"]
+
+[attest]
+signers = ["dev@example.com"]
+max_age = "14d"
+`
+	writeFile(t, filepath.Join(devRepo, ".quai.toml"), baseCfgText)
+	writeFile(t, filepath.Join(devRepo, "src/app.go"), "package app\n")
+	gitRun(t, devRepo, "add", "-A")
+	gitRun(t, devRepo, "commit", "-q", "-m", "init")
+	gitRun(t, devRepo, "push", "-q", "-u", "origin", "main")
+
+	// PR branch weakens .quai.toml (run = "true") and signs an attestation against the weakened config.
+	gitRun(t, devRepo, "checkout", "-q", "-b", "feat/weaken")
+	weakCfgText := strings.ReplaceAll(baseCfgText, `run = "go test ./..."`, `run = "true"`)
+	writeFile(t, filepath.Join(devRepo, ".quai.toml"), weakCfgText)
+	writeFile(t, filepath.Join(devRepo, "src/app.go"), "package app\nfunc X() {}\n")
+	gitRun(t, devRepo, "add", "-A")
+	gitRun(t, devRepo, "commit", "-q", "-m", "weaken quai config")
+
+	g := repo.NewExecGit(devRepo)
+	weakCfg, err := config.Load(devRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headSHA, _ := g.HeadSHA(ctx)
+	treeSHA, _ := g.TreeSHA(ctx, "HEAD")
+	baseSHA, _ := g.MergeBase(ctx, "origin/main", "HEAD")
+	weakFP, err := receipt.Fingerprint(ctx, g, weakCfg.Steps[0], treeSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := WriteRecord(ctx, g, receipt.Receipt{
+		Version:     receipt.CurrentVersion,
+		Fingerprint: weakFP,
+		TreeSHA:     treeSHA,
+		HeadSHA:     headSHA,
+		BaseSHA:     baseSHA,
+		Step:        "verify",
+		Passed:      true,
+		CreatedAt:   time.Now().UTC(),
+	}, keyPath, "dev@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Checking with --config-ref origin/main MUST reject the weakened attestation.
+	rejected, err := Check(ctx, g, nil, CheckOptions{
+		ConfigRef:      "origin/main",
+		AllowedSigners: extAllowed,
+	})
+	if err != nil {
+		t.Fatalf("Check with --config-ref errored: %v", err)
+	}
+	if rejected.OK || rejected.ConfigRef != "origin/main" || rejected.Steps[0].Status != "missing" {
+		t.Fatalf("expected weakened attestation to fail under --config-ref origin/main, got %+v", rejected)
+	}
+
+	// Signing against origin/main's real step command succeeds under --config-ref origin/main.
+	baseCfg, err := config.Parse([]byte(baseCfgText))
+	if err != nil {
+		t.Fatal(err)
+	}
+	realFP, err := receipt.Fingerprint(ctx, g, baseCfg.Steps[0], treeSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := WriteRecord(ctx, g, receipt.Receipt{
+		Version:     receipt.CurrentVersion,
+		Fingerprint: realFP,
+		TreeSHA:     treeSHA,
+		HeadSHA:     headSHA,
+		BaseSHA:     baseSHA,
+		Step:        "verify",
+		Passed:      true,
+		CreatedAt:   time.Now().UTC(),
+	}, keyPath, "dev@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	accepted, err := Check(ctx, g, nil, CheckOptions{
+		ConfigRef:      "origin/main",
+		AllowedSigners: extAllowed,
+	})
+	if err != nil || !accepted.OK || accepted.Steps[0].Status != "verified" {
+		t.Fatalf("expected real attestation to pass under --config-ref origin/main, got res=%+v err=%v", accepted, err)
+	}
+}

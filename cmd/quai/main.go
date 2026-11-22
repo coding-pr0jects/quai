@@ -188,9 +188,10 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 		fs.Var(&steps, "step", "step name to verify (repeatable)")
 		since := fs.String("since", "", "base ref")
 		onto := fs.String("onto", "", "virtual merge-tree target ref (e.g. origin/main)")
+		configRef := fs.String("config-ref", "", "load .quai.toml from a trusted git ref instead of the working tree (e.g. origin/main)")
 		allowedSigners := fs.String("allowed-signers", "", "path to OpenSSH allowed_signers file (overrides QUAI_ALLOWED_SIGNERS and [attest].allowed_signers)")
 		sample := fs.Int("sample", 0, "probabilistic audit rerun percentage (0-100)")
-		fetch := fs.Bool("fetch", false, "fetch refs/quai/records/* from remote first")
+		fetch := fs.Bool("fetch", false, "fetch matching refs/quai/records/* from remote first")
 		remote := fs.String("remote", "", "git remote for --fetch")
 		jsonOut := fs.Bool("json", false, "output JSON")
 		if err := fs.Parse(rest); err != nil {
@@ -200,15 +201,29 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 			fmt.Fprintf(stderr, "quai attest check: unexpected arguments: %v\n", fs.Args())
 			return 2
 		}
-		g, cfg, _, err := loadRepoAndConfig(ctx, cwd)
-		if err != nil {
-			fmt.Fprintf(stderr, "quai attest check: %v\n", err)
-			return 2
+		var g *repo.ExecGit
+		var cfg *config.Config
+		if *configRef != "" {
+			g = repo.NewExecGit(cwd)
+			top, err := g.TopLevel(ctx)
+			if err != nil {
+				fmt.Fprintf(stderr, "quai attest check: not inside a git repository: %v\n", err)
+				return 2
+			}
+			g.Dir = top
+		} else {
+			var err error
+			g, cfg, _, err = loadRepoAndConfig(ctx, cwd)
+			if err != nil {
+				fmt.Fprintf(stderr, "quai attest check: %v\n", err)
+				return 2
+			}
 		}
 		res, err := attest.Check(ctx, g, cfg, attest.CheckOptions{
 			StepNames:      steps,
 			Since:          *since,
 			Onto:           *onto,
+			ConfigRef:      *configRef,
 			AllowedSigners: *allowedSigners,
 			Sample:         *sample,
 			Fetch:          *fetch,
