@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `quai land` retries `gh` calls failing on a transient network error (TLS handshake timeout, EOF, connection reset, i/o timeout, HTTP 5xx) after 2 s, 5 s, and 10 s; semantic refusals are never retried (#12).
 - `quai land` resets the rebased branch to its original head when verification or the push fails after a rebase, and reports `"failure": "post-rebase-verify-failed"` for a failed verification (#12).
 - `quai status` lists temporary land worktrees (`land_worktrees`), and `quai doctor` warns about ones left while `land.lock` is free (#12).
+- `quai attest check --head <pr-head-sha>`: on a checked-out merge commit whose base moved since local `quai verify`, accepts the PR head's attestation on its old merge base when the base's changes are disjoint from the PR, touch no `[land].global_paths` (read from `--config-ref`), merge cleanly, and tamper with no test. JSON adds `match_mode` (`exact` | `disjoint-base`), `head_sha`, `old_base_sha`, and `disjoint_refusal` (#13).
 
 ### Changed
 - `docs/agents.md` is now `docs/agent-integration.md`; the `verify-quai` harness moved to `.agents/skills/verify-quai/`, linked from `.claude/skills/` and `.cursor/skills/`.

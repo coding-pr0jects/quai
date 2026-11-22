@@ -277,6 +277,7 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 		fs.Var(&steps, "step", "step name to verify (repeatable)")
 		since := fs.String("since", "", "base ref")
 		onto := fs.String("onto", "", "virtual merge-tree target ref (e.g. origin/main)")
+		head := fs.String("head", "", "PR head commit of the checked-out merge; accepts its attestation on the old merge base when the base moved disjointly (requires --config-ref)")
 		configRef := fs.String("config-ref", "", "load .quai.toml from a trusted git ref instead of the working tree (e.g. origin/main)")
 		allowedSigners := fs.String("allowed-signers", "", "path to OpenSSH allowed_signers file (overrides QUAI_ALLOWED_SIGNERS and [attest].allowed_signers)")
 		sample := fs.Int("sample", 0, "probabilistic audit rerun percentage (0-100)")
@@ -312,6 +313,7 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 			StepNames:      steps,
 			Since:          *since,
 			Onto:           *onto,
+			Head:           *head,
 			ConfigRef:      *configRef,
 			AllowedSigners: *allowedSigners,
 			Sample:         *sample,
@@ -337,10 +339,15 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 			for _, s := range res.Steps {
 				switch s.Status {
 				case "verified":
-					fmt.Fprintf(stdout, "verified %s (%s by %s)\n", s.Name, s.Fingerprint[:min(12, len(s.Fingerprint))], s.Signer)
+					fmt.Fprintf(stdout, "verified %s (%s by %s, %s)\n", s.Name, s.Fingerprint[:min(12, len(s.Fingerprint))], s.Signer, s.MatchMode)
 				default:
 					fmt.Fprintf(stdout, "%-8s %s (%s)\n", s.Status, s.Name, s.Error)
 				}
+			}
+			if res.DisjointRefusal != "" {
+				fmt.Fprintf(stdout, "disjoint-base refused: %s\n", res.DisjointRefusal)
+			} else if res.MatchMode == attest.MatchDisjointBase {
+				fmt.Fprintf(stdout, "disjoint-base: PR head %s on old base %s\n", res.HeadSHA, res.OldBaseSHA)
 			}
 		}
 		if !res.OK {

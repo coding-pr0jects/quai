@@ -10,7 +10,7 @@ Every feature owns a dedicated package under `internal/<feature>/`. `cmd/quai/` 
 quai/
 ├── cmd/quai/          # CLI entrypoint, subcommand routing, flag parsing, exit codes
 ├── internal/
-│   ├── attest/        # in-toto v1 / DSSE v1 envelopes, ssh-keygen -Y (namespace quai), refs/quai/records/*, --onto check
+│   ├── attest/        # in-toto v1 / DSSE v1 envelopes, ssh-keygen -Y (namespace quai), refs/quai/records/*, --onto and --head (disjoint-base) checks
 │   ├── config/        # .quai.toml decoding, defaults, validation, SHA placeholder expansion
 │   ├── conflicts/     # read-only merge-tree and file-overlap checks across linked worktrees
 │   ├── glob/          # double-star (**) path glob matcher shared by config, receipt, tier, land

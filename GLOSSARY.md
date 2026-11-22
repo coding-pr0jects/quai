@@ -42,6 +42,9 @@ The OpenSSH `allowed_signers` file that decides which keys `quai attest check` a
 A `quai verify` or `quai exec` started with `--detach`, running in the background under `runs/<run-id>/` with its own log and read cursor. `quai verify --wait` streams it, `quai verify --stop` ends it. A detached run gone without an exit record is `dead`.
 _Avoid_: job, background task, daemon.
 
+**Disjoint-base match**
+The `match_mode` of a step that `quai attest check --head` accepted through the PR head's attestation on its old merge base, because the base moved only by changes an optimistic merge would accept. Its opposite is an `exact` match on the checked-out tree's own fingerprint.
+
 **Sampled**
 The `status` that `quai attest check --sample` gives every step on a sampled run, telling CI to rerun the steps itself as an audit.
 

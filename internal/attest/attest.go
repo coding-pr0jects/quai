@@ -73,6 +73,7 @@ type CheckOptions struct {
 	StepNames      []string
 	Since          string
 	Onto           string
+	Head           string
 	ConfigRef      string
 	AllowedSigners string
 	Sample         int
@@ -89,17 +90,22 @@ type StepCheck struct {
 	Ref         string     `json:"ref,omitempty"`
 	Signer      string     `json:"signer,omitempty"`
 	CreatedAt   *time.Time `json:"created_at,omitempty"`
+	MatchMode   string     `json:"match_mode,omitempty"`
 	Error       string     `json:"error,omitempty"`
 }
 
 type CheckResult struct {
-	OK        bool        `json:"ok"`
-	Sampled   bool        `json:"sampled,omitempty"`
-	ConfigRef string      `json:"config_ref,omitempty"`
-	TreeSHA   string      `json:"tree_sha"`
-	BaseSHA   string      `json:"base_sha"`
-	Onto      string      `json:"onto,omitempty"`
-	Steps     []StepCheck `json:"steps"`
+	OK              bool        `json:"ok"`
+	Sampled         bool        `json:"sampled,omitempty"`
+	MatchMode       string      `json:"match_mode,omitempty"`
+	ConfigRef       string      `json:"config_ref,omitempty"`
+	TreeSHA         string      `json:"tree_sha"`
+	BaseSHA         string      `json:"base_sha"`
+	Onto            string      `json:"onto,omitempty"`
+	HeadSHA         string      `json:"head_sha,omitempty"`
+	OldBaseSHA      string      `json:"old_base_sha,omitempty"`
+	DisjointRefusal string      `json:"disjoint_refusal,omitempty"`
+	Steps           []StepCheck `json:"steps"`
 }
 
 type PushOptions struct {
@@ -615,6 +621,12 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 	if opts.Sample < 0 || opts.Sample > 100 {
 		return CheckResult{}, fmt.Errorf("--sample must be between 0 and 100, got %d", opts.Sample)
 	}
+	if opts.Head != "" && opts.ConfigRef == "" {
+		return CheckResult{}, errors.New("--head requires --config-ref, so global_paths come from a trusted ref (e.g. --config-ref origin/main)")
+	}
+	if opts.Head != "" && opts.Onto != "" {
+		return CheckResult{}, errors.New("--head and --onto cannot be combined: --head checks a checked-out merge commit, --onto builds one")
+	}
 	topLevel, err := g.TopLevel(ctx)
 	if err != nil {
 		return CheckResult{}, err
@@ -667,6 +679,12 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 			return CheckResult{}, err
 		}
 	}
+	var headSHA string
+	if opts.Head != "" {
+		if headSHA, err = g.RevParse(ctx, opts.Head); err != nil {
+			return CheckResult{}, fmt.Errorf("resolve --head %q: %w", opts.Head, err)
+		}
+	}
 
 	nowFn := opts.Now
 	if nowFn == nil {
@@ -685,6 +703,7 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 		TreeSHA:   treeSHA,
 		BaseSHA:   baseSHA,
 		Onto:      opts.Onto,
+		HeadSHA:   headSHA,
 	}
 
 	stepFPs := make([]string, len(steps))
@@ -719,64 +738,111 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 		}
 	}
 
+	c := stepChecker{g: g, cfg: cfg, allowedSigners: allowedSigners, now: now}
 	for i, step := range steps {
-		fp := stepFPs[i]
-		ref := targetRefs[i]
-		env, ok, err := ReadRecord(ctx, g, step.Name, fp)
-		if err != nil {
-			res.OK = false
-			res.Steps = append(res.Steps, StepCheck{
-				Name:        step.Name,
-				Status:      "invalid",
-				Fingerprint: fp,
-				Ref:         ref,
-				Error:       err.Error(),
-			})
-			continue
+		res.Steps = append(res.Steps, c.check(ctx, step, stepFPs[i], MatchExact))
+	}
+	if headSHA != "" && anyStatus(res.Steps, "missing") {
+		if err := c.retryDisjointBase(ctx, steps, headSHA, opts.Fetch, remote, &res); err != nil {
+			return res, err
 		}
-		if !ok {
-			res.OK = false
-			res.Steps = append(res.Steps, StepCheck{
-				Name:        step.Name,
-				Status:      "missing",
-				Fingerprint: fp,
-				Ref:         ref,
-				Error:       "no signed attestation found for fingerprint",
-			})
-			continue
+	}
+	res.OK = !anyStatus(res.Steps, "missing", "invalid")
+	if res.OK {
+		res.MatchMode = MatchExact
+		if anyMatchMode(res.Steps, MatchDisjointBase) {
+			res.MatchMode = MatchDisjointBase
 		}
-		info, err := VerifyEnvelope(
-			ctx,
-			env,
-			allowedSigners,
-			cfg.AllowedPrincipalsFor(step),
-			step.Name,
-			fp,
-			cfg.Attest.MaxAgeDur,
-			now,
-		)
-		if err != nil {
-			res.OK = false
-			res.Steps = append(res.Steps, StepCheck{
-				Name:        step.Name,
-				Status:      "invalid",
-				Fingerprint: fp,
-				Ref:         ref,
-				Error:       err.Error(),
-			})
-			continue
-		}
-		ts := info.Statement.Predicate.CreatedAt
-		res.Steps = append(res.Steps, StepCheck{
-			Name:        step.Name,
-			Status:      "verified",
-			Fingerprint: fp,
-			Ref:         ref,
-			Signer:      info.Signer,
-			CreatedAt:   &ts,
-		})
 	}
 	return res, nil
+}
+
+type stepChecker struct {
+	g              repo.Git
+	cfg            *config.Config
+	allowedSigners string
+	now            time.Time
+}
+
+func (c stepChecker) retryDisjointBase(ctx context.Context, steps []config.Step, headSHA string, fetch bool, remote string, res *CheckResult) error {
+	in, err := gatherDisjointBase(ctx, c.g, c.cfg, headSHA, res.BaseSHA)
+	res.OldBaseSHA = in.OldBaseSHA
+	if err != nil {
+		res.DisjointRefusal = err.Error()
+		return nil
+	}
+	if refusal := RefuseDisjointBase(in); refusal != "" {
+		res.DisjointRefusal = refusal
+		return nil
+	}
+	headTree, err := c.g.TreeSHA(ctx, headSHA)
+	if err != nil {
+		return err
+	}
+	fps := make([]string, len(steps))
+	var refs []string
+	for i, step := range steps {
+		if res.Steps[i].Status != "missing" {
+			continue
+		}
+		if fps[i], err = receipt.Fingerprint(ctx, c.g, step, headTree, in.OldBaseSHA); err != nil {
+			return err
+		}
+		refs = append(refs, RefName(step.Name, fps[i]))
+	}
+	if fetch {
+		if err := FetchTargeted(ctx, c.g, remote, refs); err != nil {
+			return err
+		}
+	}
+	for i, fp := range fps {
+		if fp == "" {
+			continue
+		}
+		if sc := c.check(ctx, steps[i], fp, MatchDisjointBase); sc.Status != "missing" {
+			res.Steps[i] = sc
+		}
+	}
+	return nil
+}
+
+func (c stepChecker) check(ctx context.Context, step config.Step, fp, mode string) StepCheck {
+	sc := StepCheck{Name: step.Name, Fingerprint: fp, Ref: RefName(step.Name, fp)}
+	env, ok, err := ReadRecord(ctx, c.g, step.Name, fp)
+	if err != nil {
+		sc.Status, sc.Error = "invalid", err.Error()
+		return sc
+	}
+	if !ok {
+		sc.Status, sc.Error = "missing", "no signed attestation found for fingerprint"
+		return sc
+	}
+	info, err := VerifyEnvelope(ctx, env, c.allowedSigners, c.cfg.AllowedPrincipalsFor(step), step.Name, fp, c.cfg.Attest.MaxAgeDur, c.now)
+	if err != nil {
+		sc.Status, sc.Error = "invalid", err.Error()
+		return sc
+	}
+	ts := info.Statement.Predicate.CreatedAt
+	sc.Status, sc.Signer, sc.CreatedAt, sc.MatchMode = "verified", info.Signer, &ts, mode
+	return sc
+}
+
+func anyStatus(steps []StepCheck, statuses ...string) bool {
+	for _, s := range steps {
+		if containsString(statuses, s.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyMatchMode(steps []StepCheck, mode string) bool {
+	for _, s := range steps {
+		if s.MatchMode == mode {
+			return true
+		}
+	}
+	return false
 }
 
 func sshSign(ctx context.Context, keyPath, namespace string, data []byte) ([]byte, error) {
