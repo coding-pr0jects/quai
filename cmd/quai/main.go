@@ -782,7 +782,7 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 			Options:         opts,
 			PRNumbers:       prNums,
 			ContinueOnError: *continueOnError,
-		}, *jsonOut, stdout, stderr)
+		}, stdout, stderr)
 	}
 	res, err := land.Run(ctx, g, f, cfg, opts)
 	if *jsonOut {
@@ -812,9 +812,9 @@ func runLand(ctx context.Context, cwd string, args []string, stdout, stderr io.W
 	return 0
 }
 
-func runLandBatch(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opts land.BatchOptions, jsonOut bool, stdout, stderr io.Writer) int {
+func runLandBatch(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opts land.BatchOptions, stdout, stderr io.Writer) int {
 	res, err := land.RunBatch(ctx, g, f, cfg, opts)
-	if jsonOut {
+	if opts.JSON {
 		writeJSON(stdout, res)
 	} else {
 		for _, e := range res.PRs {
