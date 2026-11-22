@@ -3,6 +3,7 @@ package land
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/forge"
+	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
 )
 
@@ -458,5 +460,54 @@ func TestRunBatchReadsPolicyFromBase(t *testing.T) {
 	_, err := fx.run(t, ctx, BatchOptions{PRNumbers: []int{1}, ContinueOnError: true})
 	if !errors.Is(err, ErrBasePolicy) {
 		t.Fatalf("expected ErrBasePolicy, got %v", err)
+	}
+}
+
+func TestRunBatchHoldsLocksAsLand(t *testing.T) {
+	ctx := context.Background()
+	fx := newBatchFixture(t, []batchPR{
+		{number: 1, branch: "feat/x", file: "x.txt", body: "x\n"},
+		{number: 2, branch: "feat/y", file: "y.txt", body: "y\n"},
+	}, nil)
+	gitRun(t, fx.mainDir, "worktree", "remove", fx.wt[2])
+	locks := filepath.Join(fx.mainDir, ".git", "quai", "locks")
+	out := filepath.Join(fx.tmp, "owners.jsonl")
+	writeFile(t, fx.mainDir, config.FileName, `version = 1
+[slots]
+heavy = 1
+[[steps]]
+name = "record-owners"
+run = "cat '`+locks+`/land.lock/owner' >> '`+out+`' && echo >> '`+out+`' && cat '`+locks+`/slot-heavy-0.lock/owner' >> '`+out+`' && echo >> '`+out+`'"
+pool = "heavy"
+slots = 1
+[land]
+optimistic_merge = false
+required_checks = ["check"]
+`)
+	gitRun(t, fx.mainDir, "commit", "-qam", "policy with a slot step")
+	gitRun(t, fx.mainDir, "push", "-q", "origin", "main")
+
+	res, err := fx.run(t, ctx, BatchOptions{PRNumbers: []int{1, 2}, ContinueOnError: true})
+	if err != nil || !res.OK {
+		t.Fatalf("batch: res=%+v err=%v", res, err)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("post-rebase verify did not record lock owners: %v", err)
+	}
+	var lines []string
+	for _, l := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 4 {
+		t.Fatalf("expected land.lock and slot owners for both PRs, got %d lines:\n%s", len(lines), raw)
+	}
+	for _, line := range lines {
+		var o lock.Owner
+		if err := json.Unmarshal([]byte(line), &o); err != nil || o.Role != lock.RoleLand || o.Priority != SlotPriority {
+			t.Fatalf("owner = %s (err=%v), want role %q priority %d", line, err, lock.RoleLand, SlotPriority)
+		}
 	}
 }

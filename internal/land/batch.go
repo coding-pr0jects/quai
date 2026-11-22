@@ -335,6 +335,8 @@ func acquireBatchLock(ctx context.Context, g repo.Git, cfg *config.Config, opts 
 		nums[i] = strconv.Itoa(n)
 	}
 	return lock.AcquireDir(ctx, filepath.Join(commonDir, "quai", "locks", "land.lock"), lock.Owner{
+		Role:     lock.RoleLand,
+		Priority: SlotPriority,
 		Command:  "quai land " + strings.Join(nums, " "),
 		Worktree: topLevel,
 	}, lock.Options{
