@@ -533,12 +533,31 @@ func TestPrePushGuardSkipsNestedInvocation(t *testing.T) {
 	t.Setenv(config.EnvPrePushActive, "1")
 
 	var out, errOut bytes.Buffer
-	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: false, Stdout: &out, Stderr: &errOut})
 	if err != nil || !res.OK {
-		t.Fatalf("a nested invocation must return at once: res=%+v err=%v", res, err)
+		t.Fatalf("a nested invocation without refs must return at once: res=%+v err=%v", res, err)
 	}
 	if res.Skipped != "nested attestation push" || len(res.Steps) != 0 || len(res.RequireCached) != 0 {
 		t.Fatalf("nested invocation must do nothing, got %+v", res)
+	}
+
+	// An attestation-only ref list is the other shape the guard covers.
+	att, err := ParsePushRefs(strings.NewReader("refs/quai/records/x " + head + " refs/quai/records/x " + zeroSHA + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = RunPrePush(ctx, pr.git, cfg, Options{Refs: att, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	if err != nil || !res.OK || res.Skipped != "nested attestation push" {
+		t.Fatalf("an attestation-only nested push must return at once: res=%+v err=%v", res, err)
+	}
+
+	// A branch push must never turn the guard into a silent bypass.
+	res, err = RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	if err != nil {
+		t.Fatalf("RunPrePush: %v", err)
+	}
+	if res.OK || res.Skipped == "nested attestation push" || len(res.RequireCached) != 1 {
+		t.Fatalf("the guard must not skip a branch push, got %+v", res)
 	}
 }
 

@@ -122,7 +122,9 @@ type Result struct {
 func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Result, error) {
 	res := Result{Result: verify.Result{OK: true, Clean: true}}
 
-	if os.Getenv(config.EnvPrePushActive) == "1" {
+	// The guard only ever applies to the attestation pushes quai starts itself: on an old hook
+	// that drops stdin there are no refs, and on the current hook the refs are attestation refs.
+	if os.Getenv(config.EnvPrePushActive) == "1" && (!opts.RefsProvided || IsAttestationPush(opts.Refs)) {
 		res.Skipped = "nested attestation push"
 		return res, nil
 	}
