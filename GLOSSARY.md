@@ -65,7 +65,16 @@ _Avoid_: lock owner, pidfile.
 Replacing the lease of a dead holder, guarded by `<lock-dir>.takeover` so two waiters never both win.
 
 **Queue**
-The FIFO ticket directory beside a lock (`land.lock.queue/`, `slot-<pool>.queue/`) that serves waiters in arrival order.
+The ticket directory beside a lock (`land.lock.queue/`, `slot-<pool>.queue/`) that serves waiters by effective priority, then in arrival order.
+
+**Priority**
+The integer on a queue ticket and a lease, default `0`, higher served first. `quai land` uses `10`; `--priority` sets it for `quai verify` and `quai exec`.
+
+**Aging boost**
+The points a waiter gains while queued, one per 30 seconds, capped at 10. Priority plus aging boost is the waiter's effective priority, so a low-priority waiter never starves.
+
+**Role**
+The command a lease or ticket belongs to: `land`, `verify`, or `exec`. Shown by `quai status`.
 
 **Land lock**
 `land.lock`, the repository-wide lock that serializes rebase-and-merge landings.

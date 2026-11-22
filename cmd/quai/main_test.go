@@ -108,6 +108,21 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 		t.Fatalf("exec failed: code=%d out=%q err=%q", code, out.String(), errBuf.String())
 	}
 
+	out.Reset()
+	code = run(ctx, []string{"exec", "--pool", "heavy", "--priority", "5", "--", "true"}, dir, bytes.NewReader(nil), &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exec --priority 5 exited %d: %s", code, errBuf.String())
+	}
+	for _, args := range [][]string{
+		{"exec", "--pool", "heavy", "--priority", "1001", "--", "true"},
+		{"verify", "--priority", "-1001"},
+	} {
+		errBuf.Reset()
+		if code := run(ctx, args, dir, bytes.NewReader(nil), &out, &errBuf); code != 2 || !bytes.Contains(errBuf.Bytes(), []byte("out of range")) {
+			t.Fatalf("%v: expected exit 2 with out of range, got %d: %s", args, code, errBuf.String())
+		}
+	}
+
 	// 4. quai hooks install & pre-push hits receipt cache.
 	out.Reset()
 	if code := run(ctx, []string{"hooks", "install", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {

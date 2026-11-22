@@ -31,6 +31,8 @@ type Options struct {
 	Stdout         io.Writer
 	Stderr         io.Writer
 	OnStepStart    func(execrun.Process)
+	Role           lock.Role
+	Priority       int
 }
 
 // ResolveAutoAttest resolves whether verification should sign and push attestations,
@@ -217,6 +219,15 @@ func runOneStep(
 	started := time.Now()
 	var fp string
 	var inflightLease *lock.Lease
+	owner := lock.Owner{
+		Role:     opts.Role,
+		Priority: opts.Priority,
+		Command:  "quai verify --step " + step.Name,
+		Worktree: topLevel,
+	}
+	if owner.Role == "" {
+		owner.Role = lock.RoleVerify
+	}
 
 	if clean {
 		var err error
@@ -232,10 +243,7 @@ func runOneStep(
 
 		// Deduplicate concurrent executions of the exact same (step, fingerprint) across worktrees.
 		inflightDir := filepath.Join(locksRoot, fmt.Sprintf("inflight-%s-%s.lock", step.Name, fp))
-		inflightLease, err = lock.AcquireDir(ctx, inflightDir, lock.Owner{
-			Command:  "quai verify --step " + step.Name,
-			Worktree: topLevel,
-		}, lock.Options{
+		inflightLease, err = lock.AcquireDir(ctx, inflightDir, owner, lock.Options{
 			Wait:         cfg.Land.LockWaitDur,
 			PollInterval: 200 * time.Millisecond,
 			StatusWriter: opts.Stderr,
@@ -292,11 +300,8 @@ func runOneStep(
 		Capacity:        capacity,
 		MinFreeMemBytes: minFreeMem,
 		LockWait:        cfg.Land.LockWaitDur,
-		Owner: lock.Owner{
-			Command:  "quai verify --step " + step.Name,
-			Worktree: topLevel,
-		},
-		OnStart: opts.OnStepStart,
+		Owner:           owner,
+		OnStart:         opts.OnStepStart,
 	})
 	dur := time.Since(started).Milliseconds()
 	if runErr != nil || code != 0 {

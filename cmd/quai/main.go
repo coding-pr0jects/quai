@@ -178,6 +178,7 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 	wait := fs.Bool("wait", false, "wait for a detached run: [<run-id>], default the latest from this worktree")
 	stop := fs.Bool("stop", false, "stop a detached run: [<run-id>], default the latest from this worktree")
 	maxWait := fs.Duration("max", 8*time.Minute, "with --wait: longest wait before exiting 4 (0 checks without blocking)")
+	priority := fs.Int("priority", 0, priorityUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -201,6 +202,10 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 	}
 	if isFlagSet(fs, "max") {
 		fmt.Fprintln(stderr, "quai verify: --max applies only to --wait")
+		return 2
+	}
+	if err := checkPriority(*priority); err != nil {
+		fmt.Fprintf(stderr, "quai verify: %v\n", err)
 		return 2
 	}
 	g, cfg, top, err := loadRepoAndConfig(ctx, cwd)
@@ -229,6 +234,7 @@ func runVerify(ctx context.Context, cwd string, args []string, stdout, stderr io
 		Stdout:         stdout,
 		Stderr:         stderr,
 		OnStepStart:    onStepStart,
+		Priority:       *priority,
 	})
 	if rec != nil {
 		rec.SetResult(res)
@@ -491,6 +497,7 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 	slots := fs.Int("slots", 1, "number of slots to acquire")
 	waitStr := fs.String("wait", "30m", "max wait duration")
 	detachRun := fs.Bool("detach", false, "start the command in the background, print its run id, and exit 0")
+	priority := fs.Int("priority", 0, priorityUsage)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -499,7 +506,11 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 		cmdArgs = cmdArgs[1:]
 	}
 	if *pool == "" || len(cmdArgs) == 0 || *slots <= 0 {
-		fmt.Fprintln(stderr, "Usage: quai exec --pool <name> [--slots <n>] [--wait <duration>] [--detach] -- <command...>")
+		fmt.Fprintln(stderr, "Usage: quai exec --pool <name> [--slots <n>] [--wait <duration>] [--priority <int>] [--detach] -- <command...>")
+		return 2
+	}
+	if err := checkPriority(*priority); err != nil {
+		fmt.Fprintf(stderr, "quai exec: %v\n", err)
 		return 2
 	}
 	waitDur, err := time.ParseDuration(*waitStr)
@@ -551,6 +562,8 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 		MinFreeMemBytes: sp.MinFreeMemBytes,
 		LockWait:        waitDur,
 		Owner: lock.Owner{
+			Role:     lock.RoleExec,
+			Priority: *priority,
 			Command:  "quai exec --pool " + *pool + " -- " + strings.Join(cmdArgs, " "),
 			Worktree: top,
 		},
@@ -564,6 +577,18 @@ func runExec(ctx context.Context, cwd string, args []string, stdin io.Reader, st
 		}
 	}
 	return code
+}
+
+const (
+	priorityUsage = "slot queue priority, higher runs first (quai land uses 10)"
+	maxPriority   = 1000
+)
+
+func checkPriority(p int) error {
+	if p < -maxPriority || p > maxPriority {
+		return fmt.Errorf("--priority %d out of range [-%d, %d]", p, maxPriority, maxPriority)
+	}
+	return nil
 }
 
 func runTier(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
@@ -871,8 +896,15 @@ func runStatus(ctx context.Context, cwd string, args []string, stdout, stderr io
 	} else {
 		fmt.Fprintln(stdout, "land.lock: free")
 	}
+	printWaiters(stdout, rep.LandLock.Waiters)
 	for _, p := range rep.Pools {
 		fmt.Fprintf(stdout, "pool %-10s %d/%d held (stale=%d, waiters=%d)\n", p.Name+":", p.Held, p.Capacity, p.Stale, len(p.Waiters))
+		for _, sl := range p.Slots {
+			if sl.Owner != nil {
+				printQueueEntry(stdout, "holder", *sl.Owner)
+			}
+		}
+		printWaiters(stdout, p.Waiters)
 	}
 	if len(rep.InFlight) > 0 {
 		fmt.Fprintf(stdout, "in-flight: %d step(s)\n", len(rep.InFlight))
@@ -885,6 +917,20 @@ func runStatus(ctx context.Context, cwd string, args []string, stdout, stderr io
 		fmt.Fprintf(stdout, "run %s: %s (pid %d, quai %s, %s)\n", r.ID, r.State, r.PID, strings.Join(r.Args, " "), r.Worktree)
 	}
 	return 0
+}
+
+func printWaiters(w io.Writer, waiters []lock.Owner) {
+	for _, o := range waiters {
+		printQueueEntry(w, "waiter", o)
+	}
+}
+
+func printQueueEntry(w io.Writer, kind string, o lock.Owner) {
+	role := string(o.Role)
+	if role == "" {
+		role = "-"
+	}
+	fmt.Fprintf(w, "  %-6s %-6s priority=%-4d pid %d: %s\n", kind, role, o.Priority, o.PID, o.Command)
 }
 
 func runDoctor(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {

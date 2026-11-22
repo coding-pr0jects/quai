@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,6 +21,21 @@ import (
 const (
 	DefaultHeartbeatInterval = 5 * time.Second
 	DefaultStaleAfter        = 30 * time.Second
+
+	// AgingInterval is the wait that earns a queued waiter one point of aging boost.
+	AgingInterval = 30 * time.Second
+	// MaxAgingBoost caps the aging boost, so a waiter of priority 0 catches up with
+	// a quai land waiter (priority 10) after 5 minutes and never passes it on priority alone.
+	MaxAgingBoost = 10
+)
+
+// Role names the quai command that holds or waits for a lock.
+type Role string
+
+const (
+	RoleLand   Role = "land"
+	RoleVerify Role = "verify"
+	RoleExec   Role = "exec"
 )
 
 type Owner struct {
@@ -27,6 +43,8 @@ type Owner struct {
 	Host        string    `json:"host,omitempty"`
 	PIDNS       string    `json:"pid_ns,omitempty"`
 	Token       string    `json:"token,omitempty"`
+	Role        Role      `json:"role,omitempty"`
+	Priority    int       `json:"priority"`
 	Command     string    `json:"command"`
 	Worktree    string    `json:"worktree"`
 	AcquiredAt  time.Time `json:"acquired_at"`
@@ -164,7 +182,7 @@ func (s *SlotLease) Release() error {
 	return firstErr
 }
 
-// AcquireDir atomically creates lockDir in FIFO order, taking over dead or stale holders.
+// AcquireDir atomically creates lockDir in queue order, taking over dead or stale holders.
 func AcquireDir(ctx context.Context, lockDir string, owner Owner, opts Options) (*Lease, error) {
 	if err := os.MkdirAll(filepath.Dir(lockDir), 0o755); err != nil {
 		return nil, fmt.Errorf("create lock parent dir: %w", err)
@@ -255,7 +273,7 @@ func AcquireDir(ctx context.Context, lockDir string, owner Owner, opts Options) 
 	}
 }
 
-// AcquireSlots acquires count distinct slots in pool (capacity total) inside locksRoot in FIFO order.
+// AcquireSlots acquires count distinct slots in pool (capacity total) inside locksRoot in queue order.
 func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity int, owner Owner, opts Options) (*SlotLease, error) {
 	if count <= 0 {
 		return &SlotLease{}, nil
@@ -381,7 +399,7 @@ func AcquireSlots(ctx context.Context, locksRoot, pool string, count, capacity i
 	}
 }
 
-// InspectDir reports read-only state for a single directory lock and its FIFO queue.
+// InspectDir reports read-only state for a single directory lock and its queue.
 func InspectDir(lockDir string, staleAfter time.Duration) InspectState {
 	if staleAfter <= 0 {
 		staleAfter = DefaultStaleAfter
@@ -482,7 +500,7 @@ func releaseDeadLease(lockDir string, ownedHere func(Owner) bool) (bool, error) 
 	return true, nil
 }
 
-// InspectWaiters returns the live queued waiters for a slot pool queue directory.
+// InspectWaiters returns the live queued waiters of a slot pool queue directory in service order.
 func InspectWaiters(queueDir string, staleAfter time.Duration) []Owner {
 	if staleAfter <= 0 {
 		staleAfter = DefaultStaleAfter
@@ -661,68 +679,88 @@ func hasLiveWaiters(queueDir, localHost, localPIDNS string, staleAfter time.Dura
 }
 
 func readLiveWaiters(queueDir, localHost, localPIDNS string, staleAfter time.Duration, now time.Time) []Owner {
-	entries, err := os.ReadDir(queueDir)
-	if err != nil {
-		return nil
-	}
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".ticket") {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
+	queued := readQueue(queueDir, "", false, localHost, localPIDNS, staleAfter, now)
 	var live []Owner
-	for _, name := range names {
-		raw, err := os.ReadFile(filepath.Join(queueDir, name))
-		if err != nil {
-			continue
-		}
-		var o Owner
-		if err := json.Unmarshal(raw, &o); err != nil {
-			continue
-		}
-		if OwnerAlive(o, localHost, localPIDNS, staleAfter, now, processAlive) {
-			live = append(live, o)
-		}
+	for _, w := range queued {
+		live = append(live, w.owner)
 	}
 	return live
 }
 
 func isFirstInQueue(queueDir, myTicket, localHost, localPIDNS string, staleAfter time.Duration, now time.Time) bool {
+	myName := filepath.Base(myTicket)
+	queued := readQueue(queueDir, myName, true, localHost, localPIDNS, staleAfter, now)
+	return len(queued) == 0 || queued[0].name == myName
+}
+
+type waiter struct {
+	name       string
+	enqueuedAt time.Time
+	owner      Owner
+}
+
+func readQueue(queueDir, ownTicket string, pruneDead bool, localHost, localPIDNS string, staleAfter time.Duration, now time.Time) []waiter {
 	entries, err := os.ReadDir(queueDir)
 	if err != nil {
-		return true
+		return nil
 	}
-	var names []string
+	var live []waiter
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".ticket") {
-			names = append(names, e.Name())
+		enqueuedAt, ok := ticketEnqueuedAt(e.Name())
+		if e.IsDir() || !ok {
+			continue
 		}
-	}
-	sort.Strings(names)
-	myBase := filepath.Base(myTicket)
-	for _, name := range names {
-		if name == myBase {
-			return true
-		}
-		p := filepath.Join(queueDir, name)
+		p := filepath.Join(queueDir, e.Name())
 		raw, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
 		var o Owner
-		if err := json.Unmarshal(raw, &o); err != nil {
-			_ = os.Remove(p)
+		err = json.Unmarshal(raw, &o)
+		if e.Name() != ownTicket && (err != nil || !OwnerAlive(o, localHost, localPIDNS, staleAfter, now, processAlive)) {
+			if pruneDead {
+				_ = os.Remove(p)
+			}
 			continue
 		}
-		if !OwnerAlive(o, localHost, localPIDNS, staleAfter, now, processAlive) {
-			_ = os.Remove(p)
-			continue
-		}
-		return false
+		live = append(live, waiter{name: e.Name(), enqueuedAt: enqueuedAt, owner: o})
 	}
-	return true
+	sortWaiters(live, now)
+	return live
+}
+
+func ticketEnqueuedAt(name string) (time.Time, bool) {
+	stamp, _, ok := strings.Cut(name, "-")
+	if !ok || !strings.HasSuffix(name, ".ticket") {
+		return time.Time{}, false
+	}
+	ns, err := strconv.ParseInt(stamp, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(0, ns).UTC(), true
+}
+
+func sortWaiters(ws []waiter, now time.Time) {
+	sort.Slice(ws, func(i, j int) bool {
+		pi := EffectivePriority(ws[i].owner.Priority, now.Sub(ws[i].enqueuedAt))
+		pj := EffectivePriority(ws[j].owner.Priority, now.Sub(ws[j].enqueuedAt))
+		if pi != pj {
+			return pi > pj
+		}
+		if !ws[i].enqueuedAt.Equal(ws[j].enqueuedAt) {
+			return ws[i].enqueuedAt.Before(ws[j].enqueuedAt)
+		}
+		return ws[i].name < ws[j].name
+	})
+}
+
+// EffectivePriority is priority plus one point per AgingInterval waited, capped at MaxAgingBoost.
+func EffectivePriority(priority int, waited time.Duration) int {
+	if waited <= 0 {
+		return priority
+	}
+	return priority + int(min(waited/AgingInterval, MaxAgingBoost))
 }
 
 func writeOwnerAtomic(lockDir string, owner Owner) error {
