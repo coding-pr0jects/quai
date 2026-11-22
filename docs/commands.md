@@ -128,12 +128,12 @@ quai attest prune [--max-age <duration>] [--remote <name>] [--local-only] [--dry
 - When `--config-ref <ref>` is set (for example `--config-ref origin/main`), loads `.quai.toml` from that git ref via `git show` so a PR cannot weaken its own step policy.
 - Resolves the OpenSSH `allowed_signers` file by precedence: `--allowed-signers` > `QUAI_ALLOWED_SIGNERS` > `[attest].allowed_signers`. Passing `--allowed-signers` from a CI variable or `origin/main` prevents an untrusted PR branch from modifying its own trust root.
 - When `--onto <ref>` is set (for example `--onto origin/main` on a PR), runs virtual `git merge-tree --write-tree <onto> HEAD` without touching the working tree and computes each step's fingerprint on the merged tree. Exits `3` on conflict.
-- When `--head <pr-head-sha>` is set on a checked-out merge commit (GitHub's `refs/pull/<n>/merge`), a step whose exact fingerprint is `"missing"` gets a second lookup: the attestation signed for the PR head's tree on `old_base = merge-base(--head, --since)`, which is what local `quai verify` signed before `main` moved. The fallback is accepted only if every optimistic-merge condition holds, with `[land].global_paths` and `[tiers]` read from `--config-ref`:
-  1. `--since` moved past `old_base`, and `git merge-tree --write-tree <since> <head>` is clean.
-  2. No file in `old_base..since` matches `[land].global_paths`. With the default empty list, any disjoint move qualifies.
-  3. The changed files of `old_base..since` and `old_base..head` are disjoint.
-  4. The checked-out `HEAD` is that merge: it differs from `--head` only in `old_base..since` files and from `--since` only in `old_base..head` files.
-  5. Neither diff deletes a test or adds a skip marker while `escalate_on_test_tamper` is on.
+- When `--head <pr-head-sha>` is set on a checked-out merge commit (GitHub's `refs/pull/<n>/merge`), a step whose exact fingerprint is `"missing"` gets a second lookup. Let `base = merge-base(--since, HEAD)` (the `base_sha` of the exact lookup; `--since` defaults to `origin/<base>`) and `old_base = merge-base(--head, base)`. The second lookup is the attestation signed for the PR head's tree on `old_base`, which is what local `quai verify` signed before `main` moved. The fallback is accepted only if every optimistic-merge condition holds, with `[land].global_paths` and `[tiers]` read from `--config-ref`:
+  1. `base` moved past `old_base`, and `git merge-tree --write-tree <base> <head>` is clean.
+  2. No file in `old_base..base` matches `[land].global_paths`. With the default empty list, any disjoint move qualifies.
+  3. The changed files of `old_base..base` and `old_base..head` are disjoint.
+  4. The checked-out `HEAD` is that merge: it differs from `--head` only in `old_base..base` files and from `base` only in `old_base..head` files.
+  5. Neither `old_base..base` nor `old_base..head` deletes a test or adds a skip marker while `escalate_on_test_tamper` is on.
 
   A refused fallback leaves the steps `"missing"`, sets `disjoint_refusal`, and exits `1`, so CI runs the steps itself. `--head` requires `--config-ref` and cannot be combined with `--onto` (exit `2`). It needs the history of both parents (`actions/checkout` with `fetch-depth: 0`).
 - When `--sample <pct>` triggers (0 to 100), marks all steps `"sampled"` and exits `1` so CI runs an independent audit, before any exact or disjoint-base lookup.
@@ -157,8 +157,8 @@ quai attest prune [--max-age <duration>] [--remote <name>] [--local-only] [--dry
 }
 ```
 
-- `match_mode` is `"exact"` when every step matched the checked-out tree's own fingerprint, and `"disjoint-base"` when at least one step was accepted through `--head`. Each verified step carries its own `match_mode`. Both are omitted when `ok` is `false`.
-- `head_sha` is the resolved `--head`. `old_base_sha` is `merge-base(--head, --since)`, set once the fallback was evaluated. `disjoint_refusal` says why the fallback was refused.
+- `match_mode` is `"exact"` when every step matched the checked-out tree's own fingerprint, and `"disjoint-base"` when at least one step was accepted through `--head`. The top-level `match_mode` is omitted when `ok` is `false`. Each step carries its own `match_mode` (`"exact"` or `"disjoint-base"`) exactly when its `status` is `"verified"`, even if another step leaves `ok` `false`; `missing`, `invalid`, and `sampled` steps have none.
+- `head_sha` is the resolved `--head`. `old_base_sha` is `merge-base(--head, base_sha)`, set once the fallback was evaluated. `disjoint_refusal` says why the fallback was refused.
 
 ### `quai attest prune`
 
