@@ -567,7 +567,7 @@ quai verdict check [--since <ref>] [--config-ref <ref>] [--require-signed] [--al
 - `check` always accepts a verdict whose patch-id matches the branch.
 - `--config-ref <ref>` (for example `origin/main`) loads `.quai.toml` from that trusted ref via `git show`, as `quai attest check --config-ref` does, and adds its `[land].require_signed_verdict`. Only with it does `check` also accept a verdict whose code patch-id (or patch-id) matches the branch's code patch-id: the branch then changed only gate-only paths since the review, such as `docs/evidence/**` screenshots. Without `--config-ref`, the gate-only globs would come from the branch's own `.quai.toml`, which the branch can widen, so only the exact patch-id matches.
 - `--fetch` fetches both refs. The tier check still applies to the current branch tier. `--json` reports `code_patch_id` when it was computed, and `record.patch_id` names the reviewed diff.
-- `quai land` checks verdicts (`--require-verdict`, `[land].require_verdict_tiers`) against the `.quai.toml` of `origin/<base>`, so the code patch-id rule applies there without a flag. When the base has no `.quai.toml`, the verdict check fails.
+- `quai land` checks verdicts (`--require-verdict`, `[land].require_verdict_tiers`) against the `.quai.toml` of `origin/<base>`, also when it verifies in a temporary worktree, so the code patch-id rule applies there without a flag. When the base has no `.quai.toml`, only the exact patch-id matches.
 
 ```yaml
 - name: Check the review verdict
