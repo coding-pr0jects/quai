@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -74,7 +75,7 @@ type Git interface {
 	Fetch(ctx context.Context, remote, ref string) error
 	Rebase(ctx context.Context, onto string) error
 	RebaseOnto(ctx context.Context, newBase, oldUpstream string) error
-	PushForceWithLease(ctx context.Context, remote, branch, expectedSHA string) error
+	PushForceWithLease(ctx context.Context, remote, branch, expectedSHA string, env map[string]string) error
 	GitPath(ctx context.Context, rel string) (string, error)
 	ConfigGet(ctx context.Context, key string) (string, error)
 	WriteRefBlob(ctx context.Context, refName, fileName string, content []byte) error
@@ -126,9 +127,13 @@ func cleanEnv() []string {
 }
 
 func (g *ExecGit) run(ctx context.Context, stdin []byte, args ...string) ([]byte, []byte, error) {
+	return g.runEnv(ctx, nil, stdin, args...)
+}
+
+func (g *ExecGit) runEnv(ctx context.Context, env map[string]string, stdin []byte, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.Dir
-	cmd.Env = cleanEnv()
+	cmd.Env = appendEnv(cleanEnv(), env)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -137,6 +142,21 @@ func (g *ExecGit) run(ctx context.Context, stdin []byte, args ...string) ([]byte
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func appendEnv(base []string, extra map[string]string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		base = append(base, k+"="+extra[k])
+	}
+	return base
 }
 
 func (g *ExecGit) output(ctx context.Context, args ...string) (string, error) {
@@ -436,9 +456,11 @@ func (g *ExecGit) unmergedFiles(ctx context.Context) ([]string, error) {
 	return splitNull(out), nil
 }
 
-func (g *ExecGit) PushForceWithLease(ctx context.Context, remote, branch, expectedSHA string) error {
+// PushForceWithLease pushes HEAD to branch with a lease pinned to expectedSHA, adding env
+// to the git process so a pre-push hook sees it.
+func (g *ExecGit) PushForceWithLease(ctx context.Context, remote, branch, expectedSHA string, env map[string]string) error {
 	lease := fmt.Sprintf("--force-with-lease=refs/heads/%s:%s", branch, expectedSHA)
-	_, errOut, err := g.run(ctx, nil, "push", lease, "--end-of-options", remote, "HEAD:refs/heads/"+branch)
+	_, errOut, err := g.runEnv(ctx, env, nil, "push", lease, "--end-of-options", remote, "HEAD:refs/heads/"+branch)
 	if err != nil {
 		return fmt.Errorf("git push %s: %w (%s)", lease, err, strings.TrimSpace(string(errOut)))
 	}
@@ -504,12 +526,18 @@ func (g *ExecGit) ReadRefBlob(ctx context.Context, refName, fileName string) ([]
 	return out, true, nil
 }
 
-// PushRefs pushes explicit git refs to remote.
+// PushRefs pushes explicit quai refs to remote. Only refs/quai/* pass, so a quai push can
+// never carry a branch that a pre-push hook would have to gate.
 func (g *ExecGit) PushRefs(ctx context.Context, remote string, refs []string) error {
 	if len(refs) == 0 {
 		return nil
 	}
-	args := make([]string, 0, len(refs)+3)
+	for _, r := range refs {
+		if !strings.HasPrefix(r, "refs/quai/") {
+			return fmt.Errorf("refusing to push non-quai ref %q", r)
+		}
+	}
+	args := make([]string, 0, len(refs)+4)
 	args = append(args, "push", "--end-of-options", remote)
 	for _, r := range refs {
 		args = append(args, r+":"+r)

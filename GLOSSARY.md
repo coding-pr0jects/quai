@@ -35,6 +35,10 @@ _Avoid_: cache entry, result, proof.
 **Cached**
 The `status` of a step whose receipt already exists, so it does not run.
 
+**Required cache**
+The steps named by `[hooks.pre_push].require_cached`, whose receipt must exist for each pushed `refs/heads/*` commit. The pre-push hook checks them without running them and without a slot, and `on_missing` decides whether a missing receipt warns or refuses the push.
+_Avoid_: pre-push verify, gated step.
+
 **Mutation guard**
 The check that a passing step left `HEAD` and `git status --porcelain` unchanged. A step that edits files or moves `HEAD` reports `mutated` and gets no receipt.
 

@@ -127,7 +127,7 @@ func run(ctx context.Context, args []string, cwd string, stdin io.Reader, stdout
 	case "restack":
 		return runRestack(ctx, cwd, rest, stdout, stderr)
 	case "hooks":
-		return runHooks(ctx, cwd, rest, stdout, stderr)
+		return runHooks(ctx, cwd, rest, stdin, stdout, stderr)
 	case "gc":
 		return runGC(ctx, cwd, rest, stdout, stderr)
 	case "status":
@@ -861,7 +861,7 @@ func printBatchHuman(w io.Writer, res land.BatchResult) {
 	}
 }
 
-func runHooks(ctx context.Context, cwd string, args []string, stdout, stderr io.Writer) int {
+func runHooks(ctx context.Context, cwd string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "Usage: quai hooks install|uninstall|pre-push [--json]")
 		return 2
@@ -870,6 +870,7 @@ func runHooks(ctx context.Context, cwd string, args []string, stdout, stderr io.
 	fs := flag.NewFlagSet("hooks", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	jsonOut := fs.Bool("json", false, "output JSON")
+	refsFromStdin := fs.Bool("refs-from-stdin", false, "the managed hook passes git's ref list on stdin")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -915,7 +916,19 @@ func runHooks(ctx context.Context, cwd string, args []string, stdout, stderr io.
 			fmt.Fprintf(stderr, "quai hooks pre-push: %v\n", err)
 			return 2
 		}
-		res, err := hooks.RunPrePush(ctx, g, cfg, *jsonOut, stdout, stderr)
+		refs, provided, err := hooks.ReadPushRefs(stdin)
+		if err != nil {
+			fmt.Fprintf(stderr, "quai hooks pre-push: %v\n", err)
+			return 2
+		}
+		res, err := hooks.RunPrePush(ctx, g, cfg, hooks.Options{
+			Refs:          refs,
+			RefsProvided:  provided,
+			RefsFromStdin: *refsFromStdin,
+			JSON:          *jsonOut,
+			Stdout:        stdout,
+			Stderr:        stderr,
+		})
 		if *jsonOut {
 			writeJSON(stdout, res)
 		}
@@ -1075,6 +1088,9 @@ func runStatus(ctx context.Context, cwd string, args []string, stdout, stderr io
 		fmt.Fprintf(stdout, "prune: automatic every %s (last %s)\n", rep.PruneInterval, last)
 	} else {
 		fmt.Fprintln(stdout, "prune: manual (quai gc)")
+	}
+	if rep.RequireCached != nil {
+		fmt.Fprintf(stdout, "require_cached: %s (on_missing=%s)\n", strings.Join(rep.RequireCached.Steps, ", "), rep.RequireCached.OnMissing)
 	}
 	return 0
 }
@@ -1326,6 +1342,7 @@ func runRestack(ctx context.Context, cwd string, args []string, stdout, stderr i
 		BaseRef:     *baseRef,
 		Push:        *push,
 		Remote:      *remote,
+		Stderr:      stderr,
 	})
 	if *jsonOut {
 		writeJSON(stdout, res)

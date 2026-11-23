@@ -45,6 +45,32 @@ func TestStoreWriteLookupAndPrune(t *testing.T) {
 	}
 }
 
+func TestLookupFreshIgnoresExpiredReceipt(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	store := &Store{
+		Dir:      t.TempDir(),
+		MaxFiles: DefaultMaxFiles,
+		MaxAge:   24 * time.Hour,
+		Now:      func() time.Time { return now },
+	}
+	if err := store.Write(Receipt{Step: "test", Fingerprint: "fresh", Passed: true, CreatedAt: now.Add(-time.Hour)}); err != nil {
+		t.Fatalf("write fresh: %v", err)
+	}
+	stale := filepath.Join(store.Dir, "test-stale.json")
+	if err := os.WriteFile(stale, []byte(`{"version":1,"fingerprint":"stale","step":"test","passed":true,"created_at":"2026-11-20T11:00:00Z"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.LookupFresh("test", "fresh"); err != nil || !ok {
+		t.Fatalf("expected fresh hit, ok=%v err=%v", ok, err)
+	}
+	if _, ok, _ := store.Lookup("test", "stale"); !ok {
+		t.Fatal("expected Lookup to read the stale receipt")
+	}
+	if _, ok, err := store.LookupFresh("test", "stale"); err != nil || ok {
+		t.Fatalf("expected LookupFresh to reject the expired receipt, ok=%v err=%v", ok, err)
+	}
+}
+
 func TestFingerprintStableAcrossUnrelatedChanges(t *testing.T) {
 	cases := []struct {
 		name      string

@@ -924,3 +924,100 @@ required_checks = ["check"]
 		t.Fatalf("remote feat/api = %s, want %s", remoteChildHead, child.NewHeadSHA)
 	}
 }
+
+func TestRestackPushBypassesRequireCachedRefusal(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	mainDir := filepath.Join(tmp, "main")
+	wtDir := filepath.Join(tmp, "wt-feat")
+
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, string(out))
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(dir, rel, body string) {
+		t.Helper()
+		p := filepath.Join(dir, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run(tmp, "init", "--bare", "-q", "-b", "main", origin)
+	run(tmp, "init", "-q", "-b", "main", mainDir)
+	run(mainDir, "config", "user.name", "t")
+	run(mainDir, "config", "user.email", "t@example.com")
+	run(mainDir, "remote", "add", "origin", origin)
+	write(mainDir, "base.txt", "base\n")
+	run(mainDir, "add", "-A")
+	run(mainDir, "commit", "-qm", "init")
+	run(mainDir, "push", "-q", "-u", "origin", "main")
+	oldUpstream := run(mainDir, "rev-parse", "HEAD")
+
+	run(mainDir, "worktree", "add", "-q", "-b", "feat/x", wtDir, "main")
+	write(wtDir, "feat.txt", "v1\n")
+	run(wtDir, "add", "-A")
+	run(wtDir, "commit", "-qm", "feat work")
+	run(wtDir, "push", "-q", "-u", "origin", "feat/x")
+
+	write(mainDir, "base.txt", "moved\n")
+	run(mainDir, "commit", "-qam", "main moves")
+	run(mainDir, "push", "-q", "origin", "main")
+
+	// A hook that refuses unless the restack bypass reaches the git child process.
+	hookPath := filepath.Join(mainDir, ".git", "hooks", "pre-push")
+	write(mainDir, ".git/hooks/pre-push", "#!/bin/sh\nif [ \"${QUAI_ALLOW_UNVERIFIED_PUSH:-}\" != \"1\" ]; then\n  echo \"require_cached refusal\" >&2\n  exit 1\nfi\nexit 0\n")
+	if err := os.Chmod(hookPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The parent value must be overridden for the restack's own git child process.
+	t.Setenv("QUAI_ALLOW_UNVERIFIED_PUSH", "0")
+
+	var buf bytes.Buffer
+	if code, err := runAllowFailure(wtDir, "push", "origin", "feat/x"); err != nil || code == 0 {
+		t.Fatalf("expected the installed hook to block a plain push, code=%d err=%v out=%s", code, err, buf.String())
+	}
+
+	cfg, err := config.Parse([]byte("version = 1\n[hooks.pre_push]\nrequire_cached = [\"verify\"]\non_missing = \"refuse\"\n[[steps]]\nname = \"verify\"\nrun = \"true\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Restack(ctx, repo.NewExecGit(wtDir), cfg, RestackOptions{
+		OldUpstream: oldUpstream,
+		BaseRef:     "origin/main",
+		Push:        true,
+		Remote:      "origin",
+		Stderr:      &buf,
+	})
+	if err != nil || !res.OK || !res.Pushed {
+		t.Fatalf("restack --push must bypass the refusal: res=%+v err=%v", res, err)
+	}
+	if !strings.Contains(buf.String(), "QUAI_ALLOW_UNVERIFIED_PUSH=1 for this push") {
+		t.Fatalf("expected an auditable bypass notice, got %q", buf.String())
+	}
+	if remoteHead := run(origin, "rev-parse", "refs/heads/feat/x"); remoteHead != res.NewHeadSHA {
+		t.Fatalf("remote feat/x = %s, want %s", remoteHead, res.NewHeadSHA)
+	}
+}
+
+func runAllowFailure(dir string, args ...string) (int, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	err := cmd.Run()
+	if err == nil {
+		return 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), nil
+	}
+	return -1, err
+}

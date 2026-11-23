@@ -41,22 +41,28 @@ type InFlightStatus struct {
 	State lock.InspectState `json:"state"`
 }
 
+type RequireCachedStatus struct {
+	Steps     []string `json:"steps"`
+	OnMissing string   `json:"on_missing"`
+}
+
 type Report struct {
-	OK                 bool              `json:"ok"`
-	RepoRoot           string            `json:"repo_root"`
-	CommonDir          string            `json:"common_dir"`
-	AvailableMemBytes  uint64            `json:"available_mem_bytes,omitempty"`
-	AvailableDiskBytes uint64            `json:"available_disk_bytes,omitempty"`
-	LandLock           lock.InspectState `json:"land_lock"`
-	Pools              []PoolStatus      `json:"pools,omitempty"`
-	InFlight           []InFlightStatus  `json:"in_flight,omitempty"`
-	LandWorktrees      []string          `json:"land_worktrees,omitempty"`
-	ReceiptCount       int               `json:"receipt_count"`
-	AttestCount        int               `json:"attestation_count"`
-	Runs               []detach.Status   `json:"runs,omitempty"`
-	AutoPrune          bool              `json:"auto_prune"`
-	PruneInterval      string            `json:"prune_interval,omitempty"`
-	LastPrune          *time.Time        `json:"last_prune,omitempty"`
+	OK                 bool                 `json:"ok"`
+	RepoRoot           string               `json:"repo_root"`
+	CommonDir          string               `json:"common_dir"`
+	AvailableMemBytes  uint64               `json:"available_mem_bytes,omitempty"`
+	AvailableDiskBytes uint64               `json:"available_disk_bytes,omitempty"`
+	LandLock           lock.InspectState    `json:"land_lock"`
+	Pools              []PoolStatus         `json:"pools,omitempty"`
+	InFlight           []InFlightStatus     `json:"in_flight,omitempty"`
+	RequireCached      *RequireCachedStatus `json:"require_cached,omitempty"`
+	LandWorktrees      []string             `json:"land_worktrees,omitempty"`
+	ReceiptCount       int                  `json:"receipt_count"`
+	AttestCount        int                  `json:"attestation_count"`
+	Runs               []detach.Status      `json:"runs,omitempty"`
+	AutoPrune          bool                 `json:"auto_prune"`
+	PruneInterval      string               `json:"prune_interval,omitempty"`
+	LastPrune          *time.Time           `json:"last_prune,omitempty"`
 }
 
 type CheckItem struct {
@@ -196,6 +202,13 @@ func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error
 		rep.LastPrune = &last
 	}
 
+	if cfg != nil && len(cfg.Hooks.PrePush.RequireCached) > 0 {
+		rep.RequireCached = &RequireCachedStatus{
+			Steps:     cfg.Hooks.PrePush.RequireCached,
+			OnMissing: string(cfg.Hooks.PrePush.OnMissing),
+		}
+	}
+
 	return rep, nil
 }
 
@@ -264,8 +277,9 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 	}
 
 	// 4. pre-push hook wiring
-	if len(cfg.PrePushSteps()) > 0 {
-		add(checkPrePushHook(ctx, g, topLevel))
+	requiresHook := len(cfg.PrePushSteps()) > 0 || len(cfg.Hooks.PrePush.RequireCached) > 0
+	if requiresHook {
+		add(checkPrePushHook(ctx, g, topLevel, len(cfg.Hooks.PrePush.RequireCached) > 0))
 	} else {
 		add(CheckItem{Name: "hooks", Status: "ok", Message: "no pre-push steps configured"})
 	}
@@ -392,7 +406,7 @@ func checkAutoPrune(ctx context.Context, g repo.Git, cfg *config.Config) CheckIt
 	return CheckItem{Name: name, Status: "ok", Message: "automatic pruning is not enabled on the base branch"}
 }
 
-func checkPrePushHook(ctx context.Context, g repo.Git, topLevel string) CheckItem {
+func checkPrePushHook(ctx context.Context, g repo.Git, topLevel string, requireCached bool) CheckItem {
 	customHooksPath, _ := g.ConfigGet(ctx, "core.hooksPath")
 	var hookPath string
 	if customHooksPath != "" {
@@ -414,6 +428,9 @@ func checkPrePushHook(ctx context.Context, g repo.Git, topLevel string) CheckIte
 	}
 	body := string(raw)
 	if strings.Contains(body, hooks.ManagedMarker) || strings.Contains(body, "quai hooks pre-push") {
+		if requireCached && strings.Contains(body, "</dev/null") {
+			return CheckItem{Name: "hooks", Status: "warn", Message: fmt.Sprintf("%s discards the pushed refs git gives the hook", hookPath), Fix: "Run quai hooks install to upgrade the managed hook"}
+		}
 		return CheckItem{Name: "hooks", Status: "ok", Message: fmt.Sprintf("pre-push wired at %s", hookPath)}
 	}
 	return CheckItem{Name: "hooks", Status: "warn", Message: fmt.Sprintf("%s exists but does not call quai hooks pre-push", hookPath), Fix: "Chain: " + hooks.ChainSnippet}

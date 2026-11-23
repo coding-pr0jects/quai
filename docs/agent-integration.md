@@ -35,6 +35,7 @@ Benefits:
 
 - At most `slots.heavy` suites execute concurrently across all worktrees. Steps with `pool_when` or `pool_tiers` skip that queue when the diff does not match, so docs-only branches do not wait behind e2e runs.
 - When `quai hooks install` is enabled, the subsequent `git push` hits the receipt cache in under 50 ms instead of rerunning checks.
+- With `[hooks.pre_push].require_cached = ["verify"]`, `git push` refuses a branch whose `verify` receipt is missing (`on_missing = "refuse"`) or warns about it, so an agent must run `quai verify` before pushing a ready branch. A deliberate WIP push uses `QUAI_ALLOW_UNVERIFIED_PUSH=1`, which still runs the `pre-push` steps and prints a notice.
 - If a check secretly runs a formatter or code generator that dirties the tree, the mutation guard catches it and exits `1` instead of recording a false pass.
 
 #### Verification longer than a tool call

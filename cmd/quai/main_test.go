@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -579,5 +580,99 @@ remote = "--upload-pack=touch %s;true"
 				t.Fatalf("option injection executed: marker %s exists", marker)
 			}
 		})
+	}
+}
+func TestCLIHooksPrePushRequireCached(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(dir, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "user.name", "t")
+	runGit("config", "user.email", "t@example.com")
+	write(".quai.toml", `
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+hook = "pre-push"
+
+[[steps]]
+name = "verify"
+run = "true"
+inputs = ["app/**"]
+
+[hooks.pre_push]
+require_cached = ["verify"]
+on_missing = "refuse"
+`)
+	write("app/main.txt", "v1\n")
+	runGit("add", "-A")
+	runGit("commit", "-qm", "init")
+	runGit("checkout", "-q", "-b", "feat")
+	write("app/main.txt", "v2\n")
+	runGit("commit", "-qam", "feat: app change")
+	head := runGit("rev-parse", "HEAD")
+	stdin := "refs/heads/feat " + head + " refs/heads/feat 0000000000000000000000000000000000000000\n"
+
+	var out, errBuf bytes.Buffer
+	code := run(ctx, []string{"hooks", "pre-push", "--json"}, dir, strings.NewReader(stdin), &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("expected refuse to exit 1, got %d (out=%s err=%s)", code, out.String(), errBuf.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"ok": false`)) || !bytes.Contains(out.Bytes(), []byte(`"status": "missing"`)) {
+		t.Fatalf("unexpected refuse json: %s", out.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"status": "passed"`)) {
+		t.Fatalf("refusal must still run pre-push steps: %s", out.String())
+	}
+	if !bytes.Contains(errBuf.Bytes(), []byte("run quai verify first")) {
+		t.Fatalf("expected remediation on stderr, got: %s", errBuf.String())
+	}
+
+	t.Setenv("QUAI_ALLOW_UNVERIFIED_PUSH", "1")
+	out.Reset()
+	errBuf.Reset()
+	code = run(ctx, []string{"hooks", "pre-push", "--json"}, dir, strings.NewReader(stdin), &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("escape hatch must exit 0, got %d (out=%s err=%s)", code, out.String(), errBuf.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"require_cached_bypassed": true`)) || !bytes.Contains(out.Bytes(), []byte(`"name": "fast"`)) {
+		t.Fatalf("escape hatch must bypass and still report pre-push steps: %s", out.String())
+	}
+	if !bytes.Contains(errBuf.Bytes(), []byte("QUAI_ALLOW_UNVERIFIED_PUSH=1 bypasses")) {
+		t.Fatalf("expected an auditable bypass notice, got: %s", errBuf.String())
+	}
+
+	_ = os.Unsetenv("QUAI_ALLOW_UNVERIFIED_PUSH")
+	if seedCode := run(ctx, []string{"verify", "--step", "verify", "--json"}, dir, strings.NewReader(""), &out, &errBuf); seedCode != 0 {
+		t.Fatalf("seed verify failed: %d %s %s", seedCode, out.String(), errBuf.String())
+	}
+	out.Reset()
+	errBuf.Reset()
+	code = run(ctx, []string{"hooks", "pre-push", "--json"}, dir, strings.NewReader(stdin), &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("verified head must pass, got %d (out=%s err=%s)", code, out.String(), errBuf.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte(`"status": "cached"`)) {
+		t.Fatalf("expected a cached require_cached hit: %s", out.String())
 	}
 }

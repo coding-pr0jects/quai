@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ type Request struct {
 	ShellCmd         string // if non-empty, runs via sh -c <ShellCmd>
 	Timeout          time.Duration
 	Env              []string // KEY=value pairs added to the inherited environment; a later pair wins
+	UnsetEnv         []string // names removed from the inherited environment before Env is applied
 	Stdin            io.Reader
 	Stdout           io.Writer
 	Stderr           io.Writer
@@ -80,8 +82,12 @@ func Run(ctx context.Context, req Request) (Result, error) {
 		cmd = exec.Command(req.Argv[0], req.Argv[1:]...)
 	}
 	cmd.Dir = req.Dir
-	if len(req.Env) > 0 {
-		cmd.Env = append(os.Environ(), req.Env...)
+	if len(req.Env) > 0 || len(req.UnsetEnv) > 0 {
+		env := os.Environ()
+		if len(req.UnsetEnv) > 0 {
+			env = environWithout(req.UnsetEnv)
+		}
+		cmd.Env = append(env, req.Env...)
 	}
 	cmd.Stdin = req.Stdin
 	cmd.Stdout = req.Stdout
@@ -128,6 +134,23 @@ func completed(cmd *exec.Cmd, err error) Result {
 		res.KilledBySIGKILL = true
 	}
 	return res
+}
+
+func environWithout(unset []string) []string {
+	drop := make(map[string]struct{}, len(unset))
+	for _, k := range unset {
+		drop[k] = struct{}{}
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		if _, ok := drop[key]; ok {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 func exitCodeOf(err error) int {

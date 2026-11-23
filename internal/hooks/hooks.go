@@ -23,7 +23,7 @@ if ! command -v quai >/dev/null 2>&1; then
   echo "quai hooks pre-push: quai binary not found on PATH" >&2
   exit 1
 fi
-exec quai hooks pre-push </dev/null
+exec quai hooks pre-push --refs-from-stdin
 `
 
 const ChainSnippet = `if command -v quai >/dev/null 2>&1 && [ -f .quai.toml ]; then quai hooks pre-push || exit 1; fi`
@@ -98,25 +98,119 @@ func Uninstall(ctx context.Context, g repo.Git) (string, error) {
 	return fmt.Sprintf("removed managed pre-push hook at %s", hookPath), nil
 }
 
-// RunPrePush runs all steps configured with hook = "pre-push", reusing cached receipts when valid
-// and honoring [attest].auto_sign / auto_push (or QUAI_SIGN / QUAI_PUSH).
-func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, jsonOut bool, stdout, stderr io.Writer) (verify.Result, error) {
+type Options struct {
+	Refs         []PushRef
+	RefsProvided bool
+	// RefsFromStdin says the managed hook invoked us, so an empty ref list means git had
+	// nothing to push rather than a hook that dropped the list.
+	RefsFromStdin bool
+	JSON          bool
+	Stdout        io.Writer
+	Stderr        io.Writer
+}
+
+type Result struct {
+	verify.Result
+	RequireCached        []CachedStep `json:"require_cached,omitempty"`
+	AttestationsPushed   []string     `json:"attestations_pushed,omitempty"`
+	AttestationPushError string       `json:"attestation_push_error,omitempty"`
+	Bypassed             bool         `json:"require_cached_bypassed,omitempty"`
+	Skipped              string       `json:"skipped,omitempty"`
+	Warning              string       `json:"warning,omitempty"`
+}
+
+// RunPrePush runs the steps configured with hook = "pre-push", then checks
+// [hooks.pre_push].require_cached for every pushed branch commit from the local receipt cache.
+// A missing receipt warns or refuses according to on_missing, unless QUAI_ALLOW_UNVERIFIED_PUSH=1.
+func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Result, error) {
+	res := Result{Result: verify.Result{OK: true, Clean: true}}
+
+	if opts.RefsProvided && IsQuaiRefPush(opts.Refs) {
+		res.Skipped = "quai ref push"
+		if !opts.JSON && opts.Stdout != nil {
+			fmt.Fprintf(opts.Stdout, "skipped pre-push checks: quai ref push (%s*)\n", quaiRefPrefix)
+		}
+		return res, nil
+	}
+
+	if opts.RefsProvided && len(opts.Refs) == 0 && opts.RefsFromStdin {
+		res.Skipped = "nothing to push"
+		return res, nil
+	}
+	var warnings []string
+	// Without a ref list the hook cannot know what is being pushed, so HEAD is shown for
+	// information only and no attestation is pushed from here (that push is what used to nest).
+	noRefs := !opts.RefsProvided || len(opts.Refs) == 0
+	targets := pushTargets(ctx, g, opts.Refs, opts.RefsProvided)
+
 	steps := cfg.PrePushSteps()
-	if len(steps) == 0 {
-		return verify.Result{OK: true, Clean: true}, nil
+	if len(steps) > 0 {
+		names := make([]string, len(steps))
+		for i, s := range steps {
+			names[i] = s.Name
+		}
+		doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, false, false, false, false)
+		if noRefs {
+			// A no-ref run never knows what is being pushed, so a step must not push an
+			// attestation from here: that push is the one that used to nest on old hooks.
+			doPush = false
+		}
+		verifyRes, err := verify.Run(ctx, g, cfg, verify.Options{
+			StepNames:      names,
+			Sign:           doSign,
+			BestEffortSign: bestEffort,
+			Push:           doPush,
+			UnsetEnv:       []string{EnvAllowUnverifiedPush, envPrePushActiveLegacy},
+			JSON:           opts.JSON,
+			Stdout:         opts.Stdout,
+			Stderr:         opts.Stderr,
+		})
+		res.Result = verifyRes
+		if err != nil || !verifyRes.OK {
+			return res, err
+		}
 	}
-	names := make([]string, len(steps))
-	for i, s := range steps {
-		names[i] = s.Name
+
+	if len(cfg.Hooks.PrePush.RequireCached) == 0 {
+		return res, nil
 	}
-	doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, false, false, false, false)
-	return verify.Run(ctx, g, cfg, verify.Options{
-		StepNames:      names,
-		Sign:           doSign,
-		BestEffortSign: bestEffort,
-		Push:           doPush,
-		JSON:           jsonOut,
-		Stdout:         stdout,
-		Stderr:         stderr,
-	})
+	if noRefs {
+		checked := "HEAD"
+		if len(targets) > 0 {
+			checked = targets[0].Ref
+		}
+		if opts.RefsProvided {
+			warnings = append(warnings, fmt.Sprintf("stdin carried no refs, so the pushed ref is unknown and %s was checked for information only; run quai hooks install to pass the pushed refs", checked))
+		} else {
+			warnings = append(warnings, fmt.Sprintf("no refs given, so the pushed ref is unknown and %s was checked for information only", checked))
+		}
+	}
+	report, err := CheckCached(ctx, g, cfg, targets, "", !noRefs)
+	if err != nil {
+		return res, err
+	}
+	res.RequireCached = report.Steps
+	res.AttestationsPushed = report.Pushed
+	res.AttestationPushError = report.PushError
+	if report.PushError != "" {
+		warnings = append(warnings, "attestation push failed: "+report.PushError)
+	}
+
+	decision := decideRequirement(report.Missing, cfg.Hooks.PrePush, os.Getenv(EnvAllowUnverifiedPush) == "1", noRefs)
+	res.Bypassed = decision.bypassed
+	if decision.message != "" {
+		warnings = append(warnings, decision.message)
+	}
+	res.OK = !decision.blocked
+	res.Warning = strings.Join(warnings, "; ")
+	for _, warning := range warnings {
+		writeWarning(opts, warning)
+	}
+	return res, nil
+}
+
+func writeWarning(opts Options, message string) {
+	if opts.Stderr != nil {
+		fmt.Fprintf(opts.Stderr, "quai hooks pre-push: %s\n", message)
+	}
 }

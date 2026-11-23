@@ -85,6 +85,7 @@ type Config struct {
 	Base    string              `toml:"base"`
 	Slots   map[string]SlotPool `toml:"slots"`
 	Steps   []Step              `toml:"steps"`
+	Hooks   HooksPolicy         `toml:"hooks"`
 	Tiers   TierPolicy          `toml:"tiers"`
 	Land    LandPolicy          `toml:"land"`
 	Attest  AttestPolicy        `toml:"attest"`
@@ -146,6 +147,23 @@ func (s Step) lowestPoolTier() int {
 		}
 	}
 	return lowest
+}
+
+// OnMissing decides what the pre-push hook does when a required cache entry is absent.
+type OnMissing string
+
+const (
+	OnMissingWarn   OnMissing = "warn"
+	OnMissingRefuse OnMissing = "refuse"
+)
+
+type HooksPolicy struct {
+	PrePush PrePushPolicy `toml:"pre_push"`
+}
+
+type PrePushPolicy struct {
+	RequireCached []string  `toml:"require_cached"`
+	OnMissing     OnMissing `toml:"on_missing"`
 }
 
 type AttestPolicy struct {
@@ -338,6 +356,23 @@ func (c *Config) normalizeAndValidate() error {
 
 	if err := c.validateDependencies(); err != nil {
 		return err
+	}
+
+	if c.Hooks.PrePush.OnMissing == "" {
+		c.Hooks.PrePush.OnMissing = OnMissingWarn
+	}
+	if !ValidOnMissing(c.Hooks.PrePush.OnMissing) {
+		return fmt.Errorf("invalid hooks.pre_push.on_missing %q: expected \"warn\" or \"refuse\"", c.Hooks.PrePush.OnMissing)
+	}
+	required := make(map[string]struct{}, len(c.Hooks.PrePush.RequireCached))
+	for _, name := range c.Hooks.PrePush.RequireCached {
+		if _, ok := c.StepByName(name); !ok {
+			return fmt.Errorf("hooks.pre_push.require_cached references unknown step %q", name)
+		}
+		if _, dup := required[name]; dup {
+			return fmt.Errorf("hooks.pre_push.require_cached lists step %q twice", name)
+		}
+		required[name] = struct{}{}
 	}
 
 	if c.Tiers.Default == "" {
@@ -595,6 +630,10 @@ func ValidMergeMethod(m MergeMethod) bool {
 	return m == MergeSquash || m == MergeMerge || m == MergeRebase
 }
 
+func ValidOnMissing(m OnMissing) bool {
+	return m == OnMissingWarn || m == OnMissingRefuse
+}
+
 // StepByName returns the step matching name, or false if absent.
 func (c *Config) StepByName(name string) (Step, bool) {
 	for _, s := range c.Steps {
@@ -610,6 +649,17 @@ func (c *Config) PrePushSteps() []Step {
 	var out []Step
 	for _, s := range c.Steps {
 		if s.Hook == "pre-push" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// RequireCachedSteps returns the steps named by [hooks.pre_push].require_cached, in config order.
+func (c *Config) RequireCachedSteps() []Step {
+	out := make([]Step, 0, len(c.Hooks.PrePush.RequireCached))
+	for _, name := range c.Hooks.PrePush.RequireCached {
+		if s, ok := c.StepByName(name); ok {
 			out = append(out, s)
 		}
 	}

@@ -7,7 +7,7 @@ All `quai` commands work from the repository root or any subdirectory inside a m
 | Exit code | Meaning |
 |---|---|
 | `0` | Success, all checks passed, `SURVIVES`, or PR merged |
-| `1` | Verification failed, step mutated the working tree, `CHANGED`, or PR refused |
+| `1` | Verification failed, step mutated the working tree, `CHANGED`, a pre-push receipt requirement refused, or PR refused |
 | `2` | Invalid arguments, missing or invalid `.quai.toml`, or not inside a git repository |
 | `3` | Git rebase conflict encountered and cleanly aborted |
 | `4` | Lock or slot acquisition timed out, or `quai verify --wait` reached `--max` while the detached run still runs: retry later |
@@ -64,7 +64,7 @@ quai verify --stop [<run-id>] [--json]
 
 ### Behavior
 
-- On a clean working tree, passing steps reuse an existing receipt if the fingerprint matches (`status: "cached"`).
+- On a clean working tree, passing steps reuse an existing receipt if the fingerprint matches (`status: "cached"`). Receipts older than the 14-day retention are rerun.
 - Concurrent calls on the same `(step, fingerprint)` share one execution via an in-flight lock; waiting callers immediately receive `status: "cached"` once the first run succeeds.
 - On a dirty working tree, steps still execute, but no receipts are read or written (`clean: false`, `receipt_written: false`).
 - **Mutation guard:** if a passing step edits tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai` refuses to write a receipt, reports `status: "mutated"` with `mutated_paths`, and exits `1`.
@@ -533,13 +533,38 @@ quai hooks pre-push [--json]
 
 - `install`: Writes a managed hook at `git rev-parse --git-path hooks/pre-push` with `# managed by quai`. If a non-quai hook already exists or `core.hooksPath` points to a committed directory, `install` refuses to overwrite it and prints the one-line snippet to chain `quai hooks pre-push`.
 - `uninstall`: Removes the hook only if it contains `# managed by quai`.
-- `pre-push`: Checks all steps with `hook = "pre-push"`. If the tree is clean and every receipt hits, exits `0` in under 50 ms. Otherwise executes the missing steps via `verify` and writes receipts on pass.
+- `pre-push`: Runs all steps with `hook = "pre-push"` and executes the missing ones via `verify`, writing receipts on pass. A clean tree whose receipts all hit exits `0` in under 50 ms.
+- `pre-push` then checks `[hooks.pre_push].require_cached` for every `refs/heads/*` ref git reports: for each listed step it reads only the local receipt cache (no step execution, no slot, local part under 100 ms) and treats a step as satisfied when no changed file matches its `inputs` or `lockfiles`, including a branch with no changes. A local `refs/quai/records/*` attestation missing on `[attest].remote` is pushed before returning, so CI sees it when the workflow starts. That sync is the only network work and can exceed 100 ms on a network remote. Tag pushes, branch deletions, and `refs/quai/*` pushes are ignored, and a `refs/quai/*` push (attestation records or verdicts) skips the hook entirely. Every `refs/quai/*` push quai makes runs the hook, which returns at once because every ref is under `refs/quai/`; `PushRefs` rejects any other ref, so a quai push can never carry a branch. The managed hook invokes `quai hooks pre-push --refs-from-stdin`, so an empty ref list from git's own no-op push exits `0` quietly; the chained snippet `quai hooks install` prints does not pass the flag, since an earlier command in that chain may already have read stdin. Without that flag (an old managed hook, a chained hook, or a manual call), no refs means the pushed ref is unknown: the hook pushes no attestations, disables the step-level `[attest].auto_push` for that run, keeps HEAD for information only, and `warn` allows where `refuse` blocks. No hook path can nest, because a nested push either carries only `refs/quai/*` (and returns at once) or no refs (and pushes nothing). The hook also strips `QUAI_ALLOW_UNVERIFIED_PUSH` and the legacy `QUAI_PREPUSH_ACTIVE` from its step children, so a step command never sees them.
+- When stdin carries no refs (an outdated managed hook drops them), the hook says the pushed ref is unknown and checks HEAD for information only; it pushes no attestations and exits `0` only under `warn`. `on_missing = "warn"` allows with a warning; `on_missing = "refuse"` refuses even when HEAD is cached, because it cannot know which ref is being pushed. Run `quai hooks install` to pass the pushed refs.
+- A missing receipt prints the step, commit, ref, and `run quai verify first`. `on_missing = "warn"` (default) allows the push; `on_missing = "refuse"` exits `1` to block it. `QUAI_ALLOW_UNVERIFIED_PUSH=1` downgrades `refuse` to an auditable warning while still running the configured steps, and `quai restack --push` sets it for its own push.
+
+### `quai hooks pre-push --json`
+
+```json
+{
+	"ok": false,
+	"clean": true,
+	"head_sha": "a1b2c3d4...",
+	"require_cached": [
+		{
+			"step": "verify",
+			"commit": "a1b2c3d4...",
+			"ref": "refs/heads/feat",
+			"status": "missing",
+			"fingerprint": "7a8b..."
+		}
+	],
+	"warning": "no cached receipt for step \"verify\" at a1b2c3d4e5f6 on refs/heads/feat; run quai verify first, then push again (or set [hooks.pre_push].on_missing = \"warn\")"
+}
+```
+
+`require_cached[].status` is `cached`, `skipped` (no changed inputs), or `missing`. A cached step whose attestation the hook pushed adds it to `attestations_pushed`; a failed sync reports `attestation_push_error`. A bypass adds `"require_cached_bypassed": true`, and a `refs/quai/*` push adds `"skipped": "quai ref push"`.
 
 ---
 
 ## `quai status`
 
-Inspect active `land.lock`, configured slot pools, their holders and queued waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), temporary land worktrees (`land_worktrees`), local receipt count, and local attestation count without mutating any state. JSON output also includes the host's `available_mem_bytes` and `available_disk_bytes`, and pool entries carry `min_free_mem_bytes` and `min_free_disk_bytes`.
+Inspect active `land.lock`, configured slot pools, their holders and queued waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), temporary land worktrees (`land_worktrees`), local receipt count, local attestation count, and the `[hooks.pre_push].require_cached` policy without mutating any state. JSON output also includes the host's `available_mem_bytes` and `available_disk_bytes`, and pool entries carry `min_free_mem_bytes` and `min_free_disk_bytes`.
 
 ```bash
 quai status [--json]
@@ -562,7 +587,7 @@ A waiter that finds its lock held writes a ticket into the lock's queue, and onl
 
 ## `quai doctor`
 
-Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, free disk, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation readiness, stale lock detection, detached runs that died without an exit record, and temporary land worktrees left while no `quai land` holds `land.lock`. The report includes `available_mem_bytes` and `available_disk_bytes`, and the `disk` check warns when a pool's `min_free_disk` is not met. Exits `0` when healthy, `1` if any blocking check fails.
+Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, free disk, `pre-push` hook wiring (including an outdated managed hook that would drop the pushed refs), `gh`, `ssh-keygen`, attestation readiness, stale lock detection, detached runs that died without an exit record, and temporary land worktrees left while no `quai land` holds `land.lock`. The report includes `available_mem_bytes` and `available_disk_bytes`, and the `disk` check warns when a pool's `min_free_disk` is not met. Exits `0` when healthy, `1` if any blocking check fails.
 
 Attestation readiness is checked end to end without mutating anything:
 
@@ -606,7 +631,7 @@ quai verdict check [--since <ref>] [--config-ref <ref>] [--require-signed] [--al
 
 ## `quai restack`
 
-Replay commits after `<old-parent-tip>` onto the updated base branch via `git rebase --onto`, report `patch-id` survival, and optionally push with `--force-with-lease`. Exits `3` on rebase conflict after cleanly aborting.
+Replay commits after `<old-parent-tip>` onto the updated base branch via `git rebase --onto`, report `patch-id` survival, and optionally push with `--force-with-lease`. Exits `3` on rebase conflict after cleanly aborting. When `[hooks.pre_push].on_missing = "refuse"`, the push of a restacked branch passes `QUAI_ALLOW_UNVERIFIED_PUSH=1` to its git child and prints a notice, so a restack never deadlocks before the branch is re-verified.
 
 ```bash
 quai restack <old-parent-tip> [--base <ref>] [--push] [--remote <name>] [--json]
