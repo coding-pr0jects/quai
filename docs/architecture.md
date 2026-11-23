@@ -25,7 +25,7 @@ quai/
 │   ├── patchid/       # pure patch-id survival comparator and per-file drift detector
 │   ├── hooks/         # non-destructive pre-push installer and receipt fast path
 │   ├── status/        # read-only quai status inspection and quai doctor readiness checks
-│   ├── verdict/       # review verdicts keyed by patch-id under refs/quai/verdicts/<patch-id>
+│   ├── verdict/       # review verdicts keyed by patch-id (and code patch-id) under refs/quai/verdicts/
 │   ├── forge/         # Forge interface, gh CLI implementation, transient-error retry
 │   └── land/          # pure DecideLand state machine and PlanBatch planner, locked landing executor, batch landing, stacked PR restack
 ```
@@ -61,7 +61,7 @@ type Receipt struct {
 // internal/land
 type Action string // "refuse" | "direct-merge" | "optimistic-merge" | "rebase-and-merge"
 
-// internal/verdict: refs/quai/verdicts/<patch-id>
+// internal/verdict: refs/quai/verdicts/<patch-id>, plus refs/quai/verdicts/<code-patch-id> when it differs
 type Status string // "approved" | "rejected"
 ```
 
@@ -129,7 +129,7 @@ Every child command runs in its own process group (`SysProcAttr{Setpgid: true}`)
 
 ### Receipts and mutation guard (`internal/receipt`, `internal/verify`)
 
-1. Fingerprints hash `step.run` plus sorted `<path>:<blob_sha>` entries from `git ls-tree -r` matching `inputs` and `lockfiles` (plus `base_sha` when `{{base}}` is used and affected).
+1. Fingerprints hash `step.run` plus sorted `<path>:<blob_sha>` entries from `git ls-tree -r` included by `inputs` (a `!` glob excludes) or matching `lockfiles` (plus `base_sha` when `{{base}}` is used and affected).
 2. Before running a step, `verify` snapshots `HEAD` and `git status --porcelain`.
 3. After a passing step on a clean tree, `verify` re-checks `HEAD` and `git status --porcelain`. Any modification, untracked non-ignored file, or `HEAD` move aborts the receipt write and exits `1`.
 4. Valid receipts are written atomically via temp file + rename. After each write, `receipt` prunes entries older than 14 days and retains at most 200 files.

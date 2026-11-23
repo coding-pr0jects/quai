@@ -78,6 +78,14 @@ func TestParseRejectsInvalidConfigs(t *testing.T) {
 		{"empty pool_when glob", "version = 1\n[slots]\nheavy = 2\n[[steps]]\nname = 'a'\nrun = 'true'\npool = 'heavy'\nslots = 1\npool_when = ['']\n", "empty pool_when"},
 		{"bad pool_tiers tier", "version = 1\n[slots]\nheavy = 2\n[[steps]]\nname = 'a'\nrun = 'true'\npool = 'heavy'\nslots = 1\npool_tiers = ['extreme']\n", "invalid tier"},
 		{"tiny attest max_age", "version = 1\n[attest]\nmax_age = '59s'\n", "at least 1m0s"},
+		{"only exclusions", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\ninputs = ['!docs/**']\n", "only exclude paths"},
+		{"bare exclusion", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\ninputs = ['**', '!']\n", "invalid inputs pattern"},
+		{"double exclusion", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\ninputs = ['**', '!!docs/**']\n", "invalid inputs pattern"},
+		{"negated lockfile", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\nlockfiles = ['!go.sum']\n", "lockfiles take no exclusions"},
+		{"unknown dependency", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\ndepends_on = ['b']\n", "depends on unknown step \"b\""},
+		{"self dependency", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\ndepends_on = ['a']\n", "cycle: a -> a"},
+		{"dependency cycle", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\ndepends_on = ['b']\n[[steps]]\nname = 'b'\nrun = 'true'\ndepends_on = ['a']\n", "cycle: a -> b -> a"},
+		{"duplicate dependency", "version = 1\n[[steps]]\nname = 'a'\nrun = 'true'\n[[steps]]\nname = 'b'\nrun = 'true'\ndepends_on = ['a', 'a']\n", "lists \"a\" twice"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -381,5 +389,54 @@ remote = "--upload-pack=touch /tmp/quai-pwn;true"
 				t.Fatalf("error %q does not say what to fix", err)
 			}
 		})
+	}
+}
+
+func TestStepPlanPlacesDependenciesFirstOnce(t *testing.T) {
+	cfg, err := Parse([]byte(`
+version = 1
+[[steps]]
+name = "verify"
+run = "true"
+depends_on = ["fast", "lint"]
+[[steps]]
+name = "lint"
+run = "true"
+depends_on = ["fast"]
+[[steps]]
+name = "fast"
+run = "true"
+[[steps]]
+name = "docs"
+run = "true"
+`))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	cases := []struct {
+		names []string
+		want  string
+	}{
+		{nil, "fast,lint,verify,docs"},
+		{[]string{"verify"}, "fast,lint,verify"},
+		{[]string{"lint", "verify"}, "fast,lint,verify"},
+		{[]string{"fast", "verify", "fast"}, "fast,lint,verify"},
+		{[]string{"docs"}, "docs"},
+	}
+	for _, tc := range cases {
+		plan, err := cfg.StepPlan(tc.names)
+		if err != nil {
+			t.Fatalf("StepPlan(%v): %v", tc.names, err)
+		}
+		var got []string
+		for _, s := range plan {
+			got = append(got, s.Name)
+		}
+		if strings.Join(got, ",") != tc.want {
+			t.Errorf("StepPlan(%v) = %v, want %s", tc.names, got, tc.want)
+		}
+	}
+	if _, err := cfg.StepPlan([]string{"nope"}); err == nil || !strings.Contains(err.Error(), `unknown step "nope"`) {
+		t.Fatalf("StepPlan(nope) err = %v", err)
 	}
 }

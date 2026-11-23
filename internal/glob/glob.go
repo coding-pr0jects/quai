@@ -26,6 +26,22 @@ func MatchAny(patterns []string, filePath string) bool {
 	return false
 }
 
+// Included reports whether filePath matches at least one pattern of patterns and no
+// negated pattern ("!" followed by a pattern). An exclusion wins whatever its position.
+func Included(patterns []string, filePath string) bool {
+	included := false
+	for _, p := range patterns {
+		if excluded, negated := strings.CutPrefix(p, "!"); negated {
+			if Match(excluded, filePath) {
+				return false
+			}
+			continue
+		}
+		included = included || Match(p, filePath)
+	}
+	return included
+}
+
 func matchSegments(patSegs, pathSegs []string) bool {
 	pi, si := 0, 0
 	for pi < len(patSegs) && si < len(pathSegs) {

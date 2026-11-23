@@ -46,63 +46,82 @@ func TestStoreWriteLookupAndPrune(t *testing.T) {
 }
 
 func TestFingerprintStableAcrossUnrelatedChanges(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	runGit := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, string(out))
-		}
+	cases := []struct {
+		name      string
+		inputs    []string
+		lockfiles []string
+	}{
+		{name: "narrow inputs", inputs: []string{"**/*.go"}},
+		{name: "negated inputs", inputs: []string{"**", "!README.md", "!docs/evidence/**"}},
+		{name: "lockfile beats an exclusion", inputs: []string{"**", "!README.md", "!docs/evidence/**", "!go.sum"}, lockfiles: []string{"go.sum"}},
 	}
-	write := func(rel, body string) {
-		t.Helper()
-		p := filepath.Join(dir, rel)
-		_ = os.MkdirAll(filepath.Dir(p), 0o755)
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			runGit := func(args ...string) {
+				t.Helper()
+				cmd := exec.Command("git", args...)
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v\n%s", args, err, string(out))
+				}
+			}
+			write := func(rel, body string) {
+				t.Helper()
+				p := filepath.Join(dir, rel)
+				_ = os.MkdirAll(filepath.Dir(p), 0o755)
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			g := repo.NewExecGit(dir)
+			step := config.Step{Name: "go", Run: "go test ./...", Inputs: tc.inputs, Lockfiles: tc.lockfiles}
+			fingerprint := func() string {
+				t.Helper()
+				tree, err := g.TreeSHA(ctx, "HEAD")
+				if err != nil {
+					t.Fatal(err)
+				}
+				fp, err := Fingerprint(ctx, g, step, tree, "")
+				if err != nil {
+					t.Fatalf("fingerprint: %v", err)
+				}
+				return fp
+			}
 
-	runGit("init", "-q", "-b", "main")
-	runGit("config", "user.name", "t")
-	runGit("config", "user.email", "t@example.com")
-	write("pkg/a.go", "package pkg\n")
-	write("README.md", "v1\n")
-	runGit("add", "-A")
-	runGit("commit", "-qm", "init")
+			runGit("init", "-q", "-b", "main")
+			runGit("config", "user.name", "t")
+			runGit("config", "user.email", "t@example.com")
+			write("pkg/a.go", "package pkg\n")
+			write("README.md", "v1\n")
+			runGit("add", "-A")
+			runGit("commit", "-qm", "init")
+			fp1 := fingerprint()
 
-	g := repo.NewExecGit(dir)
-	step := config.Step{Name: "go", Run: "go test ./...", Inputs: []string{"**/*.go"}}
+			write("README.md", "v2\n")
+			write("docs/evidence/shot.png", "png\n")
+			runGit("add", "-A")
+			runGit("commit", "-qm", "docs")
+			if fp2 := fingerprint(); fp1 != fp2 {
+				t.Fatalf("fingerprint changed on a commit outside inputs: %s vs %s", fp1, fp2)
+			}
 
-	t1, _ := g.TreeSHA(ctx, "HEAD")
-	fp1, err := Fingerprint(ctx, g, step, t1, "")
-	if err != nil {
-		t.Fatalf("fp1: %v", err)
-	}
+			write("pkg/a.go", "package pkg\nvar X = 1\n")
+			runGit("commit", "-qam", "code")
+			fp3 := fingerprint()
+			if fp1 == fp3 {
+				t.Fatal("fingerprint did not change when an included input changed")
+			}
 
-	// Edit README.md (outside inputs) -> fingerprint must stay identical.
-	write("README.md", "v2\n")
-	runGit("commit", "-qam", "docs")
-	t2, _ := g.TreeSHA(ctx, "HEAD")
-	fp2, err := Fingerprint(ctx, g, step, t2, "")
-	if err != nil {
-		t.Fatalf("fp2: %v", err)
-	}
-	if fp1 != fp2 {
-		t.Fatalf("fingerprint changed on unrelated README edit: %s vs %s", fp1, fp2)
-	}
-
-	// Edit pkg/a.go (inside inputs) -> fingerprint must change.
-	write("pkg/a.go", "package pkg\nvar X = 1\n")
-	runGit("commit", "-qam", "code")
-	t3, _ := g.TreeSHA(ctx, "HEAD")
-	fp3, err := Fingerprint(ctx, g, step, t3, "")
-	if err != nil {
-		t.Fatalf("fp3: %v", err)
-	}
-	if fp2 == fp3 {
-		t.Fatal("fingerprint did not change when matching input changed")
+			if len(tc.lockfiles) > 0 {
+				write("go.sum", "sum\n")
+				runGit("add", "-A")
+				runGit("commit", "-qm", "lockfile")
+				if fingerprint() == fp3 {
+					t.Fatal("fingerprint did not change when a lockfile changed")
+				}
+			}
+		})
 	}
 }

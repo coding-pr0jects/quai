@@ -23,8 +23,9 @@ min_free_mem = "4G"             # Optional RAM admission guard (Linux /proc/memi
 [[steps]]
 name = "fast"                   # Required, unique, matches ^[a-z0-9-]+$.
 run = "go vet ./..."            # Required. Executed via sh -c in repo root.
-inputs = ["**"]                 # Optional globs hashed into the receipt. Default: ["**"].
+inputs = ["**"]                 # Optional globs hashed into the receipt; "!glob" excludes. Default: ["**"].
 lockfiles = []                  # Optional extra files always hashed into the receipt.
+depends_on = []                 # Optional steps that must pass (or be cached) before this one.
 hook = "pre-push"               # Optional: "pre-push" or empty.
 pool = ""                       # Optional: pool name from [slots].
 slots = 0                       # Optional: number of slots to hold (>= 0). 0 means unlocked.
@@ -36,7 +37,7 @@ timeout = "30m"                 # Optional Go duration string. Default: "30m".
 default = "diff-audit"          # "gate-only" | "diff-audit" | "full-live". Default: "diff-audit".
 full_live = []                  # Globs that escalate the branch to full-live.
 diff_audit = []                 # Globs that escalate the branch to diff-audit.
-gate_only = []                  # Globs allowed to stay gate-only.
+gate_only = []                  # Globs allowed to stay gate-only; changes there keep an approved verdict (base policy only).
 pure_renames_gate_only = true   # 100% similarity renames (R100) count as gate-only. Default: true.
 test_globs = []                 # Optional globs for test files. Empty uses built-in defaults.
 escalate_on_test_tamper = true  # Escalate deleted tests or added skip markers to full-live. Default: true.
@@ -77,6 +78,8 @@ Each step computes a SHA-256 fingerprint before running on a clean tree:
 - When `inputs = ["**"]` and `lockfiles` is empty, `quai` hashes `step.run`, `HEAD^{tree}`, and `merge_base` (when `{{base}}` appears in `run`).
 - When narrower `inputs` or `lockfiles` are declared, `quai` lists all tracked files in the git tree matching those globs (`git ls-tree -r`), sorts them by path, and hashes `step.run` plus every `<path>:<blob_sha>`.
 
+- An input that starts with `!` excludes the paths its glob matches. A path counts as an input when it matches at least one plain glob and no `!` glob, whatever their order, so `inputs = ["**", "!docs/evidence/**"]` keeps the receipt and the attestation of the step when only files under `docs/evidence/` change. An exclusion turns off the `HEAD^{tree}` shortcut above. `quai` rejects `inputs` made only of exclusions, a bare `!`, and `!` in `lockfiles`: a lockfile is hashed even when an input excludes it.
+
 Narrowing `inputs` lets unrelated edits (such as editing `README.md` or another package) reuse existing receipts automatically across commits, rebases, and linked worktrees. Always list build manifests and lockfiles in `lockfiles` so dependency or toolchain updates invalidate cached receipts.
 
 ## Conditional pool routing
@@ -99,6 +102,21 @@ pool_tiers = ["full-live"]
 - Otherwise `quai verify` runs the step immediately with `slots = 0`. It takes no slot and skips `min_free_mem`, but still writes a receipt on a clean passing tree and still signs attestations.
 - `quai verify` prints `pool    <step>: routed to <pool> (...)` when the diff routes to the pool, then `pool    <step>: acquired <pool>` only once the slot lock is actually held; a bypass prints `pool    <step>: bypassed <pool> (...)`. `--json` adds `pool` and `pool_acquired` to that step, and `pool_acquired` is `true` only when the slot lock was held (a slot timeout reports `false`). Unconditional and cached steps report neither field.
 - `pool_when` and `pool_tiers` require `pool` and `slots > 0`. Configs without them behave exactly as before.
+
+## Step dependencies (`depends_on`)
+
+`depends_on = ["fast"]` makes `fast` a prerequisite of the step. Every command that selects steps (`quai verify`, `quai verify --step`, `quai hooks pre-push`, `quai attest check --step`) adds the transitive prerequisites and puts each one before the steps that need it. A step runs once per invocation even when several steps depend on it. When a prerequisite fails or mutates the tree, `quai verify` stops before the dependent step runs, so the dependent step gets no receipt and no attestation. `quai` rejects an unknown step name, a name listed twice, and a cycle.
+
+Each step runs with `QUAI_PASSED_STEPS` set to the comma-separated names of the steps that passed or were cached earlier in the same `quai verify` invocation, in run order (empty for the first step). A step script can skip its own call to a prerequisite when the name is listed:
+
+```sh
+case ",$QUAI_PASSED_STEPS," in
+  *,fast,*) ;;
+  *) quai verify --step fast ;;
+esac
+```
+
+`quai` sets this variable and never reads it, so an inherited value cannot mark a step passed. On a clean tree, each listed step passed on the current tree under the mutation guard. On a dirty tree, no mutation guard runs, so the list only says the step passed earlier in this invocation.
 
 ## Template placeholders in `steps[].run`
 

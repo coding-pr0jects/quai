@@ -549,8 +549,13 @@ func enforceVerdict(ctx context.Context, ws *workspace, headSHA string, cfg *con
 	if !required {
 		return nil, "", nil
 	}
+	configRef := since
+	if _, err := g.ShowFile(ctx, since, config.FileName); err != nil {
+		configRef = ""
+	}
 	vRes, err := verdict.Check(ctx, g, cfg, verdict.CheckOptions{
 		Since:          since,
+		ConfigRef:      configRef,
 		RequireSigned:  opts.RequireSignedVerdict || cfg.Land.RequireSignedVerdict,
 		AllowedSigners: opts.AllowedSigners,
 	})

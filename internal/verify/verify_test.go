@@ -537,3 +537,211 @@ run = "true"
 		t.Fatalf("--fetch-base did not refresh origin/main (%s)", oldMain)
 	}
 }
+
+func gitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, string(out))
+	}
+}
+
+func signingSetup(t *testing.T) (keyPath, allowedSigners string) {
+	t.Helper()
+	tmp := t.TempDir()
+	keyPath = filepath.Join(tmp, "signer")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyPath).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v\n%s", err, string(out))
+	}
+	pub, err := os.ReadFile(keyPath + ".pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowedSigners = filepath.Join(tmp, "allowed_signers")
+	if err := os.WriteFile(allowedSigners, []byte("t@example.com "+string(pub)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return keyPath, allowedSigners
+}
+
+func stepNames(res Result) string {
+	var names []string
+	for _, s := range res.Steps {
+		names = append(names, s.Name+"="+s.Status)
+	}
+	return strings.Join(names, ",")
+}
+
+func TestVerifyRunsDependencyOnceAndExportsPassedSteps(t *testing.T) {
+	t.Setenv(PassedStepsEnv, "fast")
+	cases := []struct {
+		name  string
+		dirty bool
+		steps []string
+	}{
+		{"clean, every step", false, nil},
+		{"clean, --step verify", false, []string{"verify"}},
+		{"dirty, every step", true, nil},
+		{"dirty, --step verify", true, []string{"verify"}},
+		{"dirty, --step fast --step verify", true, []string{"fast", "verify"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir, g := setupRepo(t)
+			log := filepath.Join(t.TempDir(), "runs.log")
+			cfg, err := config.Parse([]byte(`
+version = 1
+[[steps]]
+name = "verify"
+run = 'test "$QUAI_PASSED_STEPS" = fast && echo verify >> ` + log + `'
+depends_on = ["fast"]
+[[steps]]
+name = "fast"
+run = 'test -z "$QUAI_PASSED_STEPS" && echo fast >> ` + log + `'
+`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.dirty {
+				if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nvar dirty = 1\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var buf bytes.Buffer
+			res, err := Run(ctx, g, cfg, Options{StepNames: tc.steps, Stdout: &buf, Stderr: &buf})
+			if err != nil || !res.OK || stepNames(res) != "fast=passed,verify=passed" {
+				t.Fatalf("res=%+v err=%v\n%s", res, err, buf.String())
+			}
+			if raw, _ := os.ReadFile(log); string(raw) != "fast\nverify\n" {
+				t.Fatalf("each step must run once, fast first; log=%q", raw)
+			}
+			if tc.dirty {
+				return
+			}
+			again, err := Run(ctx, g, cfg, Options{StepNames: tc.steps, Stdout: &buf, Stderr: &buf})
+			if err != nil || stepNames(again) != "fast=cached,verify=cached" {
+				t.Fatalf("rerun on the same clean tree should be cached: res=%+v err=%v", again, err)
+			}
+		})
+	}
+}
+
+func TestVerifyStepRefusesToSignWhenDependencyFails(t *testing.T) {
+	ctx := context.Background()
+	_, g := setupRepo(t)
+	keyPath, _ := signingSetup(t)
+	log := filepath.Join(t.TempDir(), "runs.log")
+	cfg, err := config.Parse([]byte(`
+version = 1
+[[steps]]
+name = "fast"
+run = "false"
+[[steps]]
+name = "verify"
+run = "echo verify >> ` + log + `"
+depends_on = ["fast"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	res, _ := Run(ctx, g, cfg, Options{StepNames: []string{"verify"}, Sign: true, SigningKey: keyPath, Stdout: &buf, Stderr: &buf})
+	if res.OK || res.ReceiptWritten || len(res.Attestations) != 0 || stepNames(res) != "fast=failed" {
+		t.Fatalf("a failing dependency must stop verify before it runs or signs: res=%+v", res)
+	}
+	if _, statErr := os.Stat(log); !os.IsNotExist(statErr) {
+		t.Fatalf("verify ran although fast failed (stat err=%v)", statErr)
+	}
+}
+
+func TestVerifyExcludedInputsKeepReceiptAndAttestation(t *testing.T) {
+	ctx := context.Background()
+	dir, g := setupRepo(t)
+	keyPath, allowedSigners := signingSetup(t)
+	cfg, err := config.Parse([]byte(`
+version = 1
+[[steps]]
+name = "verify"
+run = "true"
+inputs = ["**", "!docs/evidence/**"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	signed := Options{Sign: true, SigningKey: keyPath, Stdout: &buf, Stderr: &buf}
+	first, err := Run(ctx, g, cfg, signed)
+	if err != nil || stepNames(first) != "verify=passed" || len(first.Attestations) != 1 {
+		t.Fatalf("first run: res=%+v err=%v\n%s", first, err, buf.String())
+	}
+
+	if err := os.MkdirAll(filepath.Join(dir, "docs", "evidence"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "evidence", "shot.png"), []byte("png\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-qm", "evidence")
+
+	second, err := Run(ctx, g, cfg, signed)
+	if err != nil || stepNames(second) != "verify=cached" || second.Steps[0].Fingerprint != first.Steps[0].Fingerprint {
+		t.Fatalf("an excluded path must keep the receipt: res=%+v err=%v", second, err)
+	}
+	check, err := attest.Check(ctx, g, cfg, attest.CheckOptions{AllowedSigners: allowedSigners})
+	if err != nil || !check.OK || check.Steps[0].Status != "verified" {
+		t.Fatalf("an excluded path must keep the attestation: res=%+v err=%v", check, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nvar x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "commit", "-qam", "code")
+	third, err := Run(ctx, g, cfg, signed)
+	if err != nil || stepNames(third) != "verify=passed" || third.Steps[0].Fingerprint == first.Steps[0].Fingerprint {
+		t.Fatalf("an included input must change the fingerprint: res=%+v err=%v", third, err)
+	}
+}
+
+func TestVerifyDependencyRoutesItsOwnPool(t *testing.T) {
+	ctx := context.Background()
+	dir, g := setupRepo(t)
+	checkoutBranch(t, dir, "feat")
+	commitFile(t, dir, "README.md", "v2\n", "docs only")
+	holdSlot(t, ctx, g, "heavy", 1)
+
+	cfg, err := config.Parse([]byte(`
+version = 1
+
+[slots.heavy]
+capacity = 1
+
+[[steps]]
+name = "verify"
+run = 'test "$QUAI_PASSED_STEPS" = e2e'
+depends_on = ["e2e"]
+
+[[steps]]
+name = "e2e"
+run = 'test -z "$QUAI_PASSED_STEPS"'
+pool = "heavy"
+slots = 1
+pool_when = ["internal/**"]
+
+[land]
+lock_wait = "200ms"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, cfg, Options{StepNames: []string{"verify"}, Stdout: &buf, Stderr: &buf})
+	if err != nil || !res.OK || stepNames(res) != "e2e=passed,verify=passed" {
+		t.Fatalf("a prerequisite pulled in by depends_on must bypass its pool on a docs-only diff: res=%+v err=%v\n%s", res, err, buf.String())
+	}
+	if e2e := res.Steps[0]; e2e.Pool != "heavy" || e2e.PoolAcquired == nil || *e2e.PoolAcquired {
+		t.Fatalf("expected e2e annotated as bypassing heavy, got %+v", e2e)
+	}
+}

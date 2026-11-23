@@ -229,7 +229,7 @@ func (s *Store) now() time.Time {
 }
 
 // Fingerprint computes a content-addressed sha256 over step.Run and all tracked files
-// in treeSHA matching step.Inputs or step.Lockfiles. When step.Run references {{base}},
+// in treeSHA included by step.Inputs (see glob.Included) or matching step.Lockfiles. When step.Run references {{base}},
 // the matching input hashes from baseSHA are also included so unrelated base moves preserve cache hits.
 func Fingerprint(ctx context.Context, g repo.Git, step config.Step, treeSHA, baseSHA string) (string, error) {
 	h := sha256.New()
@@ -266,7 +266,7 @@ func hashMatchingTree(ctx context.Context, g repo.Git, h interface{ Write([]byte
 	}
 	var matched []repo.TreeEntry
 	for _, e := range entries {
-		if glob.MatchAny(inputs, e.Path) || glob.MatchAny(lockfiles, e.Path) {
+		if glob.Included(inputs, e.Path) || glob.MatchAny(lockfiles, e.Path) {
 			matched = append(matched, e)
 		}
 	}
@@ -279,13 +279,12 @@ func hashMatchingTree(ctx context.Context, g repo.Git, h interface{ Write([]byte
 }
 
 func isWholeTree(inputs []string) bool {
-	if len(inputs) == 0 {
-		return true
-	}
+	whole := len(inputs) == 0
 	for _, p := range inputs {
-		if p == "**" {
-			return true
+		if strings.HasPrefix(p, "!") {
+			return false
 		}
+		whole = whole || p == "**"
 	}
-	return false
+	return whole
 }

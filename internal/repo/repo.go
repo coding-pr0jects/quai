@@ -66,6 +66,7 @@ type Git interface {
 	DiffNameOnly(ctx context.Context, from, to string) ([]string, error)
 	DiffFilePatch(ctx context.Context, from, to, filePath string) ([]byte, error)
 	DiffBinary(ctx context.Context, from, to string) ([]byte, error)
+	DiffBinaryPaths(ctx context.Context, from, to string, paths []string) ([]byte, error)
 	PatchID(ctx context.Context, diff []byte) (string, error)
 	UntrackedFiles(ctx context.Context) ([]string, error)
 	ListTree(ctx context.Context, treeOrRev string) ([]TreeEntry, error)
@@ -299,6 +300,23 @@ func (g *ExecGit) DiffBinary(ctx context.Context, from, to string) ([]byte, erro
 	out, errOut, err := g.run(ctx, nil, args...)
 	if err != nil {
 		return nil, fmt.Errorf("git diff --binary: %w (%s)", err, strings.TrimSpace(string(errOut)))
+	}
+	return out, nil
+}
+
+// DiffBinaryPaths is DiffBinary limited to paths, each taken literally (the git
+// ":(literal)" pathspec magic). No paths yields an empty diff, never the whole one.
+func (g *ExecGit) DiffBinaryPaths(ctx context.Context, from, to string, paths []string) ([]byte, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	args := []string{"diff", "--binary", "--no-renames", "--end-of-options", from, to, "--"}
+	for _, p := range paths {
+		args = append(args, ":(literal)"+p)
+	}
+	out, errOut, err := g.run(ctx, nil, args...)
+	if err != nil {
+		return nil, fmt.Errorf("git diff --binary -- <paths>: %w (%s)", err, strings.TrimSpace(string(errOut)))
 	}
 	return out, nil
 }

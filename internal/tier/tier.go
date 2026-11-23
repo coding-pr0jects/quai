@@ -114,6 +114,15 @@ func findAddedSkipMarker(diffText string) string {
 	return ""
 }
 
+// GateOnlyPath reports whether path is gate-only by [tiers].gate_only alone: it matches a
+// gate_only glob, no full_live or diff_audit glob, and no test glob.
+func GateOnlyPath(policy config.TierPolicy, path string) bool {
+	return glob.MatchAny(policy.GateOnly, path) &&
+		!glob.MatchAny(policy.FullLive, path) &&
+		!glob.MatchAny(policy.DiffAudit, path) &&
+		!glob.MatchAny(effectiveTestGlobs(policy), path)
+}
+
 // Classify is the pure risk-tier decision engine.
 func Classify(changes []repo.FileChange, untracked []string, tampered []TamperFinding, policy config.TierPolicy) Decision {
 	pureRenames := 0

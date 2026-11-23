@@ -34,15 +34,16 @@ const (
 )
 
 type Record struct {
-	Version   int         `json:"version"`
-	PatchID   string      `json:"patch_id"`
-	Tier      config.Tier `json:"tier"`
-	Status    Status      `json:"status"`
-	Reviewer  string      `json:"reviewer,omitempty"`
-	Note      string      `json:"note,omitempty"`
-	HeadSHA   string      `json:"head_sha"`
-	BaseSHA   string      `json:"base_sha"`
-	CreatedAt time.Time   `json:"created_at"`
+	Version     int         `json:"version"`
+	PatchID     string      `json:"patch_id"`
+	CodePatchID string      `json:"code_patch_id,omitempty"`
+	Tier        config.Tier `json:"tier"`
+	Status      Status      `json:"status"`
+	Reviewer    string      `json:"reviewer,omitempty"`
+	Note        string      `json:"note,omitempty"`
+	HeadSHA     string      `json:"head_sha"`
+	BaseSHA     string      `json:"base_sha"`
+	CreatedAt   time.Time   `json:"created_at"`
 }
 
 type Statement struct {
@@ -66,16 +67,18 @@ type RecordOptions struct {
 }
 
 type RecordResult struct {
-	OK     bool   `json:"ok"`
-	Record Record `json:"record"`
-	Path   string `json:"path"`
-	Ref    string `json:"ref,omitempty"`
-	Signed bool   `json:"signed,omitempty"`
-	Pushed bool   `json:"pushed,omitempty"`
+	OK      bool   `json:"ok"`
+	Record  Record `json:"record"`
+	Path    string `json:"path"`
+	Ref     string `json:"ref,omitempty"`
+	CodeRef string `json:"code_ref,omitempty"`
+	Signed  bool   `json:"signed,omitempty"`
+	Pushed  bool   `json:"pushed,omitempty"`
 }
 
 type CheckOptions struct {
 	Since          string
+	ConfigRef      string
 	RequireSigned  bool
 	AllowedSigners string
 	Fetch          bool
@@ -84,14 +87,15 @@ type CheckOptions struct {
 }
 
 type CheckResult struct {
-	OK         bool        `json:"ok"`
-	Status     string      `json:"status"` // valid | missing | rejected | insufficient-tier | invalid | empty-diff
-	PatchID    string      `json:"patch_id,omitempty"`
-	BranchTier config.Tier `json:"branch_tier"`
-	Signed     bool        `json:"signed,omitempty"`
-	Signer     string      `json:"signer,omitempty"`
-	Record     *Record     `json:"record,omitempty"`
-	Error      string      `json:"error,omitempty"`
+	OK          bool        `json:"ok"`
+	Status      string      `json:"status"` // valid | missing | rejected | insufficient-tier | invalid | empty-diff
+	PatchID     string      `json:"patch_id,omitempty"`
+	CodePatchID string      `json:"code_patch_id,omitempty"`
+	BranchTier  config.Tier `json:"branch_tier"`
+	Signed      bool        `json:"signed,omitempty"`
+	Signer      string      `json:"signer,omitempty"`
+	Record      *Record     `json:"record,omitempty"`
+	Error       string      `json:"error,omitempty"`
 }
 
 // RefName returns the git ref path storing a signed verdict for patchID.
@@ -149,6 +153,46 @@ func ComputePatchID(ctx context.Context, g repo.Git, cfg *config.Config, since s
 	return pid, baseSHA, headSHA, nil
 }
 
+// CodePatchID computes the patch-id of the base..head diff limited to the paths that
+// tier.GateOnlyPath does not call gate-only. It is "" when every changed path is gate-only,
+// and when the diff changes a policy file (.quai.toml or the configured allowed_signers),
+// because cfg then may not be the policy the diff is checked against.
+func CodePatchID(ctx context.Context, g repo.Git, cfg *config.Config, baseSHA, headSHA string) (string, error) {
+	files, err := g.DiffNameOnly(ctx, baseSHA, headSHA)
+	if err != nil {
+		return "", err
+	}
+	var code []string
+	for _, f := range files {
+		if isPolicyFile(cfg, f) {
+			return "", nil
+		}
+		if !tier.GateOnlyPath(cfg.Tiers, f) {
+			code = append(code, f)
+		}
+	}
+	diff, err := g.DiffBinaryPaths(ctx, baseSHA, headSHA, code)
+	if err != nil {
+		return "", err
+	}
+	return g.PatchID(ctx, diff)
+}
+
+func isPolicyFile(cfg *config.Config, path string) bool {
+	if path == config.FileName {
+		return true
+	}
+	signers := cfg.Attest.AllowedSigners
+	return signers != "" && !filepath.IsAbs(signers) && filepath.ToSlash(filepath.Clean(signers)) == path
+}
+
+func lookupKeys(patchID, codePatchID string) []string {
+	if codePatchID == "" || codePatchID == patchID {
+		return []string{patchID}
+	}
+	return []string{patchID, codePatchID}
+}
+
 // RecordVerdict records an approved or rejected review verdict keyed by the branch's stable patch-id.
 func RecordVerdict(ctx context.Context, g repo.Git, cfg *config.Config, opts RecordOptions) (RecordResult, error) {
 	if opts.Status == "" {
@@ -173,6 +217,11 @@ func RecordVerdict(ctx context.Context, g repo.Git, cfg *config.Config, opts Rec
 		return RecordResult{}, errors.New("branch diff against base is empty; nothing to record a verdict for")
 	}
 
+	codePID, err := CodePatchID(ctx, g, cfg, baseSHA, headSHA)
+	if err != nil {
+		return RecordResult{}, err
+	}
+
 	branchTier := opts.Tier
 	if branchTier == "" {
 		tRes, err := tier.Evaluate(ctx, g, cfg, opts.Since)
@@ -195,24 +244,32 @@ func RecordVerdict(ctx context.Context, g repo.Git, cfg *config.Config, opts Rec
 		nowFn = time.Now
 	}
 	rec := Record{
-		Version:   CurrentVersion,
-		PatchID:   pid,
-		Tier:      branchTier,
-		Status:    opts.Status,
-		Reviewer:  reviewer,
-		Note:      strings.TrimSpace(opts.Note),
-		HeadSHA:   headSHA,
-		BaseSHA:   baseSHA,
-		CreatedAt: nowFn().UTC(),
+		Version:     CurrentVersion,
+		PatchID:     pid,
+		CodePatchID: codePID,
+		Tier:        branchTier,
+		Status:      opts.Status,
+		Reviewer:    reviewer,
+		Note:        strings.TrimSpace(opts.Note),
+		HeadSHA:     headSHA,
+		BaseSHA:     baseSHA,
+		CreatedAt:   nowFn().UTC(),
 	}
+	keys := lookupKeys(pid, codePID)
 
 	commonDir, err := g.CommonDir(ctx)
 	if err != nil {
 		return RecordResult{}, err
 	}
-	verdictPath, err := writeLocal(commonDir, rec, nowFn().UTC())
-	if err != nil {
-		return RecordResult{}, err
+	var verdictPath string
+	for _, key := range keys {
+		p, err := writeLocal(commonDir, key, rec, nowFn().UTC())
+		if err != nil {
+			return RecordResult{}, err
+		}
+		if verdictPath == "" {
+			verdictPath = p
+		}
 	}
 
 	res := RecordResult{
@@ -249,11 +306,18 @@ func RecordVerdict(ctx context.Context, g repo.Git, cfg *config.Config, opts Rec
 		if err != nil {
 			return res, err
 		}
-		ref := RefName(rec.PatchID)
-		if err := g.WriteRefBlob(ctx, ref, BlobFileName, append(raw, '\n')); err != nil {
-			return res, err
+		var refs []string
+		for _, key := range keys {
+			ref := RefName(key)
+			if err := g.WriteRefBlob(ctx, ref, BlobFileName, append(raw, '\n')); err != nil {
+				return res, err
+			}
+			refs = append(refs, ref)
 		}
-		res.Ref = ref
+		res.Ref = refs[0]
+		if len(refs) > 1 {
+			res.CodeRef = refs[1]
+		}
 		res.Signed = true
 
 		if opts.Push {
@@ -264,7 +328,7 @@ func RecordVerdict(ctx context.Context, g repo.Git, cfg *config.Config, opts Rec
 			if remote == "" {
 				remote = "origin"
 			}
-			if err := g.PushRefs(ctx, remote, []string{ref}); err != nil {
+			if err := g.PushRefs(ctx, remote, refs); err != nil {
 				return res, err
 			}
 			res.Pushed = true
@@ -275,13 +339,24 @@ func RecordVerdict(ctx context.Context, g repo.Git, cfg *config.Config, opts Rec
 }
 
 // Check verifies whether an approved verdict covering the current branch tier exists
-// for the current branch's stable patch-id.
+// for the current branch's stable patch-id. With opts.ConfigRef, it loads the policy from
+// that trusted ref and also accepts a verdict for the branch's code patch-id, when the
+// branch changed only gate-only paths since the review. Without it, the branch's own
+// .quai.toml could widen gate_only, so only the exact patch-id matches.
 func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOptions) (CheckResult, error) {
+	if opts.ConfigRef != "" {
+		var err error
+		cfg, err = attest.LoadConfigRef(ctx, g, opts.ConfigRef)
+		if err != nil {
+			return CheckResult{}, err
+		}
+		opts.RequireSigned = opts.RequireSigned || cfg.Land.RequireSignedVerdict
+	}
 	tRes, err := tier.Evaluate(ctx, g, cfg, opts.Since)
 	if err != nil {
 		return CheckResult{}, err
 	}
-	pid, _, _, err := ComputePatchID(ctx, g, cfg, opts.Since)
+	pid, baseSHA, headSHA, err := ComputePatchID(ctx, g, cfg, opts.Since)
 	if err != nil {
 		return CheckResult{}, err
 	}
@@ -291,6 +366,17 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 			Status:     "empty-diff",
 			BranchTier: tRes.Tier,
 		}, nil
+	}
+	var codePID string
+	if opts.ConfigRef != "" {
+		codePID, err = CodePatchID(ctx, g, cfg, baseSHA, headSHA)
+		if err != nil {
+			return CheckResult{}, err
+		}
+	}
+	keys := lookupKeys(pid, codePID)
+	failed := func(status, msg string) CheckResult {
+		return CheckResult{OK: false, Status: status, PatchID: pid, CodePatchID: codePID, BranchTier: tRes.Tier, Error: msg}
 	}
 
 	nowFn := opts.Now
@@ -303,127 +389,121 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 	if cfg != nil && cfg.Attest.MaxAgeDur > 0 {
 		maxAge = cfg.Attest.MaxAgeDur
 	}
+	evaluate := func(rec Record) CheckResult {
+		return evaluateRecord(rec, pid, codePID, tRes.Tier, maxAge, now)
+	}
 
-	ref := RefName(pid)
 	if opts.Fetch {
 		remote := opts.Remote
 		if remote == "" && cfg != nil {
 			remote = cfg.Attest.Remote
 		}
-		if err := attest.FetchTargeted(ctx, g, remote, []string{ref}); err != nil {
+		refs := make([]string, len(keys))
+		for i, key := range keys {
+			refs[i] = RefName(key)
+		}
+		if err := attest.FetchTargeted(ctx, g, remote, refs); err != nil {
 			return CheckResult{}, err
 		}
 	}
 
-	// Check signed ref first if required or present.
-	if rawEnv, ok, err := g.ReadRefBlob(ctx, ref, BlobFileName); err == nil && ok {
-		topLevel, _ := g.TopLevel(ctx)
-		allowedPath, aErr := attest.ResolveAllowedSigners(topLevel, cfg, opts.AllowedSigners)
-		if aErr != nil {
-			if opts.RequireSigned {
-				return CheckResult{OK: false, Status: "invalid", PatchID: pid, BranchTier: tRes.Tier, Error: aErr.Error()}, nil
-			}
-		} else {
-			var env attest.Envelope
-			if err := json.Unmarshal(rawEnv, &env); err != nil {
-				if opts.RequireSigned {
-					return CheckResult{OK: false, Status: "invalid", PatchID: pid, BranchTier: tRes.Tier, Error: fmt.Sprintf("parse signed verdict: %v", err)}, nil
-				}
-			} else {
-				var principals []string
-				if cfg != nil {
-					principals = cfg.Attest.Signers
-				}
-				signer, payload, vErr := attest.VerifyPayload(ctx, env, allowedPath, principals)
-				if vErr != nil {
-					if opts.RequireSigned {
-						return CheckResult{OK: false, Status: "invalid", PatchID: pid, BranchTier: tRes.Tier, Error: vErr.Error()}, nil
-					}
-				} else {
-					var stmt Statement
-					if err := json.Unmarshal(payload, &stmt); err != nil || stmt.PredicateType != PredicateType {
-						if opts.RequireSigned {
-							return CheckResult{OK: false, Status: "invalid", PatchID: pid, BranchTier: tRes.Tier, Error: "invalid verdict statement payload"}, nil
-						}
-					} else {
-						res := evaluateRecord(stmt.Predicate, pid, tRes.Tier, maxAge, now)
-						res.Signed = true
-						res.Signer = signer
-						return res, nil
-					}
-				}
-			}
+	for _, key := range keys {
+		rec, signer, problem, found := readSigned(ctx, g, cfg, opts.AllowedSigners, RefName(key))
+		if problem != "" && opts.RequireSigned {
+			return failed("invalid", problem), nil
+		}
+		if found && coversPatch(rec, pid, codePID) {
+			res := evaluate(rec)
+			res.Signed = true
+			res.Signer = signer
+			return res, nil
 		}
 	}
 
 	if opts.RequireSigned {
-		return CheckResult{
-			OK:         false,
-			Status:     "missing",
-			PatchID:    pid,
-			BranchTier: tRes.Tier,
-			Error:      fmt.Sprintf("no valid signed verdict found for patch-id %s", shortID(pid)),
-		}, nil
+		return failed("missing", fmt.Sprintf("no valid signed verdict found for patch-id %s", shortID(pid))), nil
 	}
 
 	commonDir, err := g.CommonDir(ctx)
 	if err != nil {
 		return CheckResult{}, err
 	}
-	rec, ok, err := readLocal(commonDir, pid)
-	if err != nil {
-		return CheckResult{OK: false, Status: "invalid", PatchID: pid, BranchTier: tRes.Tier, Error: err.Error()}, nil
-	}
-	if !ok {
-		return CheckResult{
-			OK:         false,
-			Status:     "missing",
-			PatchID:    pid,
-			BranchTier: tRes.Tier,
-			Error:      fmt.Sprintf("no review verdict found for patch-id %s", shortID(pid)),
-		}, nil
-	}
-	return evaluateRecord(rec, pid, tRes.Tier, maxAge, now), nil
-}
-
-func evaluateRecord(rec Record, expectedPatchID string, branchTier config.Tier, maxAge time.Duration, now time.Time) CheckResult {
-	rCopy := rec
-	if rec.Version != CurrentVersion || rec.PatchID != expectedPatchID {
-		return CheckResult{OK: false, Status: "invalid", PatchID: expectedPatchID, BranchTier: branchTier, Record: &rCopy, Error: "verdict patch-id or version mismatch"}
-	}
-	if maxAge > 0 && !rec.CreatedAt.IsZero() && now.Sub(rec.CreatedAt) > maxAge {
-		return CheckResult{OK: false, Status: "invalid", PatchID: expectedPatchID, BranchTier: branchTier, Record: &rCopy, Error: "verdict expired"}
-	}
-	if rec.Status == StatusRejected {
-		return CheckResult{OK: false, Status: "rejected", PatchID: expectedPatchID, BranchTier: branchTier, Record: &rCopy, Error: "patch was rejected by reviewer"}
-	}
-	if rec.Status != StatusApproved {
-		return CheckResult{OK: false, Status: "invalid", PatchID: expectedPatchID, BranchTier: branchTier, Record: &rCopy, Error: fmt.Sprintf("unknown verdict status %q", rec.Status)}
-	}
-	if !TierCovers(rec.Tier, branchTier) {
-		return CheckResult{
-			OK:         false,
-			Status:     "insufficient-tier",
-			PatchID:    expectedPatchID,
-			BranchTier: branchTier,
-			Record:     &rCopy,
-			Error:      fmt.Sprintf("verdict covers %q, but branch requires %q", rec.Tier, branchTier),
+	for _, key := range keys {
+		rec, ok, err := readLocal(commonDir, key)
+		if err != nil {
+			return failed("invalid", err.Error()), nil
+		}
+		if ok && coversPatch(rec, pid, codePID) {
+			return evaluate(rec), nil
 		}
 	}
-	return CheckResult{
-		OK:         true,
-		Status:     "valid",
-		PatchID:    expectedPatchID,
-		BranchTier: branchTier,
-		Record:     &rCopy,
+	return failed("missing", fmt.Sprintf("no review verdict found for patch-id %s", shortID(pid))), nil
+}
+
+func readSigned(ctx context.Context, g repo.Git, cfg *config.Config, allowedSigners, ref string) (rec Record, signer, problem string, found bool) {
+	rawEnv, ok, err := g.ReadRefBlob(ctx, ref, BlobFileName)
+	if err != nil || !ok {
+		return Record{}, "", "", false
 	}
+	topLevel, _ := g.TopLevel(ctx)
+	allowedPath, err := attest.ResolveAllowedSigners(topLevel, cfg, allowedSigners)
+	if err != nil {
+		return Record{}, "", err.Error(), false
+	}
+	var env attest.Envelope
+	if err := json.Unmarshal(rawEnv, &env); err != nil {
+		return Record{}, "", fmt.Sprintf("parse signed verdict: %v", err), false
+	}
+	var principals []string
+	if cfg != nil {
+		principals = cfg.Attest.Signers
+	}
+	signer, payload, err := attest.VerifyPayload(ctx, env, allowedPath, principals)
+	if err != nil {
+		return Record{}, "", err.Error(), false
+	}
+	var stmt Statement
+	if err := json.Unmarshal(payload, &stmt); err != nil || stmt.PredicateType != PredicateType {
+		return Record{}, "", "invalid verdict statement payload", false
+	}
+	return stmt.Predicate, signer, "", true
+}
+
+func coversPatch(rec Record, patchID, codePatchID string) bool {
+	if rec.PatchID == patchID {
+		return true
+	}
+	return codePatchID != "" && (rec.CodePatchID == codePatchID || rec.PatchID == codePatchID)
+}
+
+func evaluateRecord(rec Record, patchID, codePatchID string, branchTier config.Tier, maxAge time.Duration, now time.Time) CheckResult {
+	rCopy := rec
+	result := func(ok bool, status, msg string) CheckResult {
+		return CheckResult{OK: ok, Status: status, PatchID: patchID, CodePatchID: codePatchID, BranchTier: branchTier, Record: &rCopy, Error: msg}
+	}
+	if rec.Version != CurrentVersion {
+		return result(false, "invalid", fmt.Sprintf("unsupported verdict version %d", rec.Version))
+	}
+	if maxAge > 0 && !rec.CreatedAt.IsZero() && now.Sub(rec.CreatedAt) > maxAge {
+		return result(false, "invalid", "verdict expired")
+	}
+	if rec.Status == StatusRejected {
+		return result(false, "rejected", "patch was rejected by reviewer")
+	}
+	if rec.Status != StatusApproved {
+		return result(false, "invalid", fmt.Sprintf("unknown verdict status %q", rec.Status))
+	}
+	if !TierCovers(rec.Tier, branchTier) {
+		return result(false, "insufficient-tier", fmt.Sprintf("verdict covers %q, but branch requires %q", rec.Tier, branchTier))
+	}
+	return result(true, "valid", "")
 }
 
 func verdictsDir(commonDir string) string {
 	return filepath.Join(commonDir, "quai", "verdicts")
 }
 
-func writeLocal(commonDir string, rec Record, now time.Time) (string, error) {
+func writeLocal(commonDir, key string, rec Record, now time.Time) (string, error) {
 	dir := verdictsDir(commonDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create verdicts dir: %w", err)
@@ -446,7 +526,7 @@ func writeLocal(commonDir string, rec Record, now time.Time) (string, error) {
 		_ = os.Remove(tmpName)
 		return "", err
 	}
-	target := filepath.Join(dir, rec.PatchID+".json")
+	target := filepath.Join(dir, key+".json")
 	if err := os.Rename(tmpName, target); err != nil {
 		_ = os.Remove(tmpName)
 		return "", err

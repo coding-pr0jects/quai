@@ -627,7 +627,7 @@ func Push(ctx context.Context, g repo.Git, cfg *config.Config, opts PushOptions)
 	if err != nil {
 		return PushResult{}, err
 	}
-	steps, err := selectSteps(cfg, opts.StepNames)
+	steps, err := cfg.StepPlan(opts.StepNames)
 	if err != nil {
 		return PushResult{}, err
 	}
@@ -724,6 +724,20 @@ func shortSHA(s string) string {
 	return s[:12]
 }
 
+// LoadConfigRef loads .quai.toml from a trusted git ref such as origin/main, so a PR
+// branch cannot weaken the policy it is checked against.
+func LoadConfigRef(ctx context.Context, g repo.Git, ref string) (*config.Config, error) {
+	raw, err := g.ShowFile(ctx, ref, config.FileName)
+	if err != nil {
+		return nil, fmt.Errorf("load %s from --config-ref %q: %w", config.FileName, ref, err)
+	}
+	cfg, err := config.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s from --config-ref %q: %w", config.FileName, ref, err)
+	}
+	return cfg, nil
+}
+
 // Check verifies signed attestations for the selected steps on HEAD (or virtual merge-tree --onto <ref>).
 // When opts.ConfigRef is set, .quai.toml is loaded from that git ref instead of the working tree.
 func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOptions) (CheckResult, error) {
@@ -741,13 +755,9 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 		return CheckResult{}, err
 	}
 	if opts.ConfigRef != "" {
-		rawCfg, err := g.ShowFile(ctx, opts.ConfigRef, config.FileName)
+		cfg, err = LoadConfigRef(ctx, g, opts.ConfigRef)
 		if err != nil {
-			return CheckResult{}, fmt.Errorf("load %s from --config-ref %q: %w", config.FileName, opts.ConfigRef, err)
-		}
-		cfg, err = config.Parse(rawCfg)
-		if err != nil {
-			return CheckResult{}, fmt.Errorf("parse %s from --config-ref %q: %w", config.FileName, opts.ConfigRef, err)
+			return CheckResult{}, err
 		}
 	}
 	if cfg == nil {
@@ -762,7 +772,7 @@ func Check(ctx context.Context, g repo.Git, cfg *config.Config, opts CheckOption
 		remote = cfg.Attest.Remote
 	}
 
-	steps, err := selectSteps(cfg, opts.StepNames)
+	steps, err := cfg.StepPlan(opts.StepNames)
 	if err != nil {
 		return CheckResult{}, err
 	}
@@ -1061,21 +1071,6 @@ func resolveCurrentTreeAndBase(ctx context.Context, g repo.Git, cfg *config.Conf
 		return "", "", fmt.Errorf("resolve merge-base with %s: %w", baseRef, err)
 	}
 	return treeSHA, baseSHA, nil
-}
-
-func selectSteps(cfg *config.Config, names []string) ([]config.Step, error) {
-	if len(names) == 0 {
-		return cfg.Steps, nil
-	}
-	out := make([]config.Step, 0, len(names))
-	for _, n := range names {
-		s, ok := cfg.StepByName(n)
-		if !ok {
-			return nil, fmt.Errorf("unknown step %q", n)
-		}
-		out = append(out, s)
-	}
-	return out, nil
 }
 
 func cryptoRoll100() int {

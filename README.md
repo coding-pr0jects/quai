@@ -128,7 +128,7 @@ quai verify --detach
 quai verify --wait --max 8m   # exits 4 while it still runs; rerun to stream the next lines
 ```
 
-Re-running `quai verify` on a clean tree with unchanged inputs (or after editing a file outside `inputs`, such as `README.md`) reuses the stored receipt immediately across all linked worktrees. If a step modifies tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai verify` refuses to write a receipt and exits `1`.
+Re-running `quai verify` on a clean tree with unchanged inputs (or after editing a file outside `inputs`, such as `README.md`, or under an excluded `"!docs/evidence/**"` input) reuses the stored receipt immediately across all linked worktrees. A step with `depends_on = ["fast"]` runs after `fast`, which runs once, and reads `QUAI_PASSED_STEPS` to see what already passed. If a step modifies tracked files, creates untracked non-ignored files, or moves `HEAD`, `quai verify` refuses to write a receipt and exits `1`.
 
 Steps with `pool_when` globs or a `pool_tiers` threshold acquire their slot pool only when the diff needs it; otherwise they run unlocked and still write receipts and sign attestations.
 
@@ -165,7 +165,7 @@ quai land 41 42 43
 | `quai exec --pool <name> [--slots <n>] [--wait <duration>] [--priority <int>] [--detach] -- <cmd...>` | Serialize any command behind a slot pool, served by priority then arrival, in its own process group |
 | `quai tier [--since <ref>] [--json]` | Classify diff risk (`gate-only`, `diff-audit`, `full-live`), detect test tampering, list receipt status |
 | `quai patch-id <verdict-sha> [target-sha] [--base <ref>] [--json]` | Verify whether a reviewed diff survived rebase unchanged (`SURVIVES` vs `CHANGED`) |
-| `quai verdict record\|check [flags...]` | Record and verify local or SSH-signed review verdicts keyed by `patch-id` and risk tier |
+| `quai verdict record\|check [flags...]` | Record and verify local or SSH-signed review verdicts keyed by `patch-id` and risk tier; gate-only follow-up commits keep the verdict |
 | `quai land <pr>... [--dry-run] [--continue-on-error=false] [--method squash\|merge\|rebase] [--restack] [--require-verdict] [--no-sign] [--no-push] [--json]` | Land one GitHub PR, or a batch under one `land.lock` session, with `git merge-tree` optimistic merge, stacked child retargeting/restacking, or locked rebase |
 | `quai restack <old-parent-tip> [--base <ref>] [--push] [--json]` | Replay a stacked child branch onto the updated base via `git rebase --onto` with `patch-id` survival check |
 | `quai hooks install\|uninstall\|pre-push [--json]` | Manage the non-destructive `pre-push` receipt hook (with optional auto-sign/push) |

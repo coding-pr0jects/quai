@@ -355,7 +355,7 @@ func runAttest(ctx context.Context, cwd string, args []string, stdout, stderr io
 			for _, s := range res.Steps {
 				switch s.Status {
 				case "verified":
-					fmt.Fprintf(stdout, "verified %s (%s by %s, %s)\n", s.Name, s.Fingerprint[:min(12, len(s.Fingerprint))], s.Signer, s.MatchMode)
+					fmt.Fprintf(stdout, "verified %s (%s by %s, %s)\n", s.Name, shortID(s.Fingerprint), s.Signer, s.MatchMode)
 				default:
 					fmt.Fprintf(stdout, "%-8s %s [%s] (%s)\n", s.Status, s.Name, s.Reason, s.Error)
 				}
@@ -1217,7 +1217,11 @@ func runVerdict(ctx context.Context, cwd string, args []string, stdout, stderr i
 		if *jsonOut {
 			writeJSON(stdout, res)
 		} else {
-			fmt.Fprintf(stdout, "recorded %s verdict (%s) for patch-id %s\n", res.Record.Status, res.Record.Tier, res.Record.PatchID[:min(12, len(res.Record.PatchID))])
+			fmt.Fprintf(stdout, "recorded %s verdict (%s) for patch-id %s", res.Record.Status, res.Record.Tier, shortID(res.Record.PatchID))
+			if code := res.Record.CodePatchID; code != "" && code != res.Record.PatchID {
+				fmt.Fprintf(stdout, " and code patch-id %s", shortID(code))
+			}
+			fmt.Fprintln(stdout)
 		}
 		return 0
 
@@ -1227,6 +1231,7 @@ func runVerdict(ctx context.Context, cwd string, args []string, stdout, stderr i
 		since := fs.String("since", "", "base ref")
 		requireSigned := fs.Bool("require-signed", false, "require a cryptographically signed verdict ref")
 		allowedSigners := fs.String("allowed-signers", "", "path to OpenSSH allowed_signers file")
+		configRef := fs.String("config-ref", "", "load .quai.toml from a trusted git ref (e.g. origin/main); needed to keep a verdict across gate-only commits")
 		fetch := fs.Bool("fetch", false, "fetch refs/quai/verdicts/<patch-id> from remote first")
 		remote := fs.String("remote", "", "git remote for --fetch")
 		jsonOut := fs.Bool("json", false, "output JSON")
@@ -1244,6 +1249,7 @@ func runVerdict(ctx context.Context, cwd string, args []string, stdout, stderr i
 		}
 		res, err := verdict.Check(ctx, g, cfg, verdict.CheckOptions{
 			Since:          *since,
+			ConfigRef:      *configRef,
 			RequireSigned:  *requireSigned || cfg.Land.RequireSignedVerdict,
 			AllowedSigners: *allowedSigners,
 			Fetch:          *fetch,
@@ -1255,8 +1261,11 @@ func runVerdict(ctx context.Context, cwd string, args []string, stdout, stderr i
 		}
 		if *jsonOut {
 			writeJSON(stdout, res)
+		} else if res.OK && res.Record != nil && res.Record.PatchID != res.PatchID {
+			fmt.Fprintf(stdout, "valid (%s, patch-id %s): reviewed at patch-id %s, only gate-only paths changed since\n",
+				res.BranchTier, shortID(res.PatchID), shortID(res.Record.PatchID))
 		} else if res.OK {
-			fmt.Fprintf(stdout, "valid (%s, patch-id %s)\n", res.BranchTier, res.PatchID[:min(12, len(res.PatchID))])
+			fmt.Fprintf(stdout, "valid (%s, patch-id %s)\n", res.BranchTier, shortID(res.PatchID))
 		} else {
 			fmt.Fprintf(stdout, "%s: %s\n", res.Status, res.Error)
 		}
@@ -1348,4 +1357,8 @@ func writeJSON(w io.Writer, v any) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "\t")
 	_ = enc.Encode(v)
+}
+
+func shortID(s string) string {
+	return s[:min(12, len(s))]
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/forge"
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
+	"github.com/coding-pr0jects/quai/internal/verdict"
 )
 
 type coordinatorFixture struct {
@@ -356,4 +357,74 @@ require_verdict_tiers = ["full-live"]
 	if fx.forge.merged {
 		t.Fatal("a PR without an approved verdict was merged")
 	}
+}
+
+func TestLandFromCoordinatorKeepsVerdictOnlyUnderBasePolicy(t *testing.T) {
+	ctx := context.Background()
+	fx := newCoordinatorFixture(t, "")
+	const basePolicy = `version = 1
+[tiers]
+full_live = ["b.txt"]
+gate_only = ["*.md"]
+[land]
+required_checks = ["check"]
+require_verdict_tiers = ["full-live"]
+`
+	const widenedPolicy = `version = 1
+[tiers]
+full_live = ["b.txt"]
+gate_only = ["*.md", "evil.txt", ".quai.toml"]
+[land]
+required_checks = ["check"]
+require_verdict_tiers = ["full-live"]
+`
+	fx.git(fx.coord, "switch", "-q", "main")
+	fx.write(fx.coord, config.FileName, basePolicy)
+	fx.git(fx.coord, "add", config.FileName)
+	fx.git(fx.coord, "commit", "-qm", "adopt quai")
+	fx.git(fx.coord, "push", "-q", "origin", "main")
+	fx.git(fx.coord, "switch", "-q", "coord")
+	fx.git(fx.deleg, "fetch", "-q", "origin")
+	fx.git(fx.deleg, "rebase", "-q", "origin/main")
+	fx.git(fx.deleg, "push", "-q", "-f", "origin", "feat")
+	fx.featSHA = fx.git(fx.deleg, "rev-parse", "HEAD")
+
+	cfg, err := config.Parse([]byte(basePolicy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verdict.RecordVerdict(ctx, fx.delegGit, cfg, verdict.RecordOptions{Status: verdict.StatusApproved, Since: "origin/main"}); err != nil {
+		t.Fatalf("RecordVerdict: %v", err)
+	}
+	reviewed := fx.featSHA
+	pushFollowUp := func(edits map[string]string) {
+		t.Helper()
+		fx.git(fx.deleg, "reset", "-q", "--hard", reviewed)
+		for rel, body := range edits {
+			fx.write(fx.deleg, rel, body)
+		}
+		fx.git(fx.deleg, "add", "-A")
+		fx.git(fx.deleg, "commit", "-qm", "follow-up")
+		fx.git(fx.deleg, "push", "-q", "-f", "origin", "feat")
+		fx.featSHA = fx.git(fx.deleg, "rev-parse", "HEAD")
+	}
+
+	pushFollowUp(map[string]string{config.FileName: widenedPolicy, "evil.txt": "hidden code\n"})
+	for _, dryRun := range []bool{true, false} {
+		res, err := fx.run(ctx, fx.coordGit, widenedPolicy, Options{DryRun: dryRun})
+		if err != nil || res.OK || res.Action != ActionRefuse || res.Verdict == nil || res.Verdict.Status != "missing" {
+			t.Fatalf("dry_run=%v: land = %+v (verdict %+v), %v; want refusal of a branch widening its own gate_only", dryRun, res, res.Verdict, err)
+		}
+		fx.assertNothingLeftBehind()
+	}
+	if fx.forge.merged {
+		t.Fatal("a branch that widened its own gate_only was merged on an old verdict")
+	}
+
+	pushFollowUp(map[string]string{"notes.md": "evidence\n"})
+	res, err := fx.run(ctx, fx.coordGit, basePolicy, Options{})
+	if err != nil || !res.OK || !res.Merged || res.Verdict == nil || !res.Verdict.OK || res.Verdict.Record.PatchID == res.Verdict.PatchID {
+		t.Fatalf("land = %+v (verdict %+v), %v; want a merge on the verdict kept through a gate-only commit", res, res.Verdict, err)
+	}
+	fx.assertNothingLeftBehind()
 }
