@@ -228,7 +228,7 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (res
 		if remote == "" {
 			remote = cfg.Attest.Remote
 		}
-		if err := g.PushRefs(ctx, remote, res.Attestations, map[string]string{config.EnvPrePushActive: "1"}); err != nil {
+		if err := g.PushRefs(ctx, remote, res.Attestations); err != nil {
 			return res, err
 		}
 		res.Pushed = true

@@ -522,42 +522,46 @@ func TestPrePushEmptyDiffSatisfiesRequiredCache(t *testing.T) {
 	}
 }
 
-func TestPrePushGuardSkipsNestedInvocation(t *testing.T) {
+func TestAttestationPushSkipsPrePushHook(t *testing.T) {
 	ctx := context.Background()
-	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	pr := initPushRepo(t, requireCachedTOML)
 	cfg, err := config.Load(pr.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	head := pr.commit(t, "app/main.txt", "v2\n", "feat: app change")
-	t.Setenv(config.EnvPrePushActive, "1")
-
+	if vres, verr := verify.Run(ctx, pr.git, cfg, verify.Options{StepNames: []string{"verify"}, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}); verr != nil || !vres.OK {
+		t.Fatalf("seed verify failed: %+v err=%v", vres, verr)
+	}
+	// A stand-in for a repository hook: quai's own ref push must not run it.
+	logPath := filepath.Join(t.TempDir(), "hook-runs.log")
+	hookPath := filepath.Join(pr.dir, ".git", "hooks", "pre-push")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho run >> "+logPath+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No origin remote is configured, so the sync fails after the push attempt; the
+	// assertion is that git never invoked the hook for it.
 	var out, errOut bytes.Buffer
-	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: false, Stdout: &out, Stderr: &errOut})
-	if err != nil || !res.OK {
-		t.Fatalf("a nested invocation without refs must return at once: res=%+v err=%v", res, err)
+	if _, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: true, Stdout: &out, Stderr: &errOut}); err != nil {
+		t.Fatalf("RunPrePush: %v", err)
 	}
-	if res.Skipped != "nested attestation push" || len(res.Steps) != 0 || len(res.RequireCached) != 0 {
-		t.Fatalf("nested invocation must do nothing, got %+v", res)
+	if _, err := os.Stat(logPath); err == nil {
+		t.Fatalf("quai's attestation push ran the pre-push hook")
 	}
+}
 
-	// An attestation-only ref list is the other shape the guard covers.
-	att, err := ParsePushRefs(strings.NewReader("refs/quai/records/x " + head + " refs/quai/records/x " + zeroSHA + "\n"))
+func TestReadPushRefsFromDevNull(t *testing.T) {
+	f, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err = RunPrePush(ctx, pr.git, cfg, Options{Refs: att, RefsProvided: true, Stdout: &out, Stderr: &errOut})
-	if err != nil || !res.OK || res.Skipped != "nested attestation push" {
-		t.Fatalf("an attestation-only nested push must return at once: res=%+v err=%v", res, err)
-	}
-
-	// A branch push must never turn the guard into a silent bypass.
-	res, err = RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
-	if err != nil {
-		t.Fatalf("RunPrePush: %v", err)
-	}
-	if res.OK || res.Skipped == "nested attestation push" || len(res.RequireCached) != 1 {
-		t.Fatalf("the guard must not skip a branch push, got %+v", res)
+	defer f.Close()
+	refs, provided, err := ReadPushRefs(f)
+	if err != nil || !provided || len(refs) != 0 {
+		t.Fatalf("devnull: refs=%v provided=%v err=%v, want provided with no refs", refs, provided, err)
 	}
 }
 
@@ -578,7 +582,7 @@ func TestPrePushEmptyStdinFallsBackToHeadWithWarning(t *testing.T) {
 	if res.OK {
 		t.Fatalf("empty stdin must not fail open under refuse: %+v", res)
 	}
-	for _, want := range []string{"stdin carried no refs", "refs/heads/feat", "quai hooks install", "run quai verify first"} {
+	for _, want := range []string{"stdin carried no refs", "refs/heads/feat", "quai hooks install", "pushed ref is unknown"} {
 		if !strings.Contains(res.Warning, want) || !strings.Contains(errOut.String(), want) {
 			t.Fatalf("warning %q / stderr %q missing %q", res.Warning, errOut.String(), want)
 		}
@@ -591,15 +595,18 @@ func TestPrePushEmptyStdinFallsBackToHeadWithWarning(t *testing.T) {
 	out.Reset()
 	errOut.Reset()
 	res, err = RunPrePush(ctx, pr.git, cfg, Options{Refs: nil, RefsProvided: true, Stdout: &out, Stderr: &errOut})
-	if err != nil || !res.OK {
-		t.Fatalf("verified HEAD must pass: res=%+v err=%v", res, err)
+	if err != nil {
+		t.Fatalf("RunPrePush: %v", err)
 	}
-	if !strings.Contains(res.Warning, "stdin carried no refs") {
-		t.Fatalf("a passing push must still report the dropped stdin, got %q", res.Warning)
+	if res.OK || !strings.Contains(res.Warning, "pushed ref is unknown") {
+		t.Fatalf("refuse must block when the pushed ref is unknown even if HEAD is cached: %+v", res)
+	}
+	if !strings.Contains(res.Warning, "quai hooks install") {
+		t.Fatalf("the refusal must name the upgrade, got %q", res.Warning)
 	}
 }
 
-func TestAttestationPushSetsNestedGuard(t *testing.T) {
+func TestAttestationPushSkipsHookAndPushes(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 	origin := filepath.Join(tmp, "origin.git")
@@ -647,14 +654,12 @@ remote = "origin"
 		t.Fatalf("seed signed verify failed: %+v err=%v", vres, verr)
 	}
 
-	// An old managed hook drops stdin; record which guard the nested push sees.
-	logPath := filepath.Join(tmp, "guard.log")
+	logPath := filepath.Join(tmp, "hook-runs.log")
 	hookPath := filepath.Join(pr.dir, ".git", "hooks", "pre-push")
 	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\nprintf '%s\\n' \"${QUAI_PREPUSH_ACTIVE:-unset}\" >> " + logPath + "\nexit 0\n"
-	if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho run >> "+logPath+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -663,12 +668,11 @@ remote = "origin"
 	if err != nil || !res.OK || len(res.AttestationsPushed) != 1 {
 		t.Fatalf("expected one pushed attestation: res=%+v err=%v", res, err)
 	}
-	raw, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read guard log: %v", err)
+	if _, err := os.Stat(logPath); err == nil {
+		t.Fatalf("the attestation push ran the pre-push hook")
 	}
-	if got := strings.TrimSpace(string(raw)); got != "1" {
-		t.Fatalf("nested push guard = %q, want 1", got)
+	if refs, err := pr.git.ListRemoteRefs(ctx, "origin", []string{attestationRefPrefix + "*"}); err != nil || len(refs) != 1 {
+		t.Fatalf("remote refs = %v, want one attestation (err=%v)", refs, err)
 	}
 }
 
@@ -690,5 +694,52 @@ func TestPrePushEmptyStdinWarnsUnderWarnPolicy(t *testing.T) {
 		if !strings.Contains(res.Warning, want) {
 			t.Fatalf("warning %q missing %q", res.Warning, want)
 		}
+	}
+}
+
+func TestPrePushIgnoresStaleGuardEnv(t *testing.T) {
+	ctx := context.Background()
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := pr.commit(t, "app/main.txt", "v2\n", "feat: app change")
+	t.Setenv("QUAI_PREPUSH_ACTIVE", "1")
+
+	var out, errOut bytes.Buffer
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	if err != nil {
+		t.Fatalf("RunPrePush: %v", err)
+	}
+	if res.OK || len(res.RequireCached) != 1 || res.RequireCached[0].Status != "missing" {
+		t.Fatalf("a stale guard variable must not skip the check: %+v", res)
+	}
+}
+
+func TestPrePushUnknownRefRefusesWithCachedHead(t *testing.T) {
+	ctx := context.Background()
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr.commit(t, "app/main.txt", "v2\n", "feat: app change")
+	var seed bytes.Buffer
+	if vres, verr := verify.Run(ctx, pr.git, cfg, verify.Options{StepNames: []string{"verify"}, Stdout: &seed, Stderr: &seed}); verr != nil || !vres.OK {
+		t.Fatalf("seed verify failed: %+v err=%v", vres, verr)
+	}
+
+	// HEAD is cached, but the pushed ref is unknown, so refuse cannot know it is safe.
+	var out, errOut bytes.Buffer
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: []PushRef{}, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	if err != nil {
+		t.Fatalf("RunPrePush: %v", err)
+	}
+	if res.OK || !strings.Contains(res.Warning, "pushed ref is unknown") {
+		t.Fatalf("a cached HEAD must not cover an unknown pushed ref: %+v", res)
+	}
+	if res.RequireCached[0].Status != "cached" {
+		t.Fatalf("expected the HEAD check to be reported, got %+v", res.RequireCached)
 	}
 }

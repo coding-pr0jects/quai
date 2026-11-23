@@ -69,17 +69,11 @@ func ParsePushRefs(r io.Reader) ([]PushRef, error) {
 	return refs, nil
 }
 
-// ReadPushRefs reads git's pre-push stdin protocol, leaving a terminal untouched so a manual
-// `quai hooks pre-push` never blocks. provided is false when stdin is a terminal.
+// ReadPushRefs reads git's pre-push stdin protocol. Only a real terminal means a manual
+// invocation, so /dev/null (an old managed hook) and empty pipes are read as no refs.
 func ReadPushRefs(stdin io.Reader) (refs []PushRef, provided bool, err error) {
-	if f, ok := stdin.(*os.File); ok {
-		info, statErr := f.Stat()
-		if statErr != nil {
-			return nil, false, fmt.Errorf("inspect stdin: %w", statErr)
-		}
-		if info.Mode()&os.ModeCharDevice != 0 {
-			return nil, false, nil
-		}
+	if f, ok := stdin.(*os.File); ok && isTerminal(f.Fd()) {
+		return nil, false, nil
 	}
 	refs, err = ParsePushRefs(stdin)
 	return refs, true, err
@@ -295,19 +289,22 @@ func pushMissingAttestations(ctx context.Context, g repo.Git, remote string, ste
 	if len(missing) == 0 {
 		return nil, ""
 	}
-	if err := g.PushRefs(ctx, remote, missing, map[string]string{config.EnvPrePushActive: "1"}); err != nil {
+	if err := g.PushRefs(ctx, remote, missing); err != nil {
 		return nil, err.Error()
 	}
 	return missing, ""
 }
 
-func decideRequirement(missing []CachedStep, policy config.PrePushPolicy, allowUnverified bool) requirementDecision {
-	if len(missing) == 0 {
-		return requirementDecision{}
-	}
+func decideRequirement(missing []CachedStep, policy config.PrePushPolicy, allowUnverified, unknownRef bool) requirementDecision {
 	details := make([]string, 0, len(missing))
 	for _, m := range missing {
 		details = append(details, fmt.Sprintf("no cached receipt for step %q at %s on %s", m.Step, short(m.Commit), m.Ref))
+	}
+	if unknownRef {
+		details = append([]string{"the pushed ref is unknown because stdin carried no refs"}, details...)
+	}
+	if len(details) == 0 {
+		return requirementDecision{}
 	}
 	detail := strings.Join(details, "; ")
 	if allowUnverified && policy.OnMissing == config.OnMissingRefuse {
@@ -317,6 +314,12 @@ func decideRequirement(missing []CachedStep, policy config.PrePushPolicy, allowU
 		}
 	}
 	if policy.OnMissing == config.OnMissingRefuse {
+		if unknownRef {
+			return requirementDecision{
+				blocked: true,
+				message: fmt.Sprintf("%s; run quai hooks install so the hook receives the pushed refs, then push again", detail),
+			}
+		}
 		return requirementDecision{
 			blocked: true,
 			message: fmt.Sprintf("%s; run quai verify first, then push again (or set [hooks.pre_push].on_missing = \"warn\")", detail),

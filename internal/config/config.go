@@ -18,10 +18,6 @@ const FileName = ".quai.toml"
 // MinAttestMaxAge is the shortest accepted [attest].max_age or --max-age.
 const MinAttestMaxAge = time.Minute
 
-// EnvPrePushActive marks the git child of an attestation push so the pre-push hook
-// returns at once instead of nesting another hook run.
-const EnvPrePushActive = "QUAI_PREPUSH_ACTIVE"
-
 type Tier string
 
 const (

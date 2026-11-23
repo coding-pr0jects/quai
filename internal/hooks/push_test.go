@@ -108,6 +108,7 @@ func TestDecideRequirement(t *testing.T) {
 		missing         []CachedStep
 		onMissing       config.OnMissing
 		allowUnverified bool
+		unknownRef      bool
 		blocked         bool
 		bypassed        bool
 		wantContains    []string
@@ -143,10 +144,31 @@ func TestDecideRequirement(t *testing.T) {
 			allowUnverified: true,
 			wantContains:    []string{"run quai verify first"},
 		},
+		{
+			name:         "unknown ref is satisfied under warn",
+			onMissing:    config.OnMissingWarn,
+			unknownRef:   true,
+			wantContains: []string{"pushed ref is unknown", "run quai verify first"},
+		},
+		{
+			name:         "unknown ref refuses under refuse even when HEAD is cached",
+			onMissing:    config.OnMissingRefuse,
+			unknownRef:   true,
+			blocked:      true,
+			wantContains: []string{"pushed ref is unknown", "quai hooks install"},
+		},
+		{
+			name:            "escape hatch covers an unknown ref",
+			onMissing:       config.OnMissingRefuse,
+			allowUnverified: true,
+			unknownRef:      true,
+			bypassed:        true,
+			wantContains:    []string{"pushed ref is unknown", EnvAllowUnverifiedPush},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := decideRequirement(tc.missing, config.PrePushPolicy{OnMissing: tc.onMissing}, tc.allowUnverified)
+			got := decideRequirement(tc.missing, config.PrePushPolicy{OnMissing: tc.onMissing}, tc.allowUnverified, tc.unknownRef)
 			if got.blocked != tc.blocked || got.bypassed != tc.bypassed {
 				t.Fatalf("decision = %+v, want blocked=%v bypassed=%v", got, tc.blocked, tc.bypassed)
 			}
@@ -155,9 +177,16 @@ func TestDecideRequirement(t *testing.T) {
 					t.Fatalf("message %q does not contain %q", got.message, want)
 				}
 			}
-			if len(tc.missing) == 0 && got.message != "" {
+			if len(tc.missing) == 0 && !tc.unknownRef && got.message != "" {
 				t.Fatalf("satisfied requirement produced message %q", got.message)
 			}
 		})
+	}
+}
+
+func TestReadPushRefsEmptyPipeIsProvided(t *testing.T) {
+	refs, provided, err := ReadPushRefs(strings.NewReader(""))
+	if err != nil || !provided || len(refs) != 0 {
+		t.Fatalf("empty pipe: refs=%v provided=%v err=%v, want provided with no refs", refs, provided, err)
 	}
 }

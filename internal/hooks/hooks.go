@@ -122,12 +122,6 @@ type Result struct {
 func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Result, error) {
 	res := Result{Result: verify.Result{OK: true, Clean: true}}
 
-	// The guard only ever applies to the attestation pushes quai starts itself: on an old hook
-	// that drops stdin there are no refs, and on the current hook the refs are attestation refs.
-	if os.Getenv(config.EnvPrePushActive) == "1" && (!opts.RefsProvided || IsAttestationPush(opts.Refs)) {
-		res.Skipped = "nested attestation push"
-		return res, nil
-	}
 	if opts.RefsProvided && IsAttestationPush(opts.Refs) {
 		res.Skipped = "attestation push"
 		if !opts.JSON && opts.Stdout != nil {
@@ -137,7 +131,7 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 	}
 
 	var warnings []string
-	emptyStdin := opts.RefsProvided && len(opts.Refs) == 0
+	unknownRef := opts.RefsProvided && len(opts.Refs) == 0
 	targets := pushTargets(ctx, g, opts.Refs, opts.RefsProvided)
 
 	steps := cfg.PrePushSteps()
@@ -165,12 +159,12 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 	if len(cfg.Hooks.PrePush.RequireCached) == 0 {
 		return res, nil
 	}
-	if emptyStdin {
+	if unknownRef {
 		checked := "HEAD"
 		if len(targets) > 0 {
 			checked = targets[0].Ref
 		}
-		warnings = append(warnings, fmt.Sprintf("stdin carried no refs, so %s was checked instead; run quai hooks install to pass the pushed refs", checked))
+		warnings = append(warnings, fmt.Sprintf("stdin carried no refs, so the pushed ref is unknown and %s was checked instead; run quai hooks install to pass the pushed refs", checked))
 	}
 	report, err := CheckCached(ctx, g, cfg, targets, "")
 	if err != nil {
@@ -183,7 +177,7 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 		warnings = append(warnings, "attestation push failed: "+report.PushError)
 	}
 
-	decision := decideRequirement(report.Missing, cfg.Hooks.PrePush, os.Getenv(EnvAllowUnverifiedPush) == "1")
+	decision := decideRequirement(report.Missing, cfg.Hooks.PrePush, os.Getenv(EnvAllowUnverifiedPush) == "1", unknownRef)
 	res.Bypassed = decision.bypassed
 	if decision.message != "" {
 		warnings = append(warnings, decision.message)

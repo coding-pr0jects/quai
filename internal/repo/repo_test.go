@@ -207,3 +207,11 @@ func TestBranchAndSymrefArgumentsCannotInjectOptions(t *testing.T) {
 		t.Fatalf("symbolic-ref HEAD: %v", err)
 	}
 }
+
+func TestPushRefsRejectsNonQuaiRefs(t *testing.T) {
+	dir, g := initTestRepo(t)
+	err := g.PushRefs(context.Background(), "origin", []string{"refs/heads/main"})
+	if err == nil {
+		t.Fatalf("expected PushRefs to reject refs/heads/main in %s", dir)
+	}
+}
