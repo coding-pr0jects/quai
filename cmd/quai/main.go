@@ -33,7 +33,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/verify"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 const rootUsage = `quai: local verification, signed attestations, receipts, risk tiering, and serialized PR landing
 
