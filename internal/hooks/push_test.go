@@ -151,10 +151,10 @@ func TestDecideRequirement(t *testing.T) {
 			wantContains:    []string{"run quai verify first"},
 		},
 		{
-			name:         "unknown ref is satisfied under warn",
+			name:         "unknown ref warns under warn",
 			onMissing:    config.OnMissingWarn,
 			unknownRef:   true,
-			wantContains: []string{"pushed ref is unknown", "run quai verify first"},
+			wantContains: []string{"pushed ref is unknown", "checked HEAD for information only"},
 		},
 		{
 			name:         "unknown ref refuses under refuse even when HEAD is cached",

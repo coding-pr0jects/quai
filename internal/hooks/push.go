@@ -20,9 +20,9 @@ const (
 	// EnvAllowUnverifiedPush downgrades [hooks.pre_push].on_missing = "refuse" to a warning.
 	EnvAllowUnverifiedPush = "QUAI_ALLOW_UNVERIFIED_PUSH"
 
-	// EnvPrePushActive was set by earlier builds on their own pushes; it is stripped from
-	// hook step children so a stale value never reaches a step command.
-	EnvPrePushActive = "QUAI_PREPUSH_ACTIVE"
+	// envPrePushActiveLegacy is the guard earlier builds used; nothing reads it now, and the
+	// hook scrubs it from step children so a stale value never reaches a step command.
+	envPrePushActiveLegacy = "QUAI_PREPUSH_ACTIVE"
 
 	branchRefPrefix      = "refs/heads/"
 	quaiRefPrefix        = "refs/quai/"
@@ -152,7 +152,7 @@ type requirementDecision struct {
 // CheckCached verifies that every require_cached step has a fresh local receipt for each pushed
 // branch commit and pushes attestation refs whose local record the remote lacks. It reads
 // receipts and trees only: no step runs and no slot is acquired.
-func CheckCached(ctx context.Context, g repo.Git, cfg *config.Config, targets []BranchTarget, remote string) (CachedReport, error) {
+func CheckCached(ctx context.Context, g repo.Git, cfg *config.Config, targets []BranchTarget, remote string, syncAttestations bool) (CachedReport, error) {
 	report := CachedReport{Steps: []CachedStep{}}
 	steps := cfg.RequireCachedSteps()
 	if len(steps) == 0 || len(targets) == 0 {
@@ -202,7 +202,9 @@ func CheckCached(ctx context.Context, g repo.Git, cfg *config.Config, targets []
 		}
 	}
 
-	report.Pushed, report.PushError = pushMissingAttestations(ctx, g, remote, report.Steps)
+	if syncAttestations {
+		report.Pushed, report.PushError = pushMissingAttestations(ctx, g, remote, report.Steps)
+	}
 	if len(report.Pushed) > 0 {
 		pushed := make(map[string]struct{}, len(report.Pushed))
 		for _, ref := range report.Pushed {
@@ -306,7 +308,7 @@ func decideRequirement(missing []CachedStep, policy config.PrePushPolicy, allowU
 		details = append(details, fmt.Sprintf("no cached receipt for step %q at %s on %s", m.Step, short(m.Commit), m.Ref))
 	}
 	if unknownRef {
-		details = append([]string{"the pushed ref is unknown because stdin carried no refs"}, details...)
+		details = append([]string{"the pushed ref is unknown"}, details...)
 	}
 	if len(details) == 0 {
 		return requirementDecision{}
@@ -329,6 +331,9 @@ func decideRequirement(missing []CachedStep, policy config.PrePushPolicy, allowU
 			blocked: true,
 			message: fmt.Sprintf("%s; run quai verify first, then push again (or set [hooks.pre_push].on_missing = \"warn\")", detail),
 		}
+	}
+	if unknownRef {
+		return requirementDecision{message: detail + "; checked HEAD for information only"}
 	}
 	return requirementDecision{message: detail + "; run quai verify first"}
 }

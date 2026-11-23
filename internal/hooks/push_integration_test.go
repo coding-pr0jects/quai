@@ -410,7 +410,7 @@ func TestRequireCachedCheckStaysUnder100ms(t *testing.T) {
 	durations := make([]time.Duration, 5)
 	for i := range durations {
 		started := time.Now()
-		report, err := CheckCached(ctx, pr.git, cfg, targets, "")
+		report, err := CheckCached(ctx, pr.git, cfg, targets, "", true)
 		durations[i] = time.Since(started)
 		if err != nil || len(report.Missing) != 0 || len(report.Steps) != 1 || report.Steps[0].Status != "cached" {
 			t.Fatalf("check %d: report=%+v err=%v", i, report, err)
@@ -522,37 +522,6 @@ func TestPrePushEmptyDiffSatisfiesRequiredCache(t *testing.T) {
 	}
 }
 
-func TestAttestationPushSkipsPrePushHook(t *testing.T) {
-	ctx := context.Background()
-	pr := initPushRepo(t, requireCachedTOML)
-	cfg, err := config.Load(pr.dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	head := pr.commit(t, "app/main.txt", "v2\n", "feat: app change")
-	if vres, verr := verify.Run(ctx, pr.git, cfg, verify.Options{StepNames: []string{"verify"}, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}); verr != nil || !vres.OK {
-		t.Fatalf("seed verify failed: %+v err=%v", vres, verr)
-	}
-	// A stand-in for a repository hook: quai's own ref push must not run it.
-	logPath := filepath.Join(t.TempDir(), "hook-runs.log")
-	hookPath := filepath.Join(pr.dir, ".git", "hooks", "pre-push")
-	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho run >> "+logPath+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// No origin remote is configured, so the sync fails after the push attempt; the
-	// assertion is that git never invoked the hook for it.
-	var out, errOut bytes.Buffer
-	if _, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: true, Stdout: &out, Stderr: &errOut}); err != nil {
-		t.Fatalf("RunPrePush: %v", err)
-	}
-	if _, err := os.Stat(logPath); err == nil {
-		t.Fatalf("quai's attestation push ran the pre-push hook")
-	}
-}
-
 func TestReadPushRefsFromDevNull(t *testing.T) {
 	f, err := os.Open(os.DevNull)
 	if err != nil {
@@ -606,7 +575,7 @@ func TestPrePushEmptyStdinFallsBackToHeadWithWarning(t *testing.T) {
 	}
 }
 
-func TestAttestationPushSkipsHookAndPushes(t *testing.T) {
+func TestAttestationPushRunsHookAndPushes(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 	origin := filepath.Join(tmp, "origin.git")
@@ -668,8 +637,12 @@ remote = "origin"
 	if err != nil || !res.OK || len(res.AttestationsPushed) != 1 {
 		t.Fatalf("expected one pushed attestation: res=%+v err=%v", res, err)
 	}
-	if _, err := os.Stat(logPath); err == nil {
-		t.Fatalf("the attestation push ran the pre-push hook")
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("the attestation push bypassed the pre-push hook: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != "run" {
+		t.Fatalf("hook log = %q, want one run", got)
 	}
 	if refs, err := pr.git.ListRemoteRefs(ctx, "origin", []string{attestationRefPrefix + "*"}); err != nil || len(refs) != 1 {
 		t.Fatalf("remote refs = %v, want one attestation (err=%v)", refs, err)
@@ -690,7 +663,7 @@ func TestPrePushEmptyStdinWarnsUnderWarnPolicy(t *testing.T) {
 	if err != nil || !res.OK {
 		t.Fatalf("warn must allow the push: res=%+v err=%v", res, err)
 	}
-	for _, want := range []string{"stdin carried no refs", "quai hooks install", "run quai verify first"} {
+	for _, want := range []string{"stdin carried no refs", "quai hooks install", "checked HEAD for information only"} {
 		if !strings.Contains(res.Warning, want) {
 			t.Fatalf("warning %q missing %q", res.Warning, want)
 		}
@@ -798,7 +771,7 @@ on_missing = "warn"
 	}
 	head := pr.commit(t, "app/main.txt", "v2\n", "feat: app change")
 	t.Setenv(EnvAllowUnverifiedPush, "1")
-	t.Setenv(EnvPrePushActive, "1")
+	t.Setenv(envPrePushActiveLegacy, "1")
 
 	var out, errOut bytes.Buffer
 	if _, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: true, Stdout: &out, Stderr: &errOut}); err != nil {
@@ -810,5 +783,132 @@ on_missing = "warn"
 	}
 	if got := strings.TrimSpace(string(raw)); got != "unset:unset" {
 		t.Fatalf("step saw hook env %q, want unset:unset", got)
+	}
+}
+
+func TestPrePushNoRefsNeverPushesAttestations(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	if out, err := exec.Command("git", "init", "--bare", "-q", "-b", "main", origin).CombinedOutput(); err != nil {
+		t.Fatalf("init origin: %v\n%s", err, out)
+	}
+	keyPath := filepath.Join(tmp, "signer")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyPath).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v\n%s", err, out)
+	}
+	pr := initPushRepo(t, `
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+hook = "pre-push"
+
+[[steps]]
+name = "verify"
+run = "true"
+inputs = ["app/**"]
+
+[hooks.pre_push]
+require_cached = ["verify"]
+on_missing = "refuse"
+
+[attest]
+signing_key = "`+keyPath+`"
+remote = "origin"
+`)
+	gitCmd := exec.Command("git", "remote", "add", "origin", origin)
+	gitCmd.Dir = pr.dir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("add remote: %v\n%s", err, out)
+	}
+	cfg, err := config.Load(pr.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr.commit(t, "app/main.txt", "v2\n", "feat: app change")
+	var seed bytes.Buffer
+	if vres, verr := verify.Run(ctx, pr.git, cfg, verify.Options{StepNames: []string{"verify"}, Sign: true, SigningKey: keyPath, Stdout: &seed, Stderr: &seed}); verr != nil || !vres.OK {
+		t.Fatalf("seed signed verify failed: %+v err=%v", vres, verr)
+	}
+
+	var out, errOut bytes.Buffer
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: nil, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	if err != nil {
+		t.Fatalf("RunPrePush: %v", err)
+	}
+	if res.OK || len(res.AttestationsPushed) != 0 {
+		t.Fatalf("no-ref invocation must refuse and never push: %+v", res)
+	}
+	if !strings.Contains(res.Warning, "quai hooks install") || !strings.Contains(res.Warning, "checked for information only") {
+		t.Fatalf("expected the upgrade notice, got %q", res.Warning)
+	}
+	if refs, err := pr.git.ListRemoteRefs(ctx, "origin", []string{attestationRefPrefix + "*"}); err != nil || len(refs) != 0 {
+		t.Fatalf("the hook pushed an attestation without refs: %v (err=%v)", refs, err)
+	}
+
+	warnCfg, err := config.Parse([]byte(`
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+hook = "pre-push"
+
+[[steps]]
+name = "verify"
+run = "true"
+inputs = ["app/**"]
+
+[hooks.pre_push]
+require_cached = ["verify"]
+on_missing = "warn"
+
+[attest]
+signing_key = "` + keyPath + `"
+remote = "origin"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	res, err = RunPrePush(ctx, pr.git, warnCfg, Options{Refs: nil, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	if err != nil || !res.OK || len(res.AttestationsPushed) != 0 {
+		t.Fatalf("warn must allow without pushing: res=%+v err=%v", res, err)
+	}
+	if refs, err := pr.git.ListRemoteRefs(ctx, "origin", []string{attestationRefPrefix + "*"}); err != nil || len(refs) != 0 {
+		t.Fatalf("warn pushed an attestation without refs: %v (err=%v)", refs, err)
+	}
+}
+
+func TestPrePushMixedQuaiAndBranchRefsGetsFullCheck(t *testing.T) {
+	ctx := context.Background()
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := pr.commit(t, "app/main.txt", "v2\n", "feat: app change")
+	refs, err := ParsePushRefs(strings.NewReader(
+		"refs/quai/records/x " + head + " refs/quai/records/x " + zeroSHA + "\n" +
+			"refs/heads/feat " + head + " refs/heads/feat " + zeroSHA + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: refs, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	if err != nil {
+		t.Fatalf("RunPrePush: %v", err)
+	}
+	if res.Skipped != "" || res.OK {
+		t.Fatalf("a mixed push must get the full check: %+v", res)
+	}
+	if len(res.RequireCached) != 1 || res.RequireCached[0].Ref != "refs/heads/feat" || res.RequireCached[0].Status != "missing" {
+		t.Fatalf("require_cached = %+v, want the branch checked", res.RequireCached)
 	}
 }

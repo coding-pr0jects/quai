@@ -526,20 +526,19 @@ func (g *ExecGit) ReadRefBlob(ctx context.Context, refName, fileName string) ([]
 	return out, true, nil
 }
 
-// PushRefs pushes explicit quai refs to remote without running the pre-push hook, so the
-// hook's own attestation sync can never nest. Only refs/quai/* pass, so this can never
-// skip a hook for a branch.
+// PushRefs pushes explicit quai refs to remote. Only refs/quai/* pass, so a quai push can
+// never carry a branch that a pre-push hook would have to gate.
 func (g *ExecGit) PushRefs(ctx context.Context, remote string, refs []string) error {
 	if len(refs) == 0 {
 		return nil
 	}
 	for _, r := range refs {
 		if !strings.HasPrefix(r, "refs/quai/") {
-			return fmt.Errorf("refusing to push non-quai ref %q with hooks disabled", r)
+			return fmt.Errorf("refusing to push non-quai ref %q", r)
 		}
 	}
 	args := make([]string, 0, len(refs)+4)
-	args = append(args, "push", "--no-verify", "--end-of-options", remote)
+	args = append(args, "push", "--end-of-options", remote)
 	for _, r := range refs {
 		args = append(args, r+":"+r)
 	}

@@ -131,7 +131,9 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 	}
 
 	var warnings []string
-	unknownRef := opts.RefsProvided && len(opts.Refs) == 0
+	// Without a ref list the hook cannot know what is being pushed, so HEAD is shown for
+	// information only and no attestation is pushed from here (that push is what used to nest).
+	noRefs := !opts.RefsProvided || len(opts.Refs) == 0
 	targets := pushTargets(ctx, g, opts.Refs, opts.RefsProvided)
 
 	steps := cfg.PrePushSteps()
@@ -146,7 +148,7 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 			Sign:           doSign,
 			BestEffortSign: bestEffort,
 			Push:           doPush,
-			UnsetEnv:       []string{EnvAllowUnverifiedPush, EnvPrePushActive},
+			UnsetEnv:       []string{EnvAllowUnverifiedPush, envPrePushActiveLegacy},
 			JSON:           opts.JSON,
 			Stdout:         opts.Stdout,
 			Stderr:         opts.Stderr,
@@ -160,14 +162,18 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 	if len(cfg.Hooks.PrePush.RequireCached) == 0 {
 		return res, nil
 	}
-	if unknownRef {
+	if noRefs {
 		checked := "HEAD"
 		if len(targets) > 0 {
 			checked = targets[0].Ref
 		}
-		warnings = append(warnings, fmt.Sprintf("stdin carried no refs, so the pushed ref is unknown and %s was checked instead; run quai hooks install to pass the pushed refs", checked))
+		if opts.RefsProvided {
+			warnings = append(warnings, fmt.Sprintf("stdin carried no refs, so the pushed ref is unknown and %s was checked for information only; run quai hooks install to pass the pushed refs", checked))
+		} else {
+			warnings = append(warnings, fmt.Sprintf("no refs given, so the pushed ref is unknown and %s was checked for information only", checked))
+		}
 	}
-	report, err := CheckCached(ctx, g, cfg, targets, "")
+	report, err := CheckCached(ctx, g, cfg, targets, "", !noRefs)
 	if err != nil {
 		return res, err
 	}
@@ -178,7 +184,7 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 		warnings = append(warnings, "attestation push failed: "+report.PushError)
 	}
 
-	decision := decideRequirement(report.Missing, cfg.Hooks.PrePush, os.Getenv(EnvAllowUnverifiedPush) == "1", unknownRef)
+	decision := decideRequirement(report.Missing, cfg.Hooks.PrePush, os.Getenv(EnvAllowUnverifiedPush) == "1", noRefs)
 	res.Bypassed = decision.bypassed
 	if decision.message != "" {
 		warnings = append(warnings, decision.message)
