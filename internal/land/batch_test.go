@@ -15,10 +15,102 @@ import (
 	"time"
 
 	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/exitkind"
 	"github.com/coding-pr0jects/quai/internal/forge"
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
 )
+
+func TestBatchExitKind(t *testing.T) {
+	cases := []struct {
+		name    string
+		entries []BatchEntry
+		err     error
+		want    exitkind.Kind
+	}{
+		{"no entries is pass", nil, nil, exitkind.Pass},
+		{"all landed is pass", []BatchEntry{{Result: Result{ExitKind: exitkind.Pass}, Status: BatchLanded}}, nil, exitkind.Pass},
+		{"landed status fills pass", []BatchEntry{{Status: BatchLanded}}, nil, exitkind.Pass},
+		{"skipped is refused", []BatchEntry{{Status: BatchSkipped}}, nil, exitkind.Refused},
+		{"refused beats pass", []BatchEntry{
+			{Result: Result{ExitKind: exitkind.Pass}, Status: BatchLanded},
+			{Result: Result{ExitKind: exitkind.Refused}, Status: BatchRefused},
+		}, nil, exitkind.Refused},
+		{"step failed beats refused", []BatchEntry{
+			{Result: Result{ExitKind: exitkind.Refused}, Status: BatchRefused},
+			{Result: Result{ExitKind: exitkind.StepFailed}, Status: BatchFailed},
+		}, nil, exitkind.StepFailed},
+		{"lock timeout beats step failed", []BatchEntry{
+			{Result: Result{ExitKind: exitkind.StepFailed}, Status: BatchFailed},
+			{Result: Result{ExitKind: exitkind.LockTimeout}, Status: BatchFailed},
+		}, nil, exitkind.LockTimeout},
+		{"run error is infra", []BatchEntry{
+			{Result: Result{ExitKind: exitkind.LockTimeout}, Status: BatchFailed},
+		}, errors.New("interrupted"), exitkind.InfraError},
+		{"lock timeout error is lock_timeout", nil, &lock.TimeoutError{Wait: time.Second}, exitkind.LockTimeout},
+		{"lock timeout beats member kinds", []BatchEntry{
+			{Result: Result{ExitKind: exitkind.StepFailed}, Status: BatchFailed},
+		}, &lock.TimeoutError{Wait: time.Second}, exitkind.LockTimeout},
+		{"conflict status fills step_failed", []BatchEntry{{Status: BatchConflict}}, nil, exitkind.StepFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := batchExitKind(tc.entries, tc.err); got != tc.want {
+				t.Fatalf("batchExitKind(%+v, %v) = %q, want %q", tc.entries, tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunBatchLandLockTimeoutReportsLockTimeoutAndEmptyPRs(t *testing.T) {
+	ctx := context.Background()
+	fx := newBatchFixture(t, []batchPR{
+		{number: 301, branch: "feat/lock-wait", file: "lock-wait.txt", body: "x\n"},
+	}, nil)
+	writeFile(t, fx.mainDir, config.FileName, "version = 1\n[land]\nlock_wait = \"100ms\"\n")
+	gitRun(t, fx.mainDir, "commit", "-qam", "short lock wait")
+	gitRun(t, fx.mainDir, "push", "-q", "origin", "main")
+
+	g := repo.NewExecGit(fx.mainDir)
+	commonDir, err := g.CommonDir(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := lock.AcquireDir(ctx, filepath.Join(commonDir, "quai", "locks", "land.lock"),
+		lock.Owner{Command: "held by test"}, lock.Options{Wait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+
+	local, err := config.Parse([]byte("version = 1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	res, err := RunBatch(ctx, g, fx.forge, local, BatchOptions{
+		PRNumbers:       []int{301},
+		ContinueOnError: true,
+		Options:         Options{Stdout: &buf, Stderr: &buf, ChecksPoll: 10 * time.Millisecond},
+	})
+	var te *lock.TimeoutError
+	if !errors.As(err, &te) {
+		t.Fatalf("expected a land.lock timeout, got res=%+v err=%v", res, err)
+	}
+	if res.ExitKind != exitkind.LockTimeout {
+		t.Fatalf("exit_kind = %q, want lock_timeout", res.ExitKind)
+	}
+	if res.PRs == nil || len(res.PRs) != 0 {
+		t.Fatalf("aborted batch should report an empty, non-nil prs list, got %#v", res.PRs)
+	}
+	raw, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"prs":[]`) {
+		t.Fatalf("aborted batch JSON should carry prs: [], got %s", raw)
+	}
+}
 
 func TestPlanBatch(t *testing.T) {
 	cands := func(cs ...BatchCandidate) []BatchCandidate { return cs }

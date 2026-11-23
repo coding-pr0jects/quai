@@ -14,7 +14,9 @@ import (
 
 	"github.com/coding-pr0jects/quai/internal/attest"
 	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/exitkind"
 	"github.com/coding-pr0jects/quai/internal/lock"
+	"github.com/coding-pr0jects/quai/internal/receipt"
 	"github.com/coding-pr0jects/quai/internal/repo"
 )
 
@@ -61,7 +63,7 @@ inputs = ["**/*.go"]
 
 	var buf bytes.Buffer
 	r1, err := Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
-	if err != nil || !r1.OK || !r1.ReceiptWritten || r1.Steps[0].Status != "passed" {
+	if err != nil || !r1.OK || !r1.ReceiptWritten || r1.Steps[0].Status != "passed" || r1.ExitKind != exitkind.Pass {
 		t.Fatalf("first run unexpected: res=%+v err=%v", r1, err)
 	}
 	if r1.Steps[0].Pool != "" || r1.Steps[0].PoolAcquired != nil {
@@ -165,7 +167,7 @@ run = "echo dirty >> main.go"
 	}
 	var buf bytes.Buffer
 	rm, err := Run(ctx, g, cfgMut, Options{Stdout: &buf, Stderr: &buf})
-	if err != nil || rm.OK || rm.ReceiptWritten || rm.Steps[0].Status != "mutated" {
+	if err != nil || rm.OK || rm.ReceiptWritten || rm.Steps[0].Status != "mutated" || rm.ExitKind != exitkind.DirtyTree {
 		t.Fatalf("expected mutated refusal, got res=%+v err=%v", rm, err)
 	}
 
@@ -743,5 +745,128 @@ lock_wait = "200ms"
 	}
 	if e2e := res.Steps[0]; e2e.Pool != "heavy" || e2e.PoolAcquired == nil || *e2e.PoolAcquired {
 		t.Fatalf("expected e2e annotated as bypassing heavy, got %+v", e2e)
+	}
+}
+
+func TestVerifyInflightLockTimeoutKeepsOKTrue(t *testing.T) {
+	ctx := context.Background()
+	_, g := setupRepo(t)
+	cfg, err := config.Parse([]byte(`
+version = 1
+[[steps]]
+name = "fast"
+run = "true"
+[land]
+lock_wait = "100ms"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonDir, err := g.CommonDir(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := g.TreeSHA(ctx, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := g.MergeBase(ctx, "main", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp, err := receipt.Fingerprint(ctx, g, cfg.Steps[0], tree, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inflight := filepath.Join(commonDir, "quai", "locks", "inflight-fast-"+fp+".lock")
+	lease, err := lock.AcquireDir(ctx, inflight, lock.Owner{Command: "blocker"}, lock.Options{Wait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
+	var te *lock.TimeoutError
+	if !errors.As(err, &te) {
+		t.Fatalf("expected in-flight lock timeout, got res=%+v err=%v", res, err)
+	}
+	if !res.OK || len(res.Steps) != 0 || res.ExitKind != exitkind.LockTimeout {
+		t.Fatalf("expected ok:true with lock_timeout and no step entry, got %+v", res)
+	}
+}
+
+func TestVerifyClassifiesSlotLockTimeoutPerStep(t *testing.T) {
+	ctx := context.Background()
+	_, g := setupRepo(t)
+	cfg, err := config.Parse([]byte(`
+version = 1
+[slots]
+heavy = 1
+[[steps]]
+name = "queued"
+run = "true"
+pool = "heavy"
+slots = 1
+[land]
+lock_wait = "100ms"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commonDir, err := g.CommonDir(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := lock.AcquireSlots(ctx, filepath.Join(commonDir, "quai", "locks"), "heavy", 1, 1,
+		lock.Owner{Command: "blocker"}, lock.Options{Wait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
+	var te *lock.TimeoutError
+	if !errors.As(err, &te) {
+		t.Fatalf("expected slot lock timeout, got res=%+v err=%v", res, err)
+	}
+	if res.ExitKind != exitkind.LockTimeout || len(res.Steps) != 1 || res.Steps[0].ExitKind != exitkind.LockTimeout {
+		t.Fatalf("expected lock_timeout top-level and per step, got res=%+v", res)
+	}
+}
+
+func TestVerifyClassifiesStepExitKind(t *testing.T) {
+	ctx := context.Background()
+	_, g := setupRepo(t)
+
+	cases := []struct {
+		name string
+		run  string
+		want exitkind.Kind
+	}{
+		{"failed", "exit 3", exitkind.StepFailed},
+		{"timeout", "sleep 5", exitkind.StepTimeout},
+		{"sigkill", "kill -9 $$", exitkind.OOMKilled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "version = 1\n[[steps]]\nname = \"s\"\nrun = \"" + tc.run + "\"\n"
+			if tc.name == "timeout" {
+				raw += "timeout = \"100ms\"\n"
+			}
+			cfg, err := config.Parse([]byte(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var buf bytes.Buffer
+			res, err := Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
+			if res.OK || len(res.Steps) != 1 {
+				t.Fatalf("expected one failed step, got res=%+v err=%v", res, err)
+			}
+			if res.ExitKind != tc.want || res.Steps[0].ExitKind != tc.want {
+				t.Fatalf("exit kinds = (%q, %q), want %q (err=%v)", res.ExitKind, res.Steps[0].ExitKind, tc.want, err)
+			}
+		})
 	}
 }

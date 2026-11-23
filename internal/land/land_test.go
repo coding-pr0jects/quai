@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/exitkind"
 	"github.com/coding-pr0jects/quai/internal/forge"
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
@@ -176,9 +177,13 @@ type fakeForge struct {
 	checks    []forge.Check
 	mergedSHA string
 	merged    bool
+	viewErr   error
 }
 
 func (f *fakeForge) ViewPR(ctx context.Context, number int) (forge.PullRequest, error) {
+	if f.viewErr != nil {
+		return forge.PullRequest{}, f.viewErr
+	}
 	pr := f.pr
 	if f.merged {
 		pr.State = "MERGED"
@@ -278,7 +283,7 @@ required_checks = ["check"]
 		Stderr:     &buf,
 		ChecksPoll: 10 * time.Millisecond,
 	})
-	if err != nil || !res.OK || !res.Merged || res.Action != ActionOptimisticMerge {
+	if err != nil || !res.OK || !res.Merged || res.Action != ActionOptimisticMerge || res.ExitKind != exitkind.Pass {
 		t.Fatalf("expected optimistic merge, got res=%+v err=%v", res, err)
 	}
 	if ff.mergedSHA != featSHA {
@@ -310,8 +315,8 @@ required_checks = ["check"]
 		ChecksPoll: 10 * time.Millisecond,
 	})
 	var rce *repo.RebaseConflictError
-	if !errors.As(err2, &rce) || res2.Merged {
-		t.Fatalf("expected RebaseConflictError and no merge, got res=%+v err=%v", res2, err2)
+	if !errors.As(err2, &rce) || res2.Merged || res2.ExitKind != exitkind.StepFailed {
+		t.Fatalf("expected RebaseConflictError, step_failed, and no merge, got res=%+v err=%v", res2, err2)
 	}
 	clean, _, _ := g.IsClean(ctx)
 	if !clean {
@@ -563,7 +568,7 @@ require_verdict_tiers = ["full-live"]
 		ff.pr.HeadRefOid = run(work, "rev-parse", "HEAD")
 	}
 
-	if res := land(cfg); res.OK || res.Action != ActionRefuse || res.Merged {
+	if res := land(cfg); res.OK || res.Action != ActionRefuse || res.Merged || res.ExitKind != exitkind.Refused {
 		t.Fatalf("expected land refusal without verdict, got res=%+v", res)
 	}
 	if _, err := verdict.RecordVerdict(ctx, g, cfg, verdict.RecordOptions{Status: verdict.StatusApproved}); err != nil {
@@ -631,6 +636,163 @@ func (f *stackForge) EditPRBase(ctx context.Context, number int, newBase string)
 	}
 	f.retargetedBases[number] = newBase
 	return nil
+}
+
+func TestRunClassifiesDirtyTreeRefusal(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "user.name", "t")
+	runGit("config", "user.email", "t@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-qm", "init")
+	runGit("checkout", "-q", "-b", "feat/dirty")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g := repo.NewExecGit(dir)
+	head, err := g.HeadSHA(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ff := &fakeForge{pr: forge.PullRequest{
+		Number: 1, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/dirty", HeadRefOid: head,
+	}}
+	cfg, err := config.Parse([]byte("version = 1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, ff, cfg, Options{PRNumber: 1, Stdout: &buf, Stderr: &buf})
+	if err != nil || res.OK || res.Action != ActionRefuse || res.ExitKind != exitkind.DirtyTree {
+		t.Fatalf("expected dirty_tree refusal, got res=%+v err=%v", res, err)
+	}
+}
+
+func TestRunClassifiesForgeFailureAsInfraError(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "user.name", "t")
+	runGit("config", "user.email", "t@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-qm", "init")
+
+	g := repo.NewExecGit(dir)
+	cfg, err := config.Parse([]byte("version = 1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ff := &fakeForge{viewErr: errors.New("gh: network unreachable")}
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, ff, cfg, Options{PRNumber: 1, Stdout: &buf, Stderr: &buf})
+	if err == nil || res.ExitKind != exitkind.InfraError {
+		t.Fatalf("expected infra_error on forge failure, got res=%+v err=%v", res, err)
+	}
+}
+
+func TestDryRunAndRealRunClassifyRedCheckAsStepFailed(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	work := filepath.Join(tmp, "work")
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, string(out))
+		}
+	}
+	runGit(tmp, "init", "--bare", "-q", "-b", "main", origin)
+	runGit(tmp, "init", "-q", "-b", "main", work)
+	runGit(work, "config", "user.name", "t")
+	runGit(work, "config", "user.email", "t@example.com")
+	runGit(work, "remote", "add", "origin", origin)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(work, "add", "-A")
+	runGit(work, "commit", "-qm", "init")
+	runGit(work, "push", "-q", "-u", "origin", "main")
+	runGit(work, "switch", "-q", "-c", "feat/red")
+
+	g := repo.NewExecGit(work)
+	head, err := g.HeadSHA(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse([]byte("version = 1\n[land]\nrequired_checks = [\"check\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ff := &fakeForge{
+		pr: forge.PullRequest{
+			Number: 3, State: "OPEN", BaseRefName: "main", HeadRefName: "feat/red", HeadRefOid: head,
+			MergeStateStatus: "CLEAN",
+		},
+		checks: []forge.Check{{Name: "check", State: "FAILURE", Bucket: "fail"}},
+	}
+	var buf bytes.Buffer
+	dry, err := Run(ctx, g, ff, cfg, Options{PRNumber: 3, DryRun: true, Stdout: &buf, Stderr: &buf, ChecksPoll: 10 * time.Millisecond})
+	if err != nil || dry.OK || dry.Action != ActionDirectMerge || dry.ExitKind != exitkind.StepFailed {
+		t.Fatalf("expected dry-run red check as step_failed, got res=%+v err=%v", dry, err)
+	}
+	real, err := Run(ctx, g, ff, cfg, Options{PRNumber: 3, Stdout: &buf, Stderr: &buf, ChecksPoll: 10 * time.Millisecond})
+	if err != nil || real.OK || real.Action != ActionDirectMerge || real.ExitKind != exitkind.StepFailed || ff.merged {
+		t.Fatalf("expected real run red check as step_failed, got res=%+v err=%v", real, err)
+	}
+
+	ff.pr.IsDraft = true
+	draft, err := Run(ctx, g, ff, cfg, Options{PRNumber: 3, DryRun: true, Stdout: &buf, Stderr: &buf, ChecksPoll: 10 * time.Millisecond})
+	if err != nil || draft.OK || draft.Action != ActionRefuse || draft.ExitKind != exitkind.Refused {
+		t.Fatalf("expected dry-run draft refusal as refused, got res=%+v err=%v", draft, err)
+	}
+}
+
+func TestLandExitKindPassRequiresNoError(t *testing.T) {
+	cases := []struct {
+		name string
+		res  Result
+		err  error
+		want exitkind.Kind
+	}{
+		{"pass", Result{OK: true}, nil, exitkind.Pass},
+		{"ok with error", Result{OK: true}, errors.New("boom"), exitkind.InfraError},
+		{"explicit refusal", Result{ExitKind: exitkind.Refused}, nil, exitkind.Refused},
+		{"lock timeout", Result{}, &lock.TimeoutError{Wait: time.Second}, exitkind.LockTimeout},
+		{"unexplained failure", Result{OK: false}, nil, exitkind.InfraError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := landExitKind(tc.res, tc.err); got != tc.want {
+				t.Fatalf("landExitKind(%+v, %v) = %q, want %q", tc.res, tc.err, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestStackedPRRetargetAndRestack(t *testing.T) {

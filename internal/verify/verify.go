@@ -3,6 +3,7 @@ package verify
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/coding-pr0jects/quai/internal/attest"
 	"github.com/coding-pr0jects/quai/internal/config"
 	"github.com/coding-pr0jects/quai/internal/execrun"
+	"github.com/coding-pr0jects/quai/internal/exitkind"
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/receipt"
 	"github.com/coding-pr0jects/quai/internal/repo"
@@ -78,34 +80,38 @@ func ResolveAutoAttest(cfg *config.Config, flagSign, flagNoSign, flagPush, flagN
 }
 
 type StepResult struct {
-	Name           string   `json:"name"`
-	Status         string   `json:"status"` // cached | passed | failed | mutated
-	Fingerprint    string   `json:"fingerprint,omitempty"`
-	DurationMS     int64    `json:"duration_ms"`
-	AttestationRef string   `json:"attestation_ref,omitempty"`
-	MutatedPaths   []string `json:"mutated_paths,omitempty"`
-	Pool           string   `json:"pool,omitempty"`
-	PoolAcquired   *bool    `json:"pool_acquired,omitempty"`
-	Error          string   `json:"error,omitempty"`
+	Name           string        `json:"name"`
+	Status         string        `json:"status"` // cached | passed | failed | mutated
+	Fingerprint    string        `json:"fingerprint,omitempty"`
+	DurationMS     int64         `json:"duration_ms"`
+	AttestationRef string        `json:"attestation_ref,omitempty"`
+	MutatedPaths   []string      `json:"mutated_paths,omitempty"`
+	Pool           string        `json:"pool,omitempty"`
+	PoolAcquired   *bool         `json:"pool_acquired,omitempty"`
+	ExitKind       exitkind.Kind `json:"exit_kind,omitempty"`
+	Error          string        `json:"error,omitempty"`
 }
 
 type Result struct {
-	OK             bool         `json:"ok"`
-	Clean          bool         `json:"clean"`
-	HeadSHA        string       `json:"head_sha"`
-	TreeSHA        string       `json:"tree_sha"`
-	BaseSHA        string       `json:"base_sha"`
-	BaseWarning    string       `json:"base_warning,omitempty"`
-	ReceiptWritten bool         `json:"receipt_written"`
-	Attestations   []string     `json:"attestations,omitempty"`
-	Pushed         bool         `json:"pushed,omitempty"`
-	Steps          []StepResult `json:"steps"`
+	OK             bool          `json:"ok"`
+	ExitKind       exitkind.Kind `json:"exit_kind"`
+	Clean          bool          `json:"clean"`
+	HeadSHA        string        `json:"head_sha"`
+	TreeSHA        string        `json:"tree_sha"`
+	BaseSHA        string        `json:"base_sha"`
+	BaseWarning    string        `json:"base_warning,omitempty"`
+	ReceiptWritten bool          `json:"receipt_written"`
+	Attestations   []string      `json:"attestations,omitempty"`
+	Pushed         bool          `json:"pushed,omitempty"`
+	Steps          []StepResult  `json:"steps"`
 }
 
 // Run executes the selected verification steps, enforces slot limits and the working-tree
 // mutation guard, deduplicates concurrent runs on identical fingerprints, and writes
 // input-fingerprinted receipts on clean passing runs.
-func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Result, error) {
+func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (res Result, runErr error) {
+	defer func() { res.ExitKind = classifyExit(res, runErr) }()
+
 	topLevel, err := g.TopLevel(ctx)
 	if err != nil {
 		return Result{}, err
@@ -176,7 +182,7 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Res
 	store := receipt.NewStore(commonDir)
 	locksRoot := filepath.Join(commonDir, "quai", "locks")
 
-	res := Result{
+	res = Result{
 		OK:      true,
 		Clean:   clean,
 		HeadSHA: headSHA,
@@ -443,42 +449,45 @@ func runOneStep(
 	}
 
 	capacity := 0
-	var minFreeMem uint64
+	var minFreeMem, minFreeDisk uint64
 	if route.pool != "" {
 		sp := cfg.Slots[route.pool]
 		capacity = sp.Capacity
 		minFreeMem = sp.MinFreeMemBytes
+		minFreeDisk = sp.MinFreeDiskBytes
 	}
-	code, runErr := execrun.Run(ctx, execrun.Request{
-		Dir:             topLevel,
-		ShellCmd:        expanded,
-		Env:             []string{PassedStepsEnv + "=" + strings.Join(passed, ",")},
-		Timeout:         step.Duration,
-		Stdout:          stdout,
-		Stderr:          stderr,
-		LocksRoot:       locksRoot,
-		Pool:            route.pool,
-		Slots:           route.slots,
-		Capacity:        capacity,
-		MinFreeMemBytes: minFreeMem,
-		LockWait:        cfg.Land.LockWaitDur,
-		Owner:           owner,
-		OnStart:         opts.OnStepStart,
-		OnSlotAcquire:   onSlotAcquire,
+	runRes, runErr := execrun.Run(ctx, execrun.Request{
+		Dir:              topLevel,
+		ShellCmd:         expanded,
+		Env:              []string{PassedStepsEnv + "=" + strings.Join(passed, ",")},
+		Timeout:          step.Duration,
+		Stdout:           stdout,
+		Stderr:           stderr,
+		LocksRoot:        locksRoot,
+		Pool:             route.pool,
+		Slots:            route.slots,
+		Capacity:         capacity,
+		MinFreeMemBytes:  minFreeMem,
+		MinFreeDiskBytes: minFreeDisk,
+		LockWait:         cfg.Land.LockWaitDur,
+		Owner:            owner,
+		OnStart:          opts.OnStepStart,
+		OnSlotAcquire:    onSlotAcquire,
 	})
 	dur := time.Since(started).Milliseconds()
-	if runErr != nil || code != 0 {
+	if runErr != nil || runRes.ExitCode != 0 {
 		errMsg := ""
 		if runErr != nil {
 			errMsg = runErr.Error()
 		} else {
-			errMsg = fmt.Sprintf("exit code %d", code)
+			errMsg = fmt.Sprintf("exit code %d", runRes.ExitCode)
 		}
 		sr := StepResult{
 			Name:        step.Name,
 			Status:      "failed",
 			Fingerprint: fp,
 			DurationMS:  dur,
+			ExitKind:    stepExitKind(runRes, runErr),
 			Error:       errMsg,
 		}
 		route.annotate(&sr, held)
@@ -507,6 +516,7 @@ func runOneStep(
 				Fingerprint:  fp,
 				DurationMS:   dur,
 				MutatedPaths: mutated,
+				ExitKind:     exitkind.DirtyTree,
 				Error:        "step mutated the working tree or HEAD; refusing to record receipt",
 			}
 			route.annotate(&sr, held)
@@ -588,6 +598,43 @@ func checkCache(
 		fmt.Fprintf(opts.Stdout, "cached  %s (%s)\n", stepName, shortSHA(fp))
 	}
 	return sr, attRef, true, nil
+}
+
+func stepExitKind(res execrun.Result, err error) exitkind.Kind {
+	var te *lock.TimeoutError
+	switch {
+	case errors.As(err, &te):
+		return exitkind.Classify(false, exitkind.Facts{LockTimedOut: true})
+	case errors.Is(err, context.DeadlineExceeded):
+		return exitkind.Classify(false, exitkind.Facts{TimedOut: true})
+	case errors.Is(err, context.Canceled):
+		return exitkind.Classify(false, exitkind.Facts{})
+	case res.KilledBySIGKILL:
+		return exitkind.Classify(false, exitkind.Facts{KilledBySIGKILL: true})
+	case res.ExitCode != 0 || err != nil:
+		return exitkind.Classify(false, exitkind.Facts{StepFailed: true})
+	default:
+		return exitkind.Pass
+	}
+}
+
+func classifyExit(res Result, err error) exitkind.Kind {
+	var te *lock.TimeoutError
+	if errors.As(err, &te) {
+		return exitkind.Classify(false, exitkind.Facts{LockTimedOut: true})
+	}
+	if res.OK {
+		if err != nil {
+			return exitkind.Classify(false, exitkind.Facts{})
+		}
+		return exitkind.Pass
+	}
+	for i := len(res.Steps) - 1; i >= 0; i-- {
+		if res.Steps[i].ExitKind != "" {
+			return res.Steps[i].ExitKind
+		}
+	}
+	return exitkind.Classify(false, exitkind.Facts{})
 }
 
 func parseStatusPaths(porcelain string) []string {

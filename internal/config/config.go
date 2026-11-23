@@ -35,13 +35,15 @@ const (
 )
 
 type SlotPool struct {
-	Capacity        int
-	MinFreeMem      string
-	MinFreeMemBytes uint64
+	Capacity         int
+	MinFreeMem       string
+	MinFreeMemBytes  uint64
+	MinFreeDisk      string
+	MinFreeDiskBytes uint64
 }
 
 // UnmarshalTOML accepts either an integer capacity (heavy = 2) or a table
-// ([slots.heavy] capacity = 2, min_free_mem = "4G").
+// ([slots.heavy] capacity = 2, min_free_mem = "4G", min_free_disk = "2G").
 func (p *SlotPool) UnmarshalTOML(v any) error {
 	switch val := v.(type) {
 	case int64:
@@ -62,13 +64,19 @@ func (p *SlotPool) UnmarshalTOML(v any) error {
 					return fmt.Errorf("slot pool min_free_mem must be a string (e.g. \"4G\")")
 				}
 				p.MinFreeMem = s
+			case "min_free_disk":
+				s, ok := raw.(string)
+				if !ok {
+					return fmt.Errorf("slot pool min_free_disk must be a string (e.g. \"2G\")")
+				}
+				p.MinFreeDisk = s
 			default:
 				return fmt.Errorf("unknown key %q in slot pool", k)
 			}
 		}
 		return nil
 	default:
-		return fmt.Errorf("slot pool must be an integer or table with capacity/min_free_mem")
+		return fmt.Errorf("slot pool must be an integer or table with capacity/min_free_mem/min_free_disk")
 	}
 }
 
@@ -209,7 +217,7 @@ func Parse(data []byte) (*Config, error) {
 		var keys []string
 		for _, k := range undecoded {
 			// BurntSushi/toml records subkeys decoded manually by SlotPool.UnmarshalTOML as undecoded.
-			if len(k) == 3 && k[0] == "slots" && (k[2] == "capacity" || k[2] == "min_free_mem") {
+			if len(k) == 3 && k[0] == "slots" && (k[2] == "capacity" || k[2] == "min_free_mem" || k[2] == "min_free_disk") {
 				continue
 			}
 			keys = append(keys, k.String())
@@ -247,8 +255,15 @@ func (c *Config) normalizeAndValidate() error {
 				return fmt.Errorf("slot pool %q has invalid min_free_mem %q", pool, sp.MinFreeMem)
 			}
 			sp.MinFreeMemBytes = b
-			c.Slots[pool] = sp
 		}
+		if strings.TrimSpace(sp.MinFreeDisk) != "" {
+			b, err := ParseByteSize(sp.MinFreeDisk)
+			if err != nil || b == 0 {
+				return fmt.Errorf("slot pool %q has invalid min_free_disk %q", pool, sp.MinFreeDisk)
+			}
+			sp.MinFreeDiskBytes = b
+		}
+		c.Slots[pool] = sp
 	}
 
 	seen := make(map[string]struct{}, len(c.Steps))

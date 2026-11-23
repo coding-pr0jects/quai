@@ -69,15 +69,23 @@ The `<git-common-dir>/quai/last-prune` timestamp written atomically after a main
 The normalized `reason` that `quai attest check` gives every step: `verified`, `no_record`, `base_mismatch`, `tree_mismatch`, `config_mismatch`, `signature_invalid`, `expired`, or `sampled`. It says why a fallback to a full run is needed without reading raw git refs.
 _Avoid_: error, failure code.
 
+**Exit kind**
+The normalized `exit_kind` on `quai verify --json` and `quai land --json`: `pass`, `step_failed`, `step_timeout`, `lock_timeout`, `oom_killed`, `dirty_tree`, `refused`, or `infra_error`. It separates environment pressure from a failing step, while exit codes keep their meaning. `refused` means `quai land` deliberately declined the request (draft, fork, wrong branch, stale head, or missing verdict); an agent should not retry it as an infrastructure failure. A dirty checkout stays `dirty_tree`. A batch `quai land` reports the worst member kind, or `pass` when every PR landed.
+_Avoid_: failure type, exit status (that is the numeric code).
+
 ## Concurrency
 
 **Pool**
-A named capacity under `[slots]`, shared by every worktree of the repository. A pool may set `min_free_mem`.
+A named capacity under `[slots]`, shared by every worktree of the repository. A pool may set `min_free_mem` and `min_free_disk`.
 _Avoid_: queue, semaphore (in user-facing text).
 
 **Conditional pool**
 A step whose `pool_when` globs or `pool_tiers` threshold decide from the branch diff whether it acquires its configured pool, or bypasses it and runs with `slots = 0`.
 _Avoid_: smart pool, adaptive pool.
+
+**Min free disk**
+The `min_free_disk` threshold on a pool: the bytes that must stay free on the repository filesystem and the system temp directory before a slot is granted. A pool with both `min_free_mem` and `min_free_disk` requires both.
+_Avoid_: disk quota, disk limit.
 
 **Slot**
 One unit of a pool, held as a `slot-<pool>-<index>.lock` directory. A step with `slots = 0` takes none.

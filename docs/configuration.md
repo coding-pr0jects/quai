@@ -19,6 +19,7 @@ light = 4
 [slots.heavy]
 capacity = 2
 min_free_mem = "4G"             # Optional RAM admission guard (Linux /proc/meminfo MemAvailable).
+min_free_disk = "2G"            # Optional free-disk guard on the repo and temp filesystems.
 
 [[steps]]
 name = "fast"                   # Required, unique, matches ^[a-z0-9-]+$.
@@ -70,6 +71,10 @@ Automatic pruning reads these fields from the remote default branch (`refs/remot
 If `refs/remotes/origin/HEAD` is unset, which `git init` + `git remote add` + `git fetch` leaves unset, automatic pruning is skipped with a warning and `quai doctor` warns. Run `git remote set-head origin --auto` to resolve it.
 
 Steps also accept an optional `signers = ["alice@example.com"]` array to restrict which principals may attest a specific step.
+
+### Admission guards
+
+`min_free_mem` and `min_free_disk` gate a pool before any slot is granted. `quai` reads Linux `MemAvailable` and the free space of the filesystems that hold the repository and the system temp directory, and a step waits in the pool queue while any value is below its threshold. When `lock_wait` (or `quai exec --wait`) expires first, the command exits `4` with a message naming the threshold that was not met. Hosts or filesystems that cannot report a value are treated as satisfying that guard.
 
 ## How input fingerprinting works
 

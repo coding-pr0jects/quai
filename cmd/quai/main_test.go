@@ -11,6 +11,9 @@ import (
 	"regexp"
 	"testing"
 	"time"
+
+	"github.com/coding-pr0jects/quai/internal/exitkind"
+	"github.com/coding-pr0jects/quai/internal/land"
 )
 
 const defaultCLITestConfig = `
@@ -83,10 +86,11 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 		t.Fatalf("verify exited %d: %s %s", code, out.String(), errBuf.String())
 	}
 	var v struct {
-		OK             bool `json:"ok"`
-		ReceiptWritten bool `json:"receipt_written"`
+		OK             bool   `json:"ok"`
+		ExitKind       string `json:"exit_kind"`
+		ReceiptWritten bool   `json:"receipt_written"`
 	}
-	if err := json.Unmarshal(out.Bytes(), &v); err != nil || !v.OK || !v.ReceiptWritten {
+	if err := json.Unmarshal(out.Bytes(), &v); err != nil || !v.OK || !v.ReceiptWritten || v.ExitKind != "pass" {
 		t.Fatalf("unexpected verify json: %s (err=%v)", out.String(), err)
 	}
 
@@ -154,16 +158,26 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 	if code := run(ctx, []string{"status", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
 		t.Fatalf("status failed: %d %s %s", code, out.String(), errBuf.String())
 	}
-	if !bytes.Contains(out.Bytes(), []byte(`"receipt_count": 2`)) {
-		t.Fatalf("expected 2 cached receipts in status json, got: %s", out.String())
+	if !bytes.Contains(out.Bytes(), []byte(`"receipt_count": 2`)) || !bytes.Contains(out.Bytes(), []byte(`"available_disk_bytes"`)) {
+		t.Fatalf("expected 2 cached receipts and free disk in status json, got: %s", out.String())
 	}
 	out.Reset()
 	errBuf.Reset()
 	if code := run(ctx, []string{"doctor", "--json"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
 		t.Fatalf("doctor failed: %d %s %s", code, out.String(), errBuf.String())
 	}
-	if !bytes.Contains(out.Bytes(), []byte(`"ok": true`)) {
-		t.Fatalf("expected ok doctor json, got: %s", out.String())
+	if !bytes.Contains(out.Bytes(), []byte(`"ok": true`)) || !bytes.Contains(out.Bytes(), []byte(`"available_disk_bytes"`)) || !bytes.Contains(out.Bytes(), []byte(`"available_mem_bytes"`)) {
+		t.Fatalf("expected ok doctor json with free memory and disk, got: %s", out.String())
+	}
+
+	// 6b. Human verify output names the exit kind.
+	out.Reset()
+	errBuf.Reset()
+	if code := run(ctx, []string{"verify", "--step", "fast"}, dir, bytes.NewReader(nil), &out, &errBuf); code != 0 {
+		t.Fatalf("verify human run failed: %d %s %s", code, out.String(), errBuf.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte("exit_kind: pass")) {
+		t.Fatalf("expected exit_kind in human output, got: %s", out.String())
 	}
 
 	// 7. Unknown command -> exit 2.
@@ -178,6 +192,39 @@ func TestCLIVerifyTierExecHooksAndPatchID(t *testing.T) {
 		if code := run(ctx, args, dir, bytes.NewReader(nil), &out, &errBuf); code != 2 {
 			t.Fatalf("%v: expected exit 2, got %d (%s)", args, code, errBuf.String())
 		}
+	}
+}
+
+func TestPrintBatchHumanIncludesExitKindPerPR(t *testing.T) {
+	res := land.BatchResult{ExitKind: exitkind.StepFailed, PRs: []land.BatchEntry{
+		{Result: land.Result{ExitKind: exitkind.StepFailed, PR: 102, Action: land.ActionOptimisticMerge, Reason: "boom"}, Status: land.BatchFailed},
+		{Result: land.Result{ExitKind: exitkind.Pass, PR: 103, Action: land.ActionDirectMerge, Reason: "ok"}, Status: land.BatchLanded},
+	}}
+	var buf bytes.Buffer
+	printBatchHuman(&buf, res)
+	want := "#102: failed optimistic-merge (boom)\nexit_kind: step_failed\n" +
+		"#103: landed direct-merge (ok)\nexit_kind: pass\n"
+	if buf.String() != want {
+		t.Fatalf("printBatchHuman =\n%q\nwant\n%q", buf.String(), want)
+	}
+}
+
+func TestCLILandHumanOutputOnForgeFailurePrintsExitKind(t *testing.T) {
+	ctx := context.Background()
+	dir := initCLITestRepo(t)
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var out, errBuf bytes.Buffer
+	code := run(ctx, []string{"land", "1", "--dry-run"}, dir, bytes.NewReader(nil), &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("land exited %d, want 1: stdout=%s stderr=%s", code, out.String(), errBuf.String())
+	}
+	if !bytes.Contains(out.Bytes(), []byte("exit_kind: infra_error")) {
+		t.Fatalf("expected exit_kind in land human output, got: %s", out.String())
 	}
 }
 

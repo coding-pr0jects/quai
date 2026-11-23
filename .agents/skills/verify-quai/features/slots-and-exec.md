@@ -7,6 +7,7 @@
 - `exec-basic`: acquires a slot in `--pool`, runs the command directly, prints output, and releases the slot.
 - `exec-exit-code`: returns the exact exit code of the wrapped command.
 - `exec-timeout`: returns exit code `4` when all slots in the pool are held past `--wait`.
+- `exec-disk-guard`: waits and then exits `4` with a message naming `min_free_disk` when the repository filesystem is below the pool threshold.
 - `exec-dead-pid`: takes over a stale slot whose owner PID no longer exists.
 - `exec-priority`: a waiter with a higher `--priority` gets the slots before an older waiter of lower priority; `quai status` lists both with their role and priority in service order.
 
@@ -22,6 +23,7 @@ Preconditions: `quai-verify launch` and `quai-verify doctor` succeeded.
 - **Exit code propagation (`exec-exit-code`).** Run `quai-verify run exec-exit -- quai exec --pool heavy -- sh -c 'exit 7'`. Observe exit code `7`.
 - **Slot timeout (`exec-timeout`).** Acquire both slots of `heavy` in background subshells (`sleep 3`), then run `quai-verify run exec-timeout -- quai exec --pool heavy --wait 100ms -- true`. Observe exit code `4`. Wait for the background subshells to finish and confirm no lock directory remains.
 - **Priority order (`exec-priority`).** In the background, hold both slots with `quai exec --pool heavy --slots 2 -- sleep 3`, then queue waiter A (`--slots 2`, default priority) and, once its ticket is in `slot-heavy.queue/`, waiter B (`--slots 2 --priority 10`), each appending its name to a file outside the repository. Run `quai-verify run exec-priority-status -- quai status --json` while both wait: the waiters list B (`priority: 10`) before A (`priority: 0`). After all three finish, the file reads B then A and `locks/` is empty.
+- **Disk guard (`exec-disk-guard`).** Set `[slots.heavy]` to a table with `capacity = 2` and `min_free_disk = "999999999G"`, commit `.quai.toml`, then run `quai-verify run exec-disk-guard -- quai exec --pool heavy --wait 100ms -- true`. Observe exit code `4`, stderr naming `min_free_disk`, and no remaining `slot-heavy-*.lock` directory. Restore the original `.quai.toml` afterward.
 
 ## Gotchas
 

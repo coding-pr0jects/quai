@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/exitkind"
 	"github.com/coding-pr0jects/quai/internal/forge"
 	"github.com/coding-pr0jects/quai/internal/glob"
 	"github.com/coding-pr0jects/quai/internal/lock"
@@ -74,6 +75,7 @@ type Options struct {
 
 type Result struct {
 	OK              bool                 `json:"ok"`
+	ExitKind        exitkind.Kind        `json:"exit_kind"`
 	DryRun          bool                 `json:"dry_run"`
 	Merged          bool                 `json:"merged"`
 	PR              int                  `json:"pr"`
@@ -159,7 +161,9 @@ func admit(pr forge.PullRequest) (Decision, bool) {
 }
 
 // Run executes quai land for one pull request, holding land.lock across rebase, verify, push, and merge.
-func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opts Options) (Result, error) {
+func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opts Options) (res Result, runErr error) {
+	defer func() { res.ExitKind = landExitKind(res, runErr) }()
+
 	topLevel, err := g.TopLevel(ctx)
 	if err != nil {
 		return Result{}, err
@@ -178,7 +182,14 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 		return Result{}, err
 	}
 	if d, ok := admit(pr); !ok {
-		return Result{DryRun: opts.DryRun, PR: opts.PRNumber, Action: ActionRefuse, Reason: d.Reason, URL: pr.URL}, nil
+		return Result{
+			ExitKind: exitkind.Refused,
+			DryRun:   opts.DryRun,
+			PR:       opts.PRNumber,
+			Action:   ActionRefuse,
+			Reason:   d.Reason,
+			URL:      pr.URL,
+		}, nil
 	}
 	branch, err := g.CurrentBranch(ctx)
 	if err != nil {
@@ -200,13 +211,14 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 	})
 	if preDec.Action == ActionRefuse {
 		return Result{
-			OK:      false,
-			DryRun:  opts.DryRun,
-			PR:      opts.PRNumber,
-			Action:  ActionRefuse,
-			Reason:  preDec.Reason,
-			HeadSHA: headSHA,
-			URL:     pr.URL,
+			OK:       false,
+			ExitKind: refusalExitKind(clean),
+			DryRun:   opts.DryRun,
+			PR:       opts.PRNumber,
+			Action:   ActionRefuse,
+			Reason:   preDec.Reason,
+			HeadSHA:  headSHA,
+			URL:      pr.URL,
 		}, nil
 	}
 
@@ -233,7 +245,9 @@ func Run(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.Config, opt
 	return landLocked(ctx, g, ws, branch, f, cfg, opts, method)
 }
 
-func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f forge.Forge, cfg *config.Config, opts Options, method config.MergeMethod) (Result, error) {
+func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f forge.Forge, cfg *config.Config, opts Options, method config.MergeMethod) (res Result, runErr error) {
+	defer func() { res.ExitKind = landExitKind(res, runErr) }()
+
 	var (
 		pr      forge.PullRequest
 		headSHA string
@@ -264,12 +278,13 @@ func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f
 		}
 		if dec.Action == ActionRefuse {
 			return Result{
-				OK:      false,
-				PR:      opts.PRNumber,
-				Action:  ActionRefuse,
-				Reason:  dec.Reason,
-				HeadSHA: headSHA,
-				URL:     pr.URL,
+				OK:       false,
+				ExitKind: refusalExitKind(clean),
+				PR:       opts.PRNumber,
+				Action:   ActionRefuse,
+				Reason:   dec.Reason,
+				HeadSHA:  headSHA,
+				URL:      pr.URL,
 			}, nil
 		}
 
@@ -289,6 +304,7 @@ func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f
 			case errors.As(err, &rce):
 				return Result{
 					OK:            false,
+					ExitKind:      exitkind.StepFailed,
 					PR:            opts.PRNumber,
 					Action:        ActionRebaseAndMerge,
 					Reason:        rce.Error(),
@@ -298,14 +314,15 @@ func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f
 				}, rce
 			case rb.verifyFailure != "":
 				return Result{
-					OK:      false,
-					PR:      opts.PRNumber,
-					Action:  ActionRebaseAndMerge,
-					Reason:  rb.verifyFailure,
-					HeadSHA: rb.headSHA,
-					URL:     pr.URL,
-					PatchID: rb.patchID,
-					Failure: FailurePostRebaseVerify,
+					OK:       false,
+					ExitKind: rb.exitKind,
+					PR:       opts.PRNumber,
+					Action:   ActionRebaseAndMerge,
+					Reason:   rb.verifyFailure,
+					HeadSHA:  rb.headSHA,
+					URL:      pr.URL,
+					PatchID:  rb.patchID,
+					Failure:  FailurePostRebaseVerify,
 				}, err
 			case err != nil:
 				return Result{}, err
@@ -320,14 +337,15 @@ func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f
 		}
 		if vRefuse != "" {
 			return Result{
-				OK:      false,
-				PR:      opts.PRNumber,
-				Action:  ActionRefuse,
-				Reason:  vRefuse,
-				HeadSHA: headSHA,
-				URL:     pr.URL,
-				PatchID: patchRes,
-				Verdict: verdictRes,
+				OK:       false,
+				ExitKind: exitkind.Refused,
+				PR:       opts.PRNumber,
+				Action:   ActionRefuse,
+				Reason:   vRefuse,
+				HeadSHA:  headSHA,
+				URL:      pr.URL,
+				PatchID:  patchRes,
+				Verdict:  verdictRes,
 			}, nil
 		}
 
@@ -337,15 +355,16 @@ func landLocked(ctx context.Context, g repo.Git, ws *workspace, branch string, f
 		}
 		if verdictChecks.Kind != "green" {
 			return Result{
-				OK:      false,
-				PR:      opts.PRNumber,
-				Action:  dec.Action,
-				Reason:  formatCheckFailure(verdictChecks),
-				HeadSHA: headSHA,
-				URL:     pr.URL,
-				PatchID: patchRes,
-				Checks:  &verdictChecks,
-				Verdict: verdictRes,
+				OK:       false,
+				ExitKind: exitkind.StepFailed,
+				PR:       opts.PRNumber,
+				Action:   dec.Action,
+				Reason:   formatCheckFailure(verdictChecks),
+				HeadSHA:  headSHA,
+				URL:      pr.URL,
+				PatchID:  patchRes,
+				Checks:   &verdictChecks,
+				Verdict:  verdictRes,
 			}, nil
 		}
 
@@ -423,6 +442,7 @@ type rebased struct {
 	headSHA       string
 	patchID       *patchid.Result
 	verifyFailure string
+	exitKind      exitkind.Kind
 }
 
 func rebaseVerifyPush(ctx context.Context, wg repo.Git, cfg *config.Config, opts Options, pr forge.PullRequest, preRebaseSHA string) (rb rebased, err error) {
@@ -462,10 +482,12 @@ func rebaseVerifyPush(ctx context.Context, wg repo.Git, cfg *config.Config, opts
 		rolledBack := fmt.Sprintf("PR head reset to %s, nothing pushed", short(preRebaseSHA))
 		if vErr != nil {
 			rb.verifyFailure = fmt.Sprintf("verification failed after rebase: %v; %s", vErr, rolledBack)
+			rb.exitKind = vRes.ExitKind
 			return rb, vErr
 		}
 		if !vRes.OK {
 			rb.verifyFailure = "verification failed after rebase; " + rolledBack
+			rb.exitKind = vRes.ExitKind
 			return rb, nil
 		}
 	}
@@ -511,7 +533,7 @@ func runDry(ctx context.Context, g repo.Git, ws *workspace, f forge.Forge, cfg *
 		})
 	}
 	ok := dec.Action != ActionRefuse && (verdictChecks.Kind == "green" || dec.Action == ActionRebaseAndMerge)
-	return Result{
+	res := Result{
 		OK:              ok,
 		DryRun:          true,
 		PR:              pr.Number,
@@ -522,7 +544,13 @@ func runDry(ctx context.Context, g repo.Git, ws *workspace, f forge.Forge, cfg *
 		Checks:          &verdictChecks,
 		Verdict:         verdictRes,
 		StackedChildren: detectedChildren,
-	}, nil
+	}
+	if dec.Action == ActionRefuse {
+		res.ExitKind = refusalExitKind(true)
+	} else if verdictChecks.Kind != "green" {
+		res.ExitKind = exitkind.StepFailed
+	}
+	return res, nil
 }
 
 func enforceVerdict(ctx context.Context, ws *workspace, headSHA string, cfg *config.Config, since string, opts Options) (*verdict.CheckResult, string, error) {
@@ -635,6 +663,27 @@ func waitChecks(ctx context.Context, f forge.Forge, prNumber int, required []str
 			return forge.ChecksVerdict{}, ctx.Err()
 		case <-timer.C:
 		}
+	}
+}
+
+func refusalExitKind(clean bool) exitkind.Kind {
+	if !clean {
+		return exitkind.Classify(false, exitkind.Facts{DirtyTree: true})
+	}
+	return exitkind.Classify(false, exitkind.Facts{Refused: true})
+}
+
+func landExitKind(res Result, err error) exitkind.Kind {
+	var te *lock.TimeoutError
+	switch {
+	case errors.As(err, &te):
+		return exitkind.Classify(false, exitkind.Facts{LockTimedOut: true})
+	case res.ExitKind != "":
+		return res.ExitKind
+	case res.OK && err == nil:
+		return exitkind.Pass
+	default:
+		return exitkind.Classify(false, exitkind.Facts{})
 	}
 }
 

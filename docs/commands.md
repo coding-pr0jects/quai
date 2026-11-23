@@ -12,6 +12,27 @@ All `quai` commands work from the repository root or any subdirectory inside a m
 | `3` | Git rebase conflict encountered and cleanly aborted |
 | `4` | Lock or slot acquisition timed out, or `quai verify --wait` reached `--max` while the detached run still runs: retry later |
 
+### Exit kinds
+
+`quai verify --json` and `quai land --json` also carry a normalized `exit_kind`; both print `exit_kind: <kind>` in human output whenever they produce a result. It separates environment pressure from a real code failure without changing any exit code.
+
+| `exit_kind` | Meaning |
+|---|---|
+| `pass` | The command completed as requested, including a merge or a clean `--dry-run` |
+| `step_failed` | A verification step exited non-zero, a required check was not green, or a rebase conflicted |
+| `step_timeout` | A step exceeded its `timeout` |
+| `lock_timeout` | `lock_wait` or `--wait` expired while waiting for a lock or slot |
+| `oom_killed` | A step was terminated by `SIGKILL` (or exited `137`, conventionally OOM) |
+| `dirty_tree` | A step mutated the working tree, or `quai land` refused a dirty checkout |
+| `refused` | `quai land` deliberately declined: draft, fork, wrong branch, stale head, or missing verdict |
+| `infra_error` | A `git`/`gh` failure, a missing binary, or an unexplained abort |
+
+A step that fails for an unexplained reason reports `infra_error`, never `pass`. A configuration error exits `2` before a result exists, so it carries no `exit_kind`.
+
+`ok` keeps its existing meaning: no selected step failed. `quai verify` can abort before a step runs, for example when the in-flight deduplication lock times out; in that case `ok` stays `true`, while exit code `4` and `exit_kind: "lock_timeout"` carry the environment failure. Treat any `exit_kind` other than `pass` as the authoritative failure signal.
+
+A batch (`quai land <pr>...`) reports a batch-level `exit_kind`: `pass` when every PR landed (or would land under `--dry-run`), otherwise the worst member kind in this order, highest first: `infra_error`, `lock_timeout`, `oom_killed`, `step_timeout`, `dirty_tree`, `step_failed`, `refused`. Every `prs[]` entry keeps its own `exit_kind`; a skipped entry counts as `refused`, and a conflict or an unexplained failed entry counts as `step_failed`. Human output prints each entry's `exit_kind` after its status line.
+
 ---
 
 ## `quai verify`
@@ -52,12 +73,14 @@ quai verify --stop [<run-id>] [--json]
 - Stops at the first failing or mutating step, so a step whose prerequisite failed neither runs nor signs.
 - Runs each step once per invocation and sets `QUAI_PASSED_STEPS` in its environment to the steps that passed or were cached before it (see [Step dependencies](configuration.md#step-dependencies-depends_on)).
 - When `[attest].auto_prune = true` on the remote default branch, runs one best-effort maintenance pass after the steps complete, at most once per `[attest].prune_interval`. The policy is read only from `refs/remotes/origin/<base>` when `<base>` is a plain branch name equal to `origin/HEAD`; any other value skips automatic pruning with a warning. If `refs/remotes/origin/HEAD` is unset, run `git remote set-head origin --auto`. Prune failures are warnings on stderr and never change the verify outcome.
+- The top-level `exit_kind` classifies the run; a failed step also carries its own `exit_kind` inside `steps[]` (including `lock_timeout` when a conditional step times out waiting for its slot, with `pool_acquired: false`). A step that cannot acquire its slot before `lock_wait` exits `4`.
 
 ### JSON output
 
 ```json
 {
 	"ok": true,
+	"exit_kind": "pass",
 	"clean": true,
 	"head_sha": "a1b2c3d4...",
 	"tree_sha": "e5f6a7b8...",
@@ -368,7 +391,7 @@ quai land <pr>... [--dry-run] [--continue-on-error=false] [--method squash|merge
 - `--restack`: After merging, automatically rebase clean local stacked child worktrees onto the updated base via `git rebase --onto` and push with `--force-with-lease`. Open child PRs targeting the landed branch are always retargeted before merge.
 - `--require-verdict`: Require an approved review verdict for this PR's `patch-id` regardless of tier. The verdict is checked against the policy in `origin/<base>`'s `.quai.toml` (see [`quai verdict`](#quai-verdict)).
 - `--no-sign` / `--no-push`: Disable automatic attestation signing or pushing during `rebase-and-merge` verification.
-- `--json`: Print structured JSON.
+- `--json`: Print structured JSON, including the normalized `exit_kind` of the landing attempt.
 
 ### Decision outcomes
 
@@ -427,18 +450,19 @@ When `[attest].auto_prune = true` on the remote default branch, a non-dry-run la
 3. It lands `direct-merge` and `optimistic-merge` PRs first, in argument order, then the rest with each stacked parent before its children. Every PR re-decides its action under the lock against the moved base, with every single-PR guard (no forks, `--force-with-lease` pinned pushes, required checks, verdicts, `--match-head-commit`).
 4. A PR with a child in the batch restacks its children after it merges, as if `--restack` were given. A child whose parent did not land is skipped.
 
-Each PR runs once: no PRs are merged together, and a failure is never bisected. The batch exits `0` when every PR landed, `1` when any PR did not land (refused, failed, conflict, or skipped), `4` when `land.lock` timed out, and `1` on `SIGINT`/`SIGTERM` after releasing the lock. `--dry-run` prints the plan in landing order without taking the lock.
+Each PR runs once: no PRs are merged together, and a failure is never bisected. The batch exits `0` when every PR landed, `1` when any PR did not land (refused, failed, conflict, or skipped), `4` when `land.lock` timed out, and `1` on `SIGINT`/`SIGTERM` after releasing the lock. A `land.lock` timeout before any PR lands reports `exit_kind: "lock_timeout"` with `prs: []`; another abort before planning reports `infra_error` with the same empty list. `--dry-run` prints the plan in landing order without taking the lock.
 
-Batch `--json` is a new shape. Each entry of `prs` is the single-PR result plus `status` (`landed`, `planned`, `refused`, `conflict`, `failed`, `skipped`) and an optional `error`, in landing order with refused PRs last (abbreviated):
+Batch `--json` is a new shape. The top level carries `exit_kind` (the worst member kind, or `pass` when every PR landed; see [Exit kinds](#exit-kinds)). Each entry of `prs` is the single-PR result plus `status` (`landed`, `planned`, `refused`, `conflict`, `failed`, `skipped`) and an optional `error`, in landing order with refused PRs last (abbreviated):
 
 ```json
 {
 	"ok": false,
+	"exit_kind": "step_failed",
 	"dry_run": false,
 	"prs": [
-		{"ok": true, "merged": true, "pr": 101, "action": "optimistic-merge", "status": "landed"},
-		{"ok": false, "pr": 102, "action": "rebase-and-merge", "conflict_files": ["shared.txt"], "status": "conflict"},
-		{"ok": false, "pr": 104, "action": "optimistic-merge", "reason": "checks failing: [check (FAILURE)]", "status": "failed"}
+		{"ok": true, "exit_kind": "pass", "merged": true, "pr": 101, "action": "optimistic-merge", "status": "landed"},
+		{"ok": false, "exit_kind": "step_failed", "pr": 102, "action": "rebase-and-merge", "conflict_files": ["shared.txt"], "status": "conflict"},
+		{"ok": false, "exit_kind": "step_failed", "pr": 104, "action": "optimistic-merge", "reason": "checks failing: [check (FAILURE)]", "status": "failed"}
 	]
 }
 ```
@@ -515,7 +539,7 @@ quai hooks pre-push [--json]
 
 ## `quai status`
 
-Inspect active `land.lock`, configured slot pools, their holders and queued waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), temporary land worktrees (`land_worktrees`), local receipt count, and local attestation count without mutating any state.
+Inspect active `land.lock`, configured slot pools, their holders and queued waiters, in-flight verifications, detached runs that are `running` or `dead` (`runs` in JSON), temporary land worktrees (`land_worktrees`), local receipt count, and local attestation count without mutating any state. JSON output also includes the host's `available_mem_bytes` and `available_disk_bytes`, and pool entries carry `min_free_mem_bytes` and `min_free_disk_bytes`.
 
 ```bash
 quai status [--json]
@@ -538,7 +562,7 @@ A waiter that finds its lock held writes a ticket into the lock's queue, and onl
 
 ## `quai doctor`
 
-Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation readiness, stale lock detection, detached runs that died without an exit record, and temporary land worktrees left while no `quai land` holds `land.lock`. Exits `0` when healthy, `1` if any blocking check fails.
+Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, free disk, `pre-push` hook wiring, `gh`, `ssh-keygen`, attestation readiness, stale lock detection, detached runs that died without an exit record, and temporary land worktrees left while no `quai land` holds `land.lock`. The report includes `available_mem_bytes` and `available_disk_bytes`, and the `disk` check warns when a pool's `min_free_disk` is not met. Exits `0` when healthy, `1` if any blocking check fails.
 
 Attestation readiness is checked end to end without mutating anything:
 

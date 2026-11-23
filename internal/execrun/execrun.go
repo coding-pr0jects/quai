@@ -15,37 +15,47 @@ import (
 const gracePeriod = 5 * time.Second
 
 type Request struct {
-	Dir             string
-	Argv            []string
-	ShellCmd        string // if non-empty, runs via sh -c <ShellCmd>
-	Timeout         time.Duration
-	Env             []string // KEY=value pairs added to the inherited environment; a later pair wins
-	Stdin           io.Reader
-	Stdout          io.Writer
-	Stderr          io.Writer
-	LocksRoot       string
-	Pool            string
-	Slots           int
-	Capacity        int
-	MinFreeMemBytes uint64
-	LockWait        time.Duration
-	Owner           lock.Owner
-	OnStart         func(Process)
-	OnSlotAcquire   func()
+	Dir              string
+	Argv             []string
+	ShellCmd         string // if non-empty, runs via sh -c <ShellCmd>
+	Timeout          time.Duration
+	Env              []string // KEY=value pairs added to the inherited environment; a later pair wins
+	Stdin            io.Reader
+	Stdout           io.Writer
+	Stderr           io.Writer
+	LocksRoot        string
+	Pool             string
+	Slots            int
+	Capacity         int
+	MinFreeMemBytes  uint64
+	MinFreeDiskBytes uint64
+	LockWait         time.Duration
+	Owner            lock.Owner
+	OnStart          func(Process)
+	OnSlotAcquire    func()
+}
+
+// Result reports how a child command ended.
+type Result struct {
+	ExitCode        int
+	TimedOut        bool
+	KilledBySIGKILL bool
 }
 
 // Run executes a command inside its own process group, optionally bounded by a slot pool,
 // and cleans up the entire process group on context cancellation or timeout.
-func Run(ctx context.Context, req Request) (int, error) {
+func Run(ctx context.Context, req Request) (Result, error) {
 	if req.Slots > 0 {
 		sl, err := lock.AcquireSlots(ctx, req.LocksRoot, req.Pool, req.Slots, req.Capacity, req.Owner, lock.Options{
-			Wait:            req.LockWait,
-			PollInterval:    200 * time.Millisecond,
-			MinFreeMemBytes: req.MinFreeMemBytes,
-			StatusWriter:    req.Stderr,
+			Wait:             req.LockWait,
+			PollInterval:     200 * time.Millisecond,
+			MinFreeMemBytes:  req.MinFreeMemBytes,
+			MinFreeDiskBytes: req.MinFreeDiskBytes,
+			DiskPath:         req.Dir,
+			StatusWriter:     req.Stderr,
 		})
 		if err != nil {
-			return 1, err
+			return Result{ExitCode: 1}, err
 		}
 		defer sl.Release()
 		if req.OnSlotAcquire != nil {
@@ -65,7 +75,7 @@ func Run(ctx context.Context, req Request) (int, error) {
 		cmd = exec.Command("sh", "-c", req.ShellCmd)
 	} else {
 		if len(req.Argv) == 0 {
-			return 2, errors.New("empty command")
+			return Result{ExitCode: 2}, errors.New("empty command")
 		}
 		cmd = exec.Command(req.Argv[0], req.Argv[1:]...)
 	}
@@ -79,7 +89,7 @@ func Run(ctx context.Context, req Request) (int, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
-		return 1, err
+		return Result{ExitCode: 1}, err
 	}
 	if req.OnStart != nil {
 		req.OnStart(identify(cmd.Process.Pid))
@@ -92,7 +102,7 @@ func Run(ctx context.Context, req Request) (int, error) {
 
 	select {
 	case err := <-done:
-		return exitCodeOf(err), err
+		return completed(cmd, err), err
 	case <-runCtx.Done():
 		pgid := cmd.Process.Pid
 		_ = syscall.Kill(-pgid, syscall.SIGTERM)
@@ -102,8 +112,22 @@ func Run(ctx context.Context, req Request) (int, error) {
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
 			<-done
 		}
-		return 1, runCtx.Err()
+		return Result{ExitCode: 1, TimedOut: errors.Is(runCtx.Err(), context.DeadlineExceeded)}, runCtx.Err()
 	}
+}
+
+func completed(cmd *exec.Cmd, err error) Result {
+	res := Result{ExitCode: exitCodeOf(err)}
+	if cmd.ProcessState != nil {
+		if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			res.ExitCode = 128 + int(ws.Signal())
+			res.KilledBySIGKILL = ws.Signal() == syscall.SIGKILL
+		}
+	}
+	if res.ExitCode == 137 {
+		res.KilledBySIGKILL = true
+	}
+	return res
 }
 
 func exitCodeOf(err error) int {

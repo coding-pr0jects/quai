@@ -26,13 +26,14 @@ import (
 )
 
 type PoolStatus struct {
-	Name            string              `json:"name"`
-	Capacity        int                 `json:"capacity"`
-	MinFreeMemBytes uint64              `json:"min_free_mem_bytes,omitempty"`
-	Held            int                 `json:"held"`
-	Stale           int                 `json:"stale"`
-	Slots           []lock.InspectState `json:"slots,omitempty"`
-	Waiters         []lock.Owner        `json:"waiters,omitempty"`
+	Name             string              `json:"name"`
+	Capacity         int                 `json:"capacity"`
+	MinFreeMemBytes  uint64              `json:"min_free_mem_bytes,omitempty"`
+	MinFreeDiskBytes uint64              `json:"min_free_disk_bytes,omitempty"`
+	Held             int                 `json:"held"`
+	Stale            int                 `json:"stale"`
+	Slots            []lock.InspectState `json:"slots,omitempty"`
+	Waiters          []lock.Owner        `json:"waiters,omitempty"`
 }
 
 type InFlightStatus struct {
@@ -41,20 +42,21 @@ type InFlightStatus struct {
 }
 
 type Report struct {
-	OK                bool              `json:"ok"`
-	RepoRoot          string            `json:"repo_root"`
-	CommonDir         string            `json:"common_dir"`
-	AvailableMemBytes uint64            `json:"available_mem_bytes,omitempty"`
-	LandLock          lock.InspectState `json:"land_lock"`
-	Pools             []PoolStatus      `json:"pools,omitempty"`
-	InFlight          []InFlightStatus  `json:"in_flight,omitempty"`
-	LandWorktrees     []string          `json:"land_worktrees,omitempty"`
-	ReceiptCount      int               `json:"receipt_count"`
-	AttestCount       int               `json:"attestation_count"`
-	Runs              []detach.Status   `json:"runs,omitempty"`
-	AutoPrune         bool              `json:"auto_prune"`
-	PruneInterval     string            `json:"prune_interval,omitempty"`
-	LastPrune         *time.Time        `json:"last_prune,omitempty"`
+	OK                 bool              `json:"ok"`
+	RepoRoot           string            `json:"repo_root"`
+	CommonDir          string            `json:"common_dir"`
+	AvailableMemBytes  uint64            `json:"available_mem_bytes,omitempty"`
+	AvailableDiskBytes uint64            `json:"available_disk_bytes,omitempty"`
+	LandLock           lock.InspectState `json:"land_lock"`
+	Pools              []PoolStatus      `json:"pools,omitempty"`
+	InFlight           []InFlightStatus  `json:"in_flight,omitempty"`
+	LandWorktrees      []string          `json:"land_worktrees,omitempty"`
+	ReceiptCount       int               `json:"receipt_count"`
+	AttestCount        int               `json:"attestation_count"`
+	Runs               []detach.Status   `json:"runs,omitempty"`
+	AutoPrune          bool              `json:"auto_prune"`
+	PruneInterval      string            `json:"prune_interval,omitempty"`
+	LastPrune          *time.Time        `json:"last_prune,omitempty"`
 }
 
 type CheckItem struct {
@@ -65,8 +67,10 @@ type CheckItem struct {
 }
 
 type DoctorReport struct {
-	OK     bool        `json:"ok"`
-	Checks []CheckItem `json:"checks"`
+	OK                 bool        `json:"ok"`
+	AvailableMemBytes  uint64      `json:"available_mem_bytes,omitempty"`
+	AvailableDiskBytes uint64      `json:"available_disk_bytes,omitempty"`
+	Checks             []CheckItem `json:"checks"`
 }
 
 var gitVersionRe = regexp.MustCompile(`git version (\d+)\.(\d+)`)
@@ -110,6 +114,9 @@ func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error
 	if avail, ok := lock.ReadAvailableMemory(); ok {
 		rep.AvailableMemBytes = avail
 	}
+	if avail, ok := lock.ReadAvailableDisk(topLevel); ok {
+		rep.AvailableDiskBytes = avail
+	}
 
 	if cfg != nil && len(cfg.Slots) > 0 {
 		names := make([]string, 0, len(cfg.Slots))
@@ -120,10 +127,11 @@ func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error
 		for _, pool := range names {
 			sp := cfg.Slots[pool]
 			ps := PoolStatus{
-				Name:            pool,
-				Capacity:        sp.Capacity,
-				MinFreeMemBytes: sp.MinFreeMemBytes,
-				Waiters:         lock.InspectWaiters(filepath.Join(locksRoot, fmt.Sprintf("slot-%s.queue", pool)), lock.DefaultStaleAfter),
+				Name:             pool,
+				Capacity:         sp.Capacity,
+				MinFreeMemBytes:  sp.MinFreeMemBytes,
+				MinFreeDiskBytes: sp.MinFreeDiskBytes,
+				Waiters:          lock.InspectWaiters(filepath.Join(locksRoot, fmt.Sprintf("slot-%s.queue", pool)), lock.DefaultStaleAfter),
 			}
 			for i := 0; i < sp.Capacity; i++ {
 				dir := filepath.Join(locksRoot, fmt.Sprintf("slot-%s-%d.lock", pool, i))
@@ -195,6 +203,9 @@ func Inspect(ctx context.Context, g repo.Git, cfg *config.Config) (Report, error
 // stale locks, and leftover land worktrees in the current repository.
 func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 	rep := DoctorReport{OK: true}
+	if avail, ok := lock.ReadAvailableMemory(); ok {
+		rep.AvailableMemBytes = avail
+	}
 	add := func(item CheckItem) {
 		if item.Status == "fail" {
 			rep.OK = false
@@ -228,21 +239,45 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 
 	add(checkAutoPrune(ctx, g, cfg))
 
-	// 3. pre-push hook wiring
+	// 3. Free disk readiness
+	if avail, ok := lock.ReadAvailableDisk(topLevel); ok {
+		rep.AvailableDiskBytes = avail
+		item := CheckItem{Name: "disk", Status: "ok", Message: fmt.Sprintf("%s free on %s", lock.FormatBytes(avail), topLevel)}
+		names := make([]string, 0, len(cfg.Slots))
+		for name := range cfg.Slots {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			pool := cfg.Slots[name]
+			if pool.MinFreeDiskBytes > 0 && avail < pool.MinFreeDiskBytes {
+				item.Status = "warn"
+				item.Message = fmt.Sprintf("%s free on %s, below min_free_disk %s for pool %q",
+					lock.FormatBytes(avail), topLevel, lock.FormatBytes(pool.MinFreeDiskBytes), name)
+				item.Fix = "Free disk space before running heavy steps"
+				break
+			}
+		}
+		add(item)
+	} else {
+		add(CheckItem{Name: "disk", Status: "warn", Message: fmt.Sprintf("could not read free disk space at %s", topLevel)})
+	}
+
+	// 4. pre-push hook wiring
 	if len(cfg.PrePushSteps()) > 0 {
 		add(checkPrePushHook(ctx, g, topLevel))
 	} else {
 		add(CheckItem{Name: "hooks", Status: "ok", Message: "no pre-push steps configured"})
 	}
 
-	// 4. gh CLI
+	// 5. gh CLI
 	if ghPath, err := exec.LookPath("gh"); err != nil {
 		add(CheckItem{Name: "gh", Status: "warn", Message: "gh CLI not found on PATH (needed only for quai land)", Fix: "Install GitHub CLI (gh) and run gh auth login"})
 	} else {
 		add(CheckItem{Name: "gh", Status: "ok", Message: ghPath})
 	}
 
-	// 5. ssh-keygen & attestation readiness
+	// 6. ssh-keygen & attestation readiness
 	explicitAttestSigning := cfg.Attest.SigningKey != "" || cfg.Attest.AutoSign || cfg.Attest.AutoPush ||
 		os.Getenv("QUAI_SIGNING_KEY") != "" || os.Getenv("QUAI_SIGN") == "1"
 	attestUsed := explicitAttestSigning || cfg.Attest.AllowedSigners != "" || len(cfg.Attest.Signers) > 0 ||
@@ -300,7 +335,7 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 		add(checkAttestRemote(ctx, g, remote, cfg.Attest.AutoPush))
 	}
 
-	// 6. Lock health
+	// 7. Lock health
 	if st, err := Inspect(ctx, g, cfg); err == nil {
 		staleCount := 0
 		if st.LandLock.Held && st.LandLock.Stale {
@@ -390,7 +425,7 @@ func checkAgentKey(ctx context.Context, keyPath string) CheckItem {
 		return CheckItem{Name: name, Status: "warn", Message: "ssh-add not found on PATH; cannot confirm the signing key is loaded in ssh-agent", Fix: "Install OpenSSH client tools"}
 	}
 	var buf bytes.Buffer
-	code, err := execrun.Run(ctx, execrun.Request{
+	res, err := execrun.Run(ctx, execrun.Request{
 		Argv:    []string{"ssh-add", "-l"},
 		Timeout: 5 * time.Second,
 		Stdout:  &buf,
@@ -400,9 +435,9 @@ func checkAgentKey(ctx context.Context, keyPath string) CheckItem {
 		switch {
 		case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
 			return CheckItem{Name: name, Status: "warn", Message: "ssh-add -l timed out; cannot confirm the signing key is loaded in ssh-agent"}
-		case code == 1:
+		case res.ExitCode == 1:
 			return CheckItem{Name: name, Status: "warn", Message: "ssh-agent has no loaded identities", Fix: "ssh-add " + shellQuote(keyPath)}
-		case code == 2:
+		case res.ExitCode == 2:
 			return CheckItem{Name: name, Status: "warn", Message: "no ssh-agent is running", Fix: `eval "$(ssh-agent -s)" && ssh-add ` + shellQuote(keyPath)}
 		}
 		return CheckItem{Name: name, Status: "warn", Message: fmt.Sprintf("ssh-add -l failed: %v", err), Fix: "ssh-add " + shellQuote(keyPath)}
@@ -430,12 +465,12 @@ func sshKeyFingerprint(ctx context.Context, keyPath string) string {
 		target = keyPath + ".pub"
 	}
 	var out bytes.Buffer
-	code, err := execrun.Run(ctx, execrun.Request{
+	res, err := execrun.Run(ctx, execrun.Request{
 		Argv:    []string{"ssh-keygen", "-l", "-f", target},
 		Timeout: 5 * time.Second,
 		Stdout:  &out,
 	})
-	if err != nil || code != 0 {
+	if err != nil || res.ExitCode != 0 {
 		return ""
 	}
 	return sshFingerprintRe.FindString(out.String())

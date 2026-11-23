@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coding-pr0jects/quai/internal/config"
+	"github.com/coding-pr0jects/quai/internal/exitkind"
 	"github.com/coding-pr0jects/quai/internal/forge"
 	"github.com/coding-pr0jects/quai/internal/lock"
 	"github.com/coding-pr0jects/quai/internal/repo"
@@ -44,11 +45,13 @@ type BatchEntry struct {
 	Error  string      `json:"error,omitempty"`
 }
 
-// BatchResult lists every batch member in processing order.
+// BatchResult lists every batch member in processing order. ExitKind is the worst
+// member kind (see exitkind.Worst), or pass when every member passed.
 type BatchResult struct {
-	OK     bool         `json:"ok"`
-	DryRun bool         `json:"dry_run"`
-	PRs    []BatchEntry `json:"prs"`
+	OK       bool          `json:"ok"`
+	ExitKind exitkind.Kind `json:"exit_kind"`
+	DryRun   bool          `json:"dry_run"`
+	PRs      []BatchEntry  `json:"prs"`
 }
 
 // BatchCandidate is what PlanBatch needs to know about one inspected PR.
@@ -118,7 +121,14 @@ func batchParents(cands []BatchCandidate) map[int]int {
 // .quai.toml on origin/<base>, never from a PR branch. Each PR lands from the worktree
 // that has its head branch checked out, else from g as Run does off the PR branch, through
 // the same guards as Run.
-func RunBatch(ctx context.Context, g repo.Git, f forge.Forge, localCfg *config.Config, opts BatchOptions) (BatchResult, error) {
+func RunBatch(ctx context.Context, g repo.Git, f forge.Forge, localCfg *config.Config, opts BatchOptions) (out BatchResult, runErr error) {
+	defer func() {
+		if out.PRs == nil {
+			out.PRs = []BatchEntry{}
+		}
+		out.ExitKind = batchExitKind(out.PRs, runErr)
+	}()
+
 	cfg, err := basePolicy(ctx, g, localCfg.Base)
 	if err != nil {
 		return BatchResult{}, err
@@ -145,7 +155,7 @@ func RunBatch(ctx context.Context, g repo.Git, f forge.Forge, localCfg *config.C
 	}
 
 	order := PlanBatch(cands)
-	out := BatchResult{DryRun: opts.DryRun}
+	out = BatchResult{DryRun: opts.DryRun}
 	appendUnplanned := func() {
 		for _, c := range cands {
 			if c.Action == ActionRefuse {
@@ -248,6 +258,9 @@ func inspectBatchPR(ctx context.Context, g repo.Git, f forge.Forge, cfg *config.
 		res.DryRun = opts.DryRun
 		res.PR = n
 		res.Action = ActionRefuse
+		if res.ExitKind == "" {
+			res.ExitKind = exitkind.InfraError
+		}
 		cand := BatchCandidate{PR: n, BaseRefName: pr.BaseRefName, HeadRefName: pr.HeadRefName, Action: ActionRefuse}
 		return BatchEntry{Result: res, Status: BatchRefused, Error: errMsg}, cand, nil
 	}
@@ -316,9 +329,48 @@ func batchEntry(planned BatchEntry, res Result, err error) BatchEntry {
 
 func skipped(planned BatchEntry, reason string) BatchEntry {
 	return BatchEntry{
-		Result: Result{PR: planned.PR, Action: planned.Action, HeadSHA: planned.HeadSHA, URL: planned.URL, Reason: reason},
+		Result: Result{
+			ExitKind: exitkind.Refused,
+			PR:       planned.PR,
+			Action:   planned.Action,
+			HeadSHA:  planned.HeadSHA,
+			URL:      planned.URL,
+			Reason:   reason,
+		},
 		Status: BatchSkipped,
 	}
+}
+
+func entryExitKind(e BatchEntry) exitkind.Kind {
+	if e.ExitKind != "" {
+		return e.ExitKind
+	}
+	switch e.Status {
+	case BatchLanded:
+		return exitkind.Pass
+	case BatchRefused, BatchSkipped:
+		return exitkind.Refused
+	case BatchConflict, BatchFailed:
+		return exitkind.StepFailed
+	default:
+		return exitkind.InfraError
+	}
+}
+
+func batchExitKind(entries []BatchEntry, err error) exitkind.Kind {
+	kinds := make([]exitkind.Kind, 0, len(entries)+1)
+	if err != nil {
+		var te *lock.TimeoutError
+		if errors.As(err, &te) {
+			kinds = append(kinds, exitkind.LockTimeout)
+		} else {
+			kinds = append(kinds, exitkind.InfraError)
+		}
+	}
+	for _, e := range entries {
+		kinds = append(kinds, entryExitKind(e))
+	}
+	return exitkind.Worst(kinds...)
 }
 
 func acquireBatchLock(ctx context.Context, g repo.Git, cfg *config.Config, opts BatchOptions) (*lock.Lease, error) {
