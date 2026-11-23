@@ -912,3 +912,24 @@ func TestPrePushMixedQuaiAndBranchRefsGetsFullCheck(t *testing.T) {
 		t.Fatalf("require_cached = %+v, want the branch checked", res.RequireCached)
 	}
 }
+
+func TestPrePushCurrentHookNothingToPush(t *testing.T) {
+	ctx := context.Background()
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: nil, RefsProvided: true, RefsFromStdin: true, Stdout: &out, Stderr: &errOut})
+	if err != nil || !res.OK {
+		t.Fatalf("an up-to-date push must pass: res=%+v err=%v", res, err)
+	}
+	if res.Skipped != "nothing to push" || len(res.Steps) != 0 || len(res.RequireCached) != 0 {
+		t.Fatalf("expected nothing to push, got %+v", res)
+	}
+	if res.Warning != "" {
+		t.Fatalf("an up-to-date push must be quiet, got %q", res.Warning)
+	}
+}

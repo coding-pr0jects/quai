@@ -23,10 +23,10 @@ if ! command -v quai >/dev/null 2>&1; then
   echo "quai hooks pre-push: quai binary not found on PATH" >&2
   exit 1
 fi
-exec quai hooks pre-push
+exec quai hooks pre-push --refs-from-stdin
 `
 
-const ChainSnippet = `if command -v quai >/dev/null 2>&1 && [ -f .quai.toml ]; then quai hooks pre-push || exit 1; fi`
+const ChainSnippet = `if command -v quai >/dev/null 2>&1 && [ -f .quai.toml ]; then quai hooks pre-push --refs-from-stdin || exit 1; fi`
 
 type InstallResult struct {
 	Installed bool   `json:"installed"`
@@ -101,9 +101,12 @@ func Uninstall(ctx context.Context, g repo.Git) (string, error) {
 type Options struct {
 	Refs         []PushRef
 	RefsProvided bool
-	JSON         bool
-	Stdout       io.Writer
-	Stderr       io.Writer
+	// RefsFromStdin says the managed hook invoked us, so an empty ref list means git had
+	// nothing to push rather than a hook that dropped the list.
+	RefsFromStdin bool
+	JSON          bool
+	Stdout        io.Writer
+	Stderr        io.Writer
 }
 
 type Result struct {
@@ -130,6 +133,10 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 		return res, nil
 	}
 
+	if opts.RefsProvided && len(opts.Refs) == 0 && opts.RefsFromStdin {
+		res.Skipped = "nothing to push"
+		return res, nil
+	}
 	var warnings []string
 	// Without a ref list the hook cannot know what is being pushed, so HEAD is shown for
 	// information only and no attestation is pushed from here (that push is what used to nest).

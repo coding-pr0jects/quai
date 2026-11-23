@@ -870,6 +870,7 @@ func runHooks(ctx context.Context, cwd string, args []string, stdin io.Reader, s
 	fs := flag.NewFlagSet("hooks", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	jsonOut := fs.Bool("json", false, "output JSON")
+	refsFromStdin := fs.Bool("refs-from-stdin", false, "the managed hook passes git's ref list on stdin")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -921,11 +922,12 @@ func runHooks(ctx context.Context, cwd string, args []string, stdin io.Reader, s
 			return 2
 		}
 		res, err := hooks.RunPrePush(ctx, g, cfg, hooks.Options{
-			Refs:         refs,
-			RefsProvided: provided,
-			JSON:         *jsonOut,
-			Stdout:       stdout,
-			Stderr:       stderr,
+			Refs:          refs,
+			RefsProvided:  provided,
+			RefsFromStdin: *refsFromStdin,
+			JSON:          *jsonOut,
+			Stdout:        stdout,
+			Stderr:        stderr,
 		})
 		if *jsonOut {
 			writeJSON(stdout, res)
