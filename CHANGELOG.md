@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-23
+
 ### Added
 - `[hooks.pre_push].require_cached` and `on_missing` (#21): `quai hooks pre-push` checks the local receipt cache for each pushed `refs/heads/*` commit without running the step or taking a slot (local part under 100 ms), treats steps whose `inputs` no changed file matches as satisfied (including an empty diff), auto-pushes attestation refs the remote lacks (one remote round trip, so a network remote can exceed 100 ms), and warns or refuses according to `on_missing`. It validates the SHAs git reports, passes `--end-of-options` to the git calls it adds, treats a no-ref invocation as an unknown pushed ref (warning under `warn`, refusing under `refuse`, never pushing attestations from it and disabling the step-level `[attest].auto_push` for that run), while only the managed hook passes `--refs-from-stdin` so an up-to-date push is a quiet no-op; its own `refs/quai/*` pushes return from the hook at once, so no hook path can nest. `QUAI_ALLOW_UNVERIFIED_PUSH=1` and `quai restack --push` downgrade a refusal to an auditable warning while still running `[hooks.pre_push].steps`.
 - `AGENTS.md` (imported by `CLAUDE.md`) and `GLOSSARY.md` for contributors and coding agents.
