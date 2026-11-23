@@ -122,10 +122,10 @@ type Result struct {
 func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (Result, error) {
 	res := Result{Result: verify.Result{OK: true, Clean: true}}
 
-	if opts.RefsProvided && IsAttestationPush(opts.Refs) {
-		res.Skipped = "attestation push"
+	if opts.RefsProvided && IsQuaiRefPush(opts.Refs) {
+		res.Skipped = "quai ref push"
 		if !opts.JSON && opts.Stdout != nil {
-			fmt.Fprintf(opts.Stdout, "skipped pre-push checks: attestation push (%s*)\n", attestationRefPrefix)
+			fmt.Fprintf(opts.Stdout, "skipped pre-push checks: quai ref push (%s*)\n", quaiRefPrefix)
 		}
 		return res, nil
 	}
@@ -146,6 +146,7 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 			Sign:           doSign,
 			BestEffortSign: bestEffort,
 			Push:           doPush,
+			UnsetEnv:       []string{EnvAllowUnverifiedPush, EnvPrePushActive},
 			JSON:           opts.JSON,
 			Stdout:         opts.Stdout,
 			Stderr:         opts.Stderr,

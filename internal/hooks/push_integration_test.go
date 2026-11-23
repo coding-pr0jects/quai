@@ -246,7 +246,7 @@ func TestPrePushIgnoresTagsDeletionsAndAttestationPushes(t *testing.T) {
 	if err != nil || !res.OK {
 		t.Fatalf("attestation-only push must pass: res=%+v err=%v", res, err)
 	}
-	if res.Skipped != "attestation push" || len(res.Steps) != 0 {
+	if res.Skipped != "quai ref push" || len(res.Steps) != 0 {
 		t.Fatalf("attestation-only push must skip steps, got %+v", res)
 	}
 }
@@ -741,5 +741,74 @@ func TestPrePushUnknownRefRefusesWithCachedHead(t *testing.T) {
 	}
 	if res.RequireCached[0].Status != "cached" {
 		t.Fatalf("expected the HEAD check to be reported, got %+v", res.RequireCached)
+	}
+}
+
+func TestPrePushSkipsVerdictPush(t *testing.T) {
+	ctx := context.Background()
+	pr := initPushRepo(t, requireCachedTOML+"on_missing = \"refuse\"\n")
+	cfg, err := config.Load(pr.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := pr.commit(t, "app/main.txt", "v2\n", "feat: app change")
+	refs, err := ParsePushRefs(strings.NewReader(
+		"refs/quai/verdicts/abc " + head + " refs/quai/verdicts/abc " + zeroSHA + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: refs, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	if err != nil || !res.OK {
+		t.Fatalf("a verdict push must not be gated: res=%+v err=%v", res, err)
+	}
+	if res.Skipped != "quai ref push" || len(res.Steps) != 0 || len(res.RequireCached) != 0 {
+		t.Fatalf("a verdict push must skip the hook, got %+v", res)
+	}
+	if !strings.Contains(out.String(), "quai ref push (refs/quai/*)") {
+		t.Fatalf("expected the quai ref notice, got %q", out.String())
+	}
+}
+
+func TestPrePushStepsDoNotSeeHookEnv(t *testing.T) {
+	ctx := context.Background()
+	marker := filepath.Join(t.TempDir(), "env.txt")
+	pr := initPushRepo(t, `
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "printf '%s:%s' \"${QUAI_ALLOW_UNVERIFIED_PUSH:-unset}\" \"${QUAI_PREPUSH_ACTIVE:-unset}\" > `+marker+`"
+hook = "pre-push"
+
+[[steps]]
+name = "verify"
+run = "true"
+inputs = ["app/**"]
+
+[hooks.pre_push]
+require_cached = ["verify"]
+on_missing = "warn"
+`)
+	cfg, err := config.Load(pr.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := pr.commit(t, "app/main.txt", "v2\n", "feat: app change")
+	t.Setenv(EnvAllowUnverifiedPush, "1")
+	t.Setenv(EnvPrePushActive, "1")
+
+	var out, errOut bytes.Buffer
+	if _, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: pr.pushRef(t, head), RefsProvided: true, Stdout: &out, Stderr: &errOut}); err != nil {
+		t.Fatalf("RunPrePush: %v", err)
+	}
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read step env: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != "unset:unset" {
+		t.Fatalf("step saw hook env %q, want unset:unset", got)
 	}
 }

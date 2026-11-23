@@ -89,15 +89,21 @@ func TestBranchTargetsFiltersNonBranchUpdates(t *testing.T) {
 	}
 }
 
-func TestIsAttestationPush(t *testing.T) {
-	if IsAttestationPush(nil) {
-		t.Fatal("empty refs must not count as an attestation push")
+func TestIsQuaiRefPush(t *testing.T) {
+	if IsQuaiRefPush(nil) {
+		t.Fatal("empty refs must not count as a quai ref push")
 	}
-	if !IsAttestationPush([]PushRef{{RemoteRef: "refs/quai/records/a"}, {RemoteRef: "refs/quai/records/b"}}) {
-		t.Fatal("all-attestation refs must count as an attestation push")
+	if !IsQuaiRefPush([]PushRef{{RemoteRef: "refs/quai/records/a"}, {RemoteRef: "refs/quai/records/b"}}) {
+		t.Fatal("all refs/quai/* refs must count as a quai ref push")
 	}
-	if IsAttestationPush([]PushRef{{RemoteRef: "refs/quai/records/a"}, {RemoteRef: "refs/heads/main"}}) {
-		t.Fatal("a branch ref must disqualify the attestation-only shortcut")
+	if !IsQuaiRefPush([]PushRef{{RemoteRef: "refs/quai/verdicts/abc"}}) {
+		t.Fatal("a verdict push must count as a quai ref push")
+	}
+	if !IsQuaiRefPush([]PushRef{{RemoteRef: "refs/quai/records/a"}, {RemoteRef: "refs/quai/verdicts/abc"}}) {
+		t.Fatal("a mixed records/verdicts push must count as a quai ref push")
+	}
+	if IsQuaiRefPush([]PushRef{{RemoteRef: "refs/quai/records/a"}, {RemoteRef: "refs/heads/main"}}) {
+		t.Fatal("a branch ref must disqualify the quai-only shortcut")
 	}
 }
 

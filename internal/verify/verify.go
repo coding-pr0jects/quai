@@ -36,6 +36,7 @@ type Options struct {
 	SigningKey     string
 	Push           bool
 	Remote         string
+	UnsetEnv       []string
 	JSON           bool
 	Stdout         io.Writer
 	Stderr         io.Writer
@@ -469,6 +470,7 @@ func runOneStep(
 		Capacity:         capacity,
 		MinFreeMemBytes:  minFreeMem,
 		MinFreeDiskBytes: minFreeDisk,
+		UnsetEnv:         opts.UnsetEnv,
 		LockWait:         cfg.Land.LockWaitDur,
 		Owner:            owner,
 		OnStart:          opts.OnStepStart,

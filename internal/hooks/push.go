@@ -20,7 +20,12 @@ const (
 	// EnvAllowUnverifiedPush downgrades [hooks.pre_push].on_missing = "refuse" to a warning.
 	EnvAllowUnverifiedPush = "QUAI_ALLOW_UNVERIFIED_PUSH"
 
+	// EnvPrePushActive was set by earlier builds on their own pushes; it is stripped from
+	// hook step children so a stale value never reaches a step command.
+	EnvPrePushActive = "QUAI_PREPUSH_ACTIVE"
+
 	branchRefPrefix      = "refs/heads/"
+	quaiRefPrefix        = "refs/quai/"
 	attestationRefPrefix = "refs/quai/records/"
 	zeroSHA              = "0000000000000000000000000000000000000000"
 )
@@ -80,7 +85,7 @@ func ReadPushRefs(stdin io.Reader) (refs []PushRef, provided bool, err error) {
 }
 
 // BranchTargets returns the branch creations and updates among refs. Tag pushes, branch
-// deletions, and attestation pushes map to nothing.
+// deletions, and quai ref pushes map to nothing.
 func BranchTargets(refs []PushRef) []BranchTarget {
 	var out []BranchTarget
 	for _, r := range refs {
@@ -92,13 +97,13 @@ func BranchTargets(refs []PushRef) []BranchTarget {
 	return out
 }
 
-// IsAttestationPush reports whether every ref updates the attestation namespace, which never needs the hook.
-func IsAttestationPush(refs []PushRef) bool {
+// IsQuaiRefPush reports whether every ref updates quai's own namespace, which never needs the hook.
+func IsQuaiRefPush(refs []PushRef) bool {
 	if len(refs) == 0 {
 		return false
 	}
 	for _, r := range refs {
-		if !strings.HasPrefix(r.RemoteRef, attestationRefPrefix) {
+		if !strings.HasPrefix(r.RemoteRef, quaiRefPrefix) {
 			return false
 		}
 	}
