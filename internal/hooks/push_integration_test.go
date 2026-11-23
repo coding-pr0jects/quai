@@ -933,3 +933,78 @@ func TestPrePushCurrentHookNothingToPush(t *testing.T) {
 		t.Fatalf("an up-to-date push must be quiet, got %q", res.Warning)
 	}
 }
+
+func TestPrePushNoRefsDisablesStepAttestationPush(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "origin.git")
+	if out, err := exec.Command("git", "init", "--bare", "-q", "-b", "main", origin).CombinedOutput(); err != nil {
+		t.Fatalf("init origin: %v\n%s", err, out)
+	}
+	keyPath := filepath.Join(tmp, "signer")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyPath).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v\n%s", err, out)
+	}
+	pr := initPushRepo(t, `
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+hook = "pre-push"
+
+[[steps]]
+name = "verify"
+run = "true"
+inputs = ["app/**"]
+
+[hooks.pre_push]
+require_cached = ["verify"]
+on_missing = "refuse"
+
+[attest]
+signing_key = "`+keyPath+`"
+auto_sign = true
+auto_push = true
+remote = "origin"
+`)
+	gitCmd := exec.Command("git", "remote", "add", "origin", origin)
+	gitCmd.Dir = pr.dir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("add remote: %v\n%s", err, out)
+	}
+	cfg, err := config.Load(pr.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr.commit(t, "app/main.txt", "v2\n", "feat: app change")
+	var seed bytes.Buffer
+	if vres, verr := verify.Run(ctx, pr.git, cfg, verify.Options{StepNames: []string{"verify"}, Stdout: &seed, Stderr: &seed}); verr != nil || !vres.OK {
+		t.Fatalf("seed verify failed: %+v err=%v", vres, verr)
+	}
+	// A cache hit would re-sign and re-push the attestation if a no-ref run kept auto_push.
+	logPath := filepath.Join(tmp, "hook-runs.log")
+	hookPath := filepath.Join(pr.dir, ".git", "hooks", "pre-push")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho run >> "+logPath+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	res, err := RunPrePush(ctx, pr.git, cfg, Options{Refs: nil, RefsProvided: true, Stdout: &out, Stderr: &errOut})
+	if err != nil {
+		t.Fatalf("RunPrePush: %v", err)
+	}
+	if res.OK || len(res.AttestationsPushed) != 0 {
+		t.Fatalf("a no-ref run must refuse without pushing: %+v", res)
+	}
+	if _, err := os.Stat(logPath); err == nil {
+		t.Fatal("a step pushed an attestation during a no-ref run")
+	}
+	if refs, err := pr.git.ListRemoteRefs(ctx, "origin", []string{attestationRefPrefix + "*"}); err != nil || len(refs) != 0 {
+		t.Fatalf("remote refs = %v, want none (err=%v)", refs, err)
+	}
+}

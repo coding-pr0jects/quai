@@ -196,3 +196,12 @@ func TestReadPushRefsEmptyPipeIsProvided(t *testing.T) {
 		t.Fatalf("empty pipe: refs=%v provided=%v err=%v, want provided with no refs", refs, provided, err)
 	}
 }
+
+func TestOnlyTheManagedHookScriptTrustsStdin(t *testing.T) {
+	if !strings.Contains(hookScript, "--refs-from-stdin") {
+		t.Fatal("the managed hook script must declare that it passes stdin")
+	}
+	if strings.Contains(ChainSnippet, "--refs-from-stdin") {
+		t.Fatalf("ChainSnippet must not trust stdin: %s", ChainSnippet)
+	}
+}

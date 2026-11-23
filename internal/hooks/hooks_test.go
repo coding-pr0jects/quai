@@ -158,8 +158,19 @@ auto_push = true
 		t.Fatalf("expected auto_push to imply auto_sign: %+v", cfgWithKey.Attest)
 	}
 
+	headCmd := exec.Command("git", "rev-parse", "HEAD")
+	headCmd.Dir = work
+	headOut, err := headCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v\n%s", err, headOut)
+	}
+	refs, err := ParsePushRefs(strings.NewReader("refs/heads/main " + strings.TrimSpace(string(headOut)) + " refs/heads/main " + zeroSHA + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	var buf bytes.Buffer
-	res, err := RunPrePush(ctx, g, cfgWithKey, Options{Stdout: &buf, Stderr: &buf})
+	res, err := RunPrePush(ctx, g, cfgWithKey, Options{Refs: refs, RefsProvided: true, Stdout: &buf, Stderr: &buf})
 	if err != nil || !res.OK || !res.Pushed || len(res.Attestations) != 1 {
 		t.Fatalf("expected pre-push auto_sign + auto_push to succeed, got res=%+v err=%v", res, err)
 	}
@@ -186,7 +197,7 @@ auto_sign = true
 		t.Fatal(err)
 	}
 	var outBuf, errBuf bytes.Buffer
-	res2, err := RunPrePush(ctx, g, cfgNoKey, Options{Stdout: &outBuf, Stderr: &errBuf})
+	res2, err := RunPrePush(ctx, g, cfgNoKey, Options{Refs: refs, RefsProvided: true, Stdout: &outBuf, Stderr: &errBuf})
 	if err != nil || !res2.OK {
 		t.Fatalf("expected best-effort auto_sign without key to still pass, got res=%+v err=%v", res2, err)
 	}

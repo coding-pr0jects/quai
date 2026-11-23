@@ -26,7 +26,7 @@ fi
 exec quai hooks pre-push --refs-from-stdin
 `
 
-const ChainSnippet = `if command -v quai >/dev/null 2>&1 && [ -f .quai.toml ]; then quai hooks pre-push --refs-from-stdin || exit 1; fi`
+const ChainSnippet = `if command -v quai >/dev/null 2>&1 && [ -f .quai.toml ]; then quai hooks pre-push || exit 1; fi`
 
 type InstallResult struct {
 	Installed bool   `json:"installed"`
@@ -150,6 +150,11 @@ func RunPrePush(ctx context.Context, g repo.Git, cfg *config.Config, opts Option
 			names[i] = s.Name
 		}
 		doSign, doPush, bestEffort := verify.ResolveAutoAttest(cfg, false, false, false, false)
+		if noRefs {
+			// A no-ref run never knows what is being pushed, so a step must not push an
+			// attestation from here: that push is the one that used to nest on old hooks.
+			doPush = false
+		}
 		verifyRes, err := verify.Run(ctx, g, cfg, verify.Options{
 			StepNames:      names,
 			Sign:           doSign,
