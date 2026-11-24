@@ -116,6 +116,8 @@ pool_tiers = ["full-live"]
 
 `depends_on = ["fast"]` makes `fast` a prerequisite of the step. Every command that selects steps (`quai verify`, `quai verify --step`, `quai hooks pre-push`, `quai attest check --step`) adds the transitive prerequisites and puts each one before the steps that need it. A step runs once per invocation even when several steps depend on it. When a prerequisite fails or mutates the tree, `quai verify` stops before the dependent step runs, so the dependent step gets no receipt and no attestation. `quai` rejects an unknown step name, a name listed twice, and a cycle.
 
+A step that runs keeps the slots it held for the next step of the same invocation that routes to the same pool with as many slots or fewer, so a chain such as `unit` then `e2e` on one `heavy` pool waits in the queue once. Human output prints `pool <step>: kept <pool> from the previous step`. The slots go back to the pool before a step that runs without that pool, and when the invocation ends, fails, or is interrupted.
+
 Each step runs with `QUAI_PASSED_STEPS` set to the comma-separated names of the steps that passed or were cached earlier in the same `quai verify` invocation, in run order (empty for the first step). A step script can skip its own call to a prerequisite when the name is listed:
 
 ```sh
