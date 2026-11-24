@@ -592,8 +592,8 @@ Verify repository and host readiness: `git` >= 2.38, `.quai.toml`, free disk, `p
 Attestation readiness is checked end to end without mutating anything:
 
 - `attest-config`: the resolved `[attest]` remote, `max_age`, and signer count.
-- `attest-signing-key`: `QUAI_SIGNING_KEY`, `[attest].signing_key`, or `git config user.signingkey`, and that the path is a readable private key. The key is checked when `.quai.toml` or the environment enables attestation signing, so a `user.signingkey` set only for commit signing is not flagged.
-- `attest-agent-key`: whether `ssh-agent` is running and whether the signing key's `SHA256:` fingerprint is loaded (`ssh-add -l`).
+- `attest-signing-key`: `QUAI_SIGNING_KEY`, `[attest].signing_key`, or `git config user.signingkey`, and that the path exists. It may name a private key, or a public key (`.pub`) whose private half is loaded in `ssh-agent`, as `ssh-keygen -Y sign` and git's `user.signingkey` accept. The key is checked when `.quai.toml` or the environment enables attestation signing, so a `user.signingkey` set only for commit signing is not flagged.
+- `attest-agent-key`: whether `ssh-agent` is running and whether the signing key's `SHA256:` fingerprint is loaded (`ssh-add -l`). A key missing from the agent warns for a private key and fails for a public key, which cannot sign without it; the fix names the private key to `ssh-add`.
 - `attest-allowed-signers`: the resolved `allowed_signers` file exists.
 - `attest-remote`: `git ls-remote` proves the attestation remote is reachable for fetch and push; a failure is blocking when `[attest].auto_push` is enabled.
 

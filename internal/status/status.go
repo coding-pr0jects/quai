@@ -325,14 +325,15 @@ func Doctor(ctx context.Context, g repo.Git) DoctorReport {
 					st = "fail"
 				}
 				add(CheckItem{Name: "attest-signing-key", Status: st, Message: err.Error(), Fix: "Set QUAI_SIGNING_KEY or [attest].signing_key to the SSH private key"})
-			case strings.HasSuffix(keyPath, ".pub"):
-				add(CheckItem{Name: "attest-signing-key", Status: "fail", Message: fmt.Sprintf("signing key %s is a public key", keyPath), Fix: "Point QUAI_SIGNING_KEY, [attest].signing_key, or git user.signingkey at the matching private key"})
 			default:
 				if _, statErr := os.Stat(keyPath); statErr != nil {
 					add(CheckItem{Name: "attest-signing-key", Status: "fail", Message: fmt.Sprintf("signing key not found: %s", keyPath), Fix: "Check [attest].signing_key, QUAI_SIGNING_KEY, or git user.signingkey"})
+				} else if strings.HasSuffix(keyPath, ".pub") {
+					add(CheckItem{Name: "attest-signing-key", Status: "ok", Message: keyPath + " (public key: ssh-keygen signs with its private half in ssh-agent)"})
+					add(checkAgentKey(ctx, keyPath, true))
 				} else {
 					add(CheckItem{Name: "attest-signing-key", Status: "ok", Message: keyPath})
-					add(checkAgentKey(ctx, keyPath))
+					add(checkAgentKey(ctx, keyPath, false))
 				}
 			}
 		}
@@ -436,8 +437,15 @@ func checkPrePushHook(ctx context.Context, g repo.Git, topLevel string, requireC
 	return CheckItem{Name: "hooks", Status: "warn", Message: fmt.Sprintf("%s exists but does not call quai hooks pre-push", hookPath), Fix: "Chain: " + hooks.ChainSnippet}
 }
 
-func checkAgentKey(ctx context.Context, keyPath string) CheckItem {
+// checkAgentKey reports whether ssh-agent holds the signing key. A public key path signs only
+// through the agent (ssh-keygen(1), -Y sign), so a missing agent identity fails it instead of warning.
+func checkAgentKey(ctx context.Context, keyPath string, agentRequired bool) CheckItem {
 	name := "attest-agent-key"
+	missing := "warn"
+	if agentRequired {
+		missing = "fail"
+	}
+	addable := shellQuote(strings.TrimSuffix(keyPath, ".pub"))
 	if _, err := exec.LookPath("ssh-add"); err != nil {
 		return CheckItem{Name: name, Status: "warn", Message: "ssh-add not found on PATH; cannot confirm the signing key is loaded in ssh-agent", Fix: "Install OpenSSH client tools"}
 	}
@@ -453,11 +461,11 @@ func checkAgentKey(ctx context.Context, keyPath string) CheckItem {
 		case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
 			return CheckItem{Name: name, Status: "warn", Message: "ssh-add -l timed out; cannot confirm the signing key is loaded in ssh-agent"}
 		case res.ExitCode == 1:
-			return CheckItem{Name: name, Status: "warn", Message: "ssh-agent has no loaded identities", Fix: "ssh-add " + shellQuote(keyPath)}
+			return CheckItem{Name: name, Status: missing, Message: "ssh-agent has no loaded identities", Fix: "ssh-add " + addable}
 		case res.ExitCode == 2:
-			return CheckItem{Name: name, Status: "warn", Message: "no ssh-agent is running", Fix: `eval "$(ssh-agent -s)" && ssh-add ` + shellQuote(keyPath)}
+			return CheckItem{Name: name, Status: missing, Message: "no ssh-agent is running", Fix: `eval "$(ssh-agent -s)" && ssh-add ` + addable}
 		}
-		return CheckItem{Name: name, Status: "warn", Message: fmt.Sprintf("ssh-add -l failed: %v", err), Fix: "ssh-add " + shellQuote(keyPath)}
+		return CheckItem{Name: name, Status: "warn", Message: fmt.Sprintf("ssh-add -l failed: %v", err), Fix: "ssh-add " + addable}
 	}
 
 	fingerprint := sshKeyFingerprint(ctx, keyPath)
@@ -471,7 +479,7 @@ func checkAgentKey(ctx context.Context, keyPath string) CheckItem {
 		return CheckItem{Name: name, Status: "ok", Message: fmt.Sprintf("signing key %s is loaded in ssh-agent", fingerprint)}
 	}
 	if fingerprint != "" {
-		return CheckItem{Name: name, Status: "warn", Message: fmt.Sprintf("signing key %s is not loaded in ssh-agent (%d identity(ies) loaded)", fingerprint, identities), Fix: "ssh-add " + shellQuote(keyPath)}
+		return CheckItem{Name: name, Status: missing, Message: fmt.Sprintf("signing key %s is not loaded in ssh-agent (%d identity(ies) loaded)", fingerprint, identities), Fix: "ssh-add " + addable}
 	}
 	return CheckItem{Name: name, Status: "ok", Message: fmt.Sprintf("ssh-agent holds %d identity(ies)", identities)}
 }

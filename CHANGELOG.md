@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 - `quai verify` keeps a step's pool slots for the next step of the same invocation that routes to the same pool, instead of releasing them and queueing again: a `unit` then `e2e` chain on one `heavy` pool waits once. The slots are released before a step without that pool and when the run ends, fails, or is interrupted.
 
+### Fixed
+- `quai doctor` no longer fails `attest-signing-key` for a public key path (`~/.ssh/id_ed25519.pub`). `ssh-keygen -Y sign` signs with it when the private half is in `ssh-agent`, so `attest-agent-key` now fails instead when the agent lacks that key, and its fix names the private key.
+
 ## [0.4.0] - 2026-11-23
 
 ### Added

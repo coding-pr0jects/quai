@@ -386,7 +386,7 @@ func TestCheckAgentKeyWithoutAgent(t *testing.T) {
 		t.Skip("ssh-add not installed")
 	}
 	t.Setenv("SSH_AUTH_SOCK", filepath.Join(t.TempDir(), "missing-agent.sock"))
-	item := checkAgentKey(context.Background(), "/nonexistent/signing-key")
+	item := checkAgentKey(context.Background(), "/nonexistent/signing-key", false)
 	if item.Name != "attest-agent-key" {
 		t.Fatalf("check name = %q", item.Name)
 	}
@@ -516,4 +516,115 @@ func diskCheckMessage(t *testing.T, doc DoctorReport) string {
 	}
 	t.Fatalf("no disk check in %+v", doc.Checks)
 	return ""
+}
+
+func doctorWithSigningKey(t *testing.T, signingKey string) DoctorReport {
+	t.Helper()
+	isolateGitConfig(t)
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "user.name", "t")
+	runGit("config", "user.email", "t@example.com")
+	if err := os.WriteFile(filepath.Join(dir, ".quai.toml"), []byte(`
+version = 1
+base = "main"
+
+[[steps]]
+name = "fast"
+run = "true"
+
+[attest]
+signing_key = "`+signingKey+`"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "-A")
+	runGit("commit", "-qm", "init")
+	return Doctor(context.Background(), repo.NewExecGit(dir))
+}
+
+func newSigningKey(t *testing.T) string {
+	t.Helper()
+	keyPath := filepath.Join(t.TempDir(), "signer")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", keyPath).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v\n%s", err, string(out))
+	}
+	return keyPath
+}
+
+func startAgentHolding(t *testing.T, keyPath string) {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "agent.sock")
+	agent := exec.Command("ssh-agent", "-D", "-a", sock)
+	if err := agent.Start(); err != nil {
+		t.Skipf("ssh-agent unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = agent.Process.Kill()
+		_ = agent.Wait()
+	})
+	t.Setenv("SSH_AUTH_SOCK", sock)
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if out, err := exec.Command("ssh-add", keyPath).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-add: %v\n%s", err, string(out))
+	}
+}
+
+func TestDoctorAcceptsAPublicSigningKeyTheAgentHolds(t *testing.T) {
+	if _, err := exec.LookPath("ssh-agent"); err != nil {
+		t.Skip("ssh-agent not installed")
+	}
+	keyPath := newSigningKey(t)
+	startAgentHolding(t, keyPath)
+	payload := filepath.Join(t.TempDir(), "payload")
+	if err := os.WriteFile(payload, []byte("statement"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("ssh-keygen", "-Y", "sign", "-f", keyPath+".pub", "-n", "quai", payload).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen should sign with a public key whose private half is in the agent: %v\n%s", err, string(out))
+	}
+
+	rep := doctorWithSigningKey(t, keyPath+".pub")
+	for _, name := range []string{"attest-signing-key", "attest-agent-key"} {
+		item := findCheck(rep, name)
+		if item == nil || item.Status != "ok" {
+			t.Fatalf("%s should be ok for a public key the agent holds: %+v", name, item)
+		}
+	}
+}
+
+func TestDoctorFailsAPublicSigningKeyTheAgentLacks(t *testing.T) {
+	if _, err := exec.LookPath("ssh-add"); err != nil {
+		t.Skip("ssh-add not installed")
+	}
+	keyPath := newSigningKey(t)
+	t.Setenv("SSH_AUTH_SOCK", filepath.Join(t.TempDir(), "missing-agent.sock"))
+
+	rep := doctorWithSigningKey(t, keyPath+".pub")
+	if item := findCheck(rep, "attest-signing-key"); item == nil || item.Status != "ok" {
+		t.Fatalf("the public key file exists, so attest-signing-key should be ok: %+v", item)
+	}
+	agent := findCheck(rep, "attest-agent-key")
+	if agent == nil || agent.Status != "fail" {
+		t.Fatalf("a public key signs only through the agent, so attest-agent-key should fail: %+v", agent)
+	}
+	if !strings.HasSuffix(agent.Fix, "ssh-add "+keyPath) {
+		t.Fatalf("the fix should add the private key, not the .pub file: %q", agent.Fix)
+	}
+	if rep.OK {
+		t.Fatal("doctor reported healthy while the agent lacks the only way to sign")
+	}
 }
