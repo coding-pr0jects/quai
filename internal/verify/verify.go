@@ -195,11 +195,13 @@ func Run(ctx context.Context, g repo.Git, cfg *config.Config, opts Options) (res
 	}
 
 	var passed []string
+	var slots heldSlots
+	defer slots.release()
 	for _, step := range selected {
 		route := routeForStep(step, routing)
 		stepRes, receiptWritten, attRef, stepErr := runOneStep(
 			ctx, g, cfg, store, locksRoot, topLevel,
-			step, route, clean, headSHA, treeSHA, baseSHA,
+			step, route, &slots, clean, headSHA, treeSHA, baseSHA,
 			signingKey, principal, passed, opts,
 		)
 		if receiptWritten {
@@ -336,6 +338,23 @@ func routeForStep(step config.Step, rc routingInput) poolRoute {
 	return route
 }
 
+type heldSlots struct {
+	lease *lock.SlotLease
+	pool  string
+	count int
+}
+
+func (h *heldSlots) covers(route poolRoute) bool {
+	return h.lease != nil && h.pool == route.pool && h.count >= route.slots
+}
+
+func (h *heldSlots) release() {
+	if h.lease != nil {
+		_ = h.lease.Release()
+	}
+	*h = heldSlots{}
+}
+
 func (r poolRoute) annotate(sr *StepResult, held bool) {
 	if !r.conditional {
 		return
@@ -364,6 +383,7 @@ func runOneStep(
 	locksRoot, topLevel string,
 	step config.Step,
 	route poolRoute,
+	slots *heldSlots,
 	clean bool,
 	headSHA, treeSHA, baseSHA string,
 	signingKey, principal string,
@@ -438,17 +458,6 @@ func runOneStep(
 		}
 	}
 
-	held := false
-	var onSlotAcquire func()
-	if route.conditional {
-		onSlotAcquire = func() {
-			held = true
-			if !opts.JSON && opts.Stdout != nil {
-				fmt.Fprintf(opts.Stdout, "pool    %s: acquired %s\n", step.Name, route.pool)
-			}
-		}
-	}
-
 	capacity := 0
 	var minFreeMem, minFreeDisk uint64
 	if route.pool != "" {
@@ -457,24 +466,54 @@ func runOneStep(
 		minFreeMem = sp.MinFreeMemBytes
 		minFreeDisk = sp.MinFreeDiskBytes
 	}
+	held := false
+	switch {
+	case route.pool == "" || route.slots == 0:
+		slots.release()
+	case slots.covers(route):
+		held = true
+		if !opts.JSON && opts.Stdout != nil {
+			fmt.Fprintf(opts.Stdout, "pool    %s: kept %s from the previous step\n", step.Name, route.pool)
+		}
+	default:
+		slots.release()
+		lease, err := lock.AcquireSlots(ctx, locksRoot, route.pool, route.slots, capacity, owner, lock.Options{
+			Wait:             cfg.Land.LockWaitDur,
+			PollInterval:     200 * time.Millisecond,
+			MinFreeMemBytes:  minFreeMem,
+			MinFreeDiskBytes: minFreeDisk,
+			DiskPath:         topLevel,
+			StatusWriter:     stderr,
+		})
+		if err != nil {
+			sr := StepResult{
+				Name:        step.Name,
+				Status:      "failed",
+				Fingerprint: fp,
+				DurationMS:  time.Since(started).Milliseconds(),
+				ExitKind:    stepExitKind(execrun.Result{ExitCode: 1}, err),
+				Error:       err.Error(),
+			}
+			route.annotate(&sr, false)
+			return sr, false, "", err
+		}
+		*slots = heldSlots{lease: lease, pool: route.pool, count: route.slots}
+		held = true
+		if route.conditional && !opts.JSON && opts.Stdout != nil {
+			fmt.Fprintf(opts.Stdout, "pool    %s: acquired %s\n", step.Name, route.pool)
+		}
+	}
+
 	runRes, runErr := execrun.Run(ctx, execrun.Request{
-		Dir:              topLevel,
-		ShellCmd:         expanded,
-		Env:              []string{PassedStepsEnv + "=" + strings.Join(passed, ",")},
-		Timeout:          step.Duration,
-		Stdout:           stdout,
-		Stderr:           stderr,
-		LocksRoot:        locksRoot,
-		Pool:             route.pool,
-		Slots:            route.slots,
-		Capacity:         capacity,
-		MinFreeMemBytes:  minFreeMem,
-		MinFreeDiskBytes: minFreeDisk,
-		UnsetEnv:         opts.UnsetEnv,
-		LockWait:         cfg.Land.LockWaitDur,
-		Owner:            owner,
-		OnStart:          opts.OnStepStart,
-		OnSlotAcquire:    onSlotAcquire,
+		Dir:      topLevel,
+		ShellCmd: expanded,
+		Env:      []string{PassedStepsEnv + "=" + strings.Join(passed, ",")},
+		Timeout:  step.Duration,
+		Stdout:   stdout,
+		Stderr:   stderr,
+		UnsetEnv: opts.UnsetEnv,
+		Owner:    owner,
+		OnStart:  opts.OnStepStart,
 	})
 	dur := time.Since(started).Milliseconds()
 	if runErr != nil || runRes.ExitCode != 0 {

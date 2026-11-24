@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -929,4 +930,117 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func queueBehindStepA(t *testing.T, ctx context.Context, g *repo.ExecGit, startedA, order string) <-chan error {
+	t.Helper()
+	commonDir, err := g.CommonDir(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		for {
+			if _, err := os.Stat(startedA); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		lease, err := lock.AcquireSlots(ctx, filepath.Join(commonDir, "quai", "locks"), "heavy", 1, 1,
+			lock.Owner{Command: "competitor"}, lock.Options{Wait: 10 * time.Second, PollInterval: 20 * time.Millisecond})
+		if err != nil {
+			done <- err
+			return
+		}
+		f, err := os.OpenFile(order, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, err = f.WriteString("competitor\n")
+			_ = f.Close()
+		}
+		_ = lease.Release()
+		done <- err
+	}()
+	return done
+}
+
+func TestVerifyKeepsTheSlotForTheNextStepOfTheSamePool(t *testing.T) {
+	ctx := context.Background()
+	_, g := setupRepo(t)
+	scratch := t.TempDir()
+	startedA := filepath.Join(scratch, "a-started")
+	order := filepath.Join(scratch, "order.log")
+	cfg, err := config.Parse([]byte(fmt.Sprintf(`
+version = 1
+[slots]
+heavy = 1
+[[steps]]
+name = "unit"
+run = "touch %[1]s && sleep 0.5"
+pool = "heavy"
+slots = 1
+[[steps]]
+name = "e2e"
+run = "echo e2e >> %[2]s"
+depends_on = ["unit"]
+pool = "heavy"
+slots = 1
+`, startedA, order)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	competitor := queueBehindStepA(t, ctx, g, startedA, order)
+
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
+	if err != nil || !res.OK {
+		t.Fatalf("both steps should pass: res=%+v err=%v\n%s", res, err, buf.String())
+	}
+	if err := <-competitor; err != nil {
+		t.Fatalf("the competitor should get the slot once the run ends: %v", err)
+	}
+	got, err := os.ReadFile(order)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "e2e\ncompetitor\n" {
+		t.Fatalf("e2e should run on the slot unit held, before the waiting competitor; order was %q", got)
+	}
+	if !strings.Contains(buf.String(), "pool    e2e: kept heavy from the previous step") {
+		t.Fatalf("human output should say the slot was kept, got %q", buf.String())
+	}
+}
+
+func TestVerifyReleasesTheSlotBeforeAStepWithoutThePool(t *testing.T) {
+	ctx := context.Background()
+	_, g := setupRepo(t)
+	scratch := t.TempDir()
+	startedA := filepath.Join(scratch, "a-started")
+	order := filepath.Join(scratch, "order.log")
+	cfg, err := config.Parse([]byte(fmt.Sprintf(`
+version = 1
+[slots]
+heavy = 1
+[[steps]]
+name = "unit"
+run = "touch %[1]s && sleep 0.3"
+pool = "heavy"
+slots = 1
+[[steps]]
+name = "report"
+run = "for i in $(seq 100); do grep -q competitor %[2]s 2>/dev/null && exit 0; sleep 0.05; done; exit 1"
+depends_on = ["unit"]
+`, startedA, order)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	competitor := queueBehindStepA(t, ctx, g, startedA, order)
+
+	var buf bytes.Buffer
+	res, err := Run(ctx, g, cfg, Options{Stdout: &buf, Stderr: &buf})
+	if err != nil || !res.OK {
+		t.Fatalf("the competitor should take the slot while report runs: res=%+v err=%v\n%s", res, err, buf.String())
+	}
+	if err := <-competitor; err != nil {
+		t.Fatal(err)
+	}
 }
