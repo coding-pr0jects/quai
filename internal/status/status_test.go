@@ -101,12 +101,12 @@ slots = 1
 		{Role: lock.RoleVerify, Command: "quai verify --step fast"},
 		{Role: lock.RoleLand, Priority: 10, Command: "quai land 99"},
 	} {
+		want := len(lock.InspectWaiters(queueDir, 0)) + 1
 		waiters.Add(1)
 		go func() {
 			defer waiters.Done()
 			_, _ = lock.AcquireSlots(waitCtx, locksRoot, "heavy", 1, 2, w, lock.Options{PollInterval: 10 * time.Millisecond})
 		}()
-		want := len(lock.InspectWaiters(queueDir, 0)) + 1
 		for deadline := time.Now().Add(5 * time.Second); len(lock.InspectWaiters(queueDir, 0)) < want; {
 			if time.Now().After(deadline) {
 				t.Fatalf("waiter %q never queued", w.Command)
