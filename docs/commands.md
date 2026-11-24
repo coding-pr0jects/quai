@@ -651,4 +651,4 @@ quai conflicts [--base <ref>] [--conflicts-only] [--json]
 
 ## `quai version`
 
-Print the binary version (`quai 0.4.0`).
+Print the binary version (`quai 0.4.1`).
